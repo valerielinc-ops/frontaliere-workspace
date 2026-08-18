@@ -392,21 +392,35 @@ grafo delle collisioni) e `frontaliere-articles#37` (una draft ferma da >48h
 prende `needs-human` e finisce nel digest giornaliero). Ma la regola resta la
 regola: la decisione si prende subito, con il check sopra.
 
-## Hook attivi nel repo del sito
+## Hook: sollevati nella root, perche' e' da li' che si apre la sessione
 
-`frontaliere-si-o-no/.claude/settings.json` registra hook che scattano quando si
-lavora *dentro* quella cartella — non dalla root `~/Projects/frontaliere`:
+Claude Code carica `.claude/settings.json` **dalla cartella in cui la sessione
+parte**, non dalle sottocartelle. Aprendo da `~/Projects/frontaliere`, quello di
+`frontaliere-si-o-no/` non viene letto: i suoi gate sarebbero stati muti, il che
+e' peggio che non averli — un guard che sembra un guard senza esserlo.
+
+Per questo la root li **ripete** in `.claude/settings.json`, con i path che
+puntano dentro il repo del sito (`$CLAUDE_PROJECT_DIR/frontaliere-si-o-no/...`):
 
 - **PreToolUse su Bash**: `scripts/ci/sibling-check-gate.mjs` e
   `scripts/ci/pr-body-check-gate.mjs`. Possono bloccare un comando; l'output e'
-  feedback, non un errore da aggirare.
-- **SessionStart**: pota i worktree mergiati, e lancia
-  `scripts/cloud-session-secrets.sh` — che in locale e' un **no-op** (esce
-  subito se `CLAUDE_CODE_REMOTE` non e' `true`). Serve alle sessioni cloud, dove
-  idrata gli stessi secret da `FIREBASE_SERVICE_ACCOUNT_JSON`. In locale i
-  secret arrivano da `bin/rc-env.sh`.
-- **env**: forza gia' gli `SKIP_*` dei collector lenti e
+  feedback, non un errore da aggirare. Verificato il 2026-08-18 che dalla root
+  si comportano come da dentro il repo: risolvono i propri path da
+  `import.meta.url`, agiscono solo su `gh pr create`, e sono fail-safe (qualunque
+  errore interno → exit 0, non bloccano). Un comando innocuo passa, un body senza
+  header viene bloccato con exit 2, un body corretto passa.
+- **SessionStart / SessionEnd**: potano i worktree mergiati e gli orfani.
+- **env**: gli `SKIP_*` dei collector lenti, `FAST_BUILD` e
   `NODE_OPTIONS=--max-old-space-size=12288`.
+
+Il gate del PR body vale per **entrambi** i repo, non solo per il sito: i due
+vogliono gli stessi header (vedi «Il body della PR»), quindi averlo attivo dalla
+root e' un guadagno anche sul corpus.
+
+**Se modifichi gli hook nel repo del sito, aggiornali anche qui**: sono due copie,
+e nessuno le confronta. E' il prezzo di poter aprire la sessione dalla root; il
+`cloud-session-secrets.sh` invece resta solo nel repo, perche' serve alle sessioni
+cloud che partono da li' e in locale e' comunque un no-op.
 
 ## Stato del mirror (aggiornato il 2026-08-05)
 
