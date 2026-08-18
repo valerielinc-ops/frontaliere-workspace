@@ -140,8 +140,21 @@ senza sapere esattamente cosa toccano, e la chiave non esce da
 In ogni shell dove servono i secret:
 
 ```bash
-source bin/rc-env.sh     # → 90 variabili su 109 parametri RC
+source bin/rc-env.sh     # → 92 variabili su 113 parametri RC (misurato 2026-08-18)
 ```
+
+`GOOGLE_APPLICATION_CREDENTIALS` **non** e' esportata nel profilo della shell,
+come invece era sul laptop vecchio (`.bash_profile`). Sta nell'`env` di
+`.claude/settings.json` della root, quindi vale nelle sessioni aperte qui e
+**non** negli altri progetti sotto `~/Projects`. E' deliberato: quella variabile
+punta a una chiave equivalente a un owner di produzione, e un export globale la
+rende attiva anche dove non c'entra niente. Per le shell manuali non serve
+comunque — `bin/rc-env.sh` mette lo stesso default da solo se la variabile non
+c'e'.
+
+(La shell dell'utente qui e' **zsh**, non bash: il `.bash_profile` del bundle di
+migrazione non verrebbe nemmeno letto. `gcloud` arriva gia' dal `brew shellenv`
+di `.zprofile`, quindi di quel file non serviva niente.)
 
 Se il file della chiave sparisce, riscaricalo dalla console Firebase del
 progetto `frontaliere-ticino` e rimettilo a quel percorso con `chmod 600`.

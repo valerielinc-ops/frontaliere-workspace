@@ -12,7 +12,8 @@
     "SKIP_BORDER_WAIT": "1",
     "SKIP_CI_CHECK": "1",
     "FAST_BUILD": "1",
-    "NODE_OPTIONS": "--max-old-space-size=12288"
+    "NODE_OPTIONS": "--max-old-space-size=12288",
+    "GOOGLE_APPLICATION_CREDENTIALS": "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json"
   },
   "hooks": {
     "PreToolUse": [
