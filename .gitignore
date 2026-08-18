@@ -1,0 +1,21 @@
+# I repo figli NON sono versionati dalla root: hanno il loro .git, i loro branch,
+# le loro PR. La root versiona solo cio' che vale per entrambi.
+# Un repo nuovo si aggiunge clonandolo qui e aggiungendo una riga in questo blocco.
+/frontaliere-si-o-no/
+/frontaliere-articles/
+
+# Preferenze personali e allow-list dei permessi: crescono da sole a ogni sessione,
+# sono specifiche di questa macchina, e versionarle produce solo conflitti.
+/.claude/settings.local.json
+
+# Mai, per nessun motivo: la chiave del service account vale un owner di produzione.
+# Vive in ~/.config/frontaliere/, fuori dal workspace. Questa riga e' una rete.
+*.pem
+*sa-frontaliere-ticino*.json
+.env
+.env.local
+
+# Rumore
+.DS_Store
+*.log
+node_modules/

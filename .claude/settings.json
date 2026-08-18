@@ -1,0 +1,9 @@
+{
+  "$comment": "Settings condivisi del workspace frontaliereticino.ch. Versionati: valgono per chiunque apra Claude Code da questa cartella. Le preferenze personali e le allow-list crescono in settings.local.json, che e' gitignored.",
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "env": {
+    "WORKSPACE": "/Users/saggesel/Projects/frontaliere"
+  }
+}
