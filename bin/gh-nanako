@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# gh, ma autenticato come nanakokyobashi-rgb invece che come valerielinc-ops.
+#
+#   bin/gh-nanako repo list nanakokyobashi-rgb
+#   bin/gh-nanako api repos/nanakokyobashi-rgb/frontaliere-uri-de
+#
+# Serve perche' i due account NON hanno gli stessi diritti sui repo di nanako:
+# valerielinc-ops ha push su 10 repo su 21 e sola LETTURA sugli altri 11 (gli
+# shard uri/vallese/vaud in de, fr, en e vallese/vaud in it — misurato il
+# 2026-08-18). Su quelli, `gh` normale fallisce con un 403 che sembra un bug e
+# non lo e'. GITHUB_PAT_NANAKO invece e' admin su tutti e 21.
+#
+# Il PAT vive in Firebase Remote Config, mai su disco: se non e' gia' in ambiente
+# lo carica rc-env.sh, che a sua volta usa il service account.
+#
+# Nota: questo wrapper agisce CON L'IDENTITA' DEL PROPRIETARIO e con scope
+# admin:org/delete_repo. Usalo per cio' che serve davvero sui repo di nanako, non
+# come scorciatoia di default: per il corpus e i 10 shard scrivibili, il `gh`
+# normale basta ed e' tracciabile all'account giusto.
+
+set -uo pipefail
+
+if [ -z "${GITHUB_PAT_NANAKO:-}" ]; then
+  # shellcheck source=/dev/null
+  . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/rc-env.sh" >/dev/null 2>&1
+fi
+
+if [ -z "${GITHUB_PAT_NANAKO:-}" ]; then
+  echo "✖ GITHUB_PAT_NANAKO non disponibile — Remote Config non ha risposto." >&2
+  echo "  Prova: source bin/rc-env.sh" >&2
+  exit 1
+fi
+
+exec env GH_TOKEN="$GITHUB_PAT_NANAKO" GH_HOST=github.com gh "$@"

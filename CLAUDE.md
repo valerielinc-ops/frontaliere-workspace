@@ -15,6 +15,7 @@ Claude Code — non da dentro un repo, e non da `~/Projects`.
 ├── .claude/settings.local.json    personali, gitignored
 ├── .claude/agents/                i 5 agenti bl-*
 ├── bin/rc-env.sh                  i secret da Remote Config
+├── bin/gh-nanako                  gh come proprietario, per gli 11 shard in sola lettura
 ├── .backlog/                      stato delle sessioni lunghe
 ├── frontaliere-si-o-no/           repo, con il suo CLAUDE.md e i suoi hook
 └── frontaliere-articles/          repo
@@ -202,6 +203,41 @@ gh pr create --repo nanakokyobashi-rgb/frontaliere-articles --base main --head <
 gh pr list   --repo nanakokyobashi-rgb/frontaliere-articles --state open
 gh run list  --repo nanakokyobashi-rgb/frontaliere-articles --workflow=publish-api.yml
 ```
+
+### Su 11 repo di nanako, `gh` normale e' in sola lettura — e sembra un bug
+
+Misurato il 2026-08-18 su tutti e 114 i repo dei due account:
+
+| account | repo | diritti di `valerielinc-ops` |
+|---|---|---|
+| `valerielinc-ops` | 93 | **ADMIN su tutti e 93** |
+| `nanakokyobashi-rgb` | 21 | WRITE su 10, **READ su 11** |
+
+Gli 11 in sola lettura sono shard: `frontaliere-{uri,vallese,vaud}-{de,fr,en}` piu'
+`frontaliere-{vallese,vaud}-it`. Non e' una regola — `frontaliere-uri-it` e'
+scrivibile e i suoi fratelli no: e' un invito da collaboratore applicato a mano e
+in modo incompleto. Non ci sono inviti pendenti da accettare (verificato).
+
+Su quegli 11, un `gh` o un `git push` torna **403**, che su un repo pubblico si
+legge come un problema di token e non lo e': il token e' giusto, e' l'account a non
+avere il diritto. Il rimedio e' il PAT del proprietario, che sta in Remote Config:
+
+```bash
+bin/gh-nanako api repos/nanakokyobashi-rgb/frontaliere-uri-de --jq .permissions
+bin/gh-nanako pr list --repo nanakokyobashi-rgb/frontaliere-uri-de
+```
+
+`GITHUB_PAT_NANAKO` e' **admin su tutti e 21** i repo di nanako, con scope
+`repo`, `workflow`, `admin:org` e `delete_repo`. Quindi l'autonomia piena c'e',
+ma passa da un'identita' diversa — e per questo `bin/gh-nanako` non e' il default:
+sul corpus e sui 10 shard scrivibili il `gh` normale basta, e lascia le tracce
+sull'account giusto.
+
+In pratica la distinzione conta poco: gli shard sono target di deploy generati e
+non si toccano a mano (vedi «Gli shard che NON vanno clonati»). Se serve
+sistemare la cosa alla radice, e' il proprietario a dover aggiungere
+`valerielinc-ops` come collaboratore su quegli 11 — non e' automatizzabile da qui,
+perche' richiede admin che questo account non ha.
 
 **Sul corpus ORA c'e' l'agente** (aggiornato il 2026-08-08). La riga che diceva
 «niente review automatica, niente fixer, l'auto-merge copre solo
