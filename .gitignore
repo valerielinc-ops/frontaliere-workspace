@@ -20,25 +20,11 @@
 *.log
 node_modules/
 
-# Dati personali. Il registro delle soppressioni contiene 184 indirizzi reali e
-# lo dice da solo nell'header: «Riservato: NON versionare, NON pubblicare».
-# Resta sul disco perche' serve, ma fuori da git — anche in un repo privato.
-registro-soppressioni-*.tsv
 
-# ── Non pubblicabili (il repo e' pubblico) ────────────────────────────────────
-# Dati personali di un interessato identificato: export ex art. 25 LPD prodotto
-# su sua richiesta, e la corrispondenza con lui. Pubblicarli sarebbe esattamente
-# il danno che quella richiesta serviva a riparare.
-export-diremigio.md
-export-diremigio-completo.md
-risposta-diremigio-2.md
-risposta-diremigio-3.md
-
-# Descrivono il reclamo LPD e il ticket dell'abuse desk Maileroo del 2026-08-12,
-# con il meccanismo dei difetti su consenso e disiscrizione. Restano sul disco:
-# servono, ma non su un repo pubblico.
-PROMPT-esecuzione-issue-consenso.md
-PROMPT-orchestratore-2.md
-PROMPT-orchestratore-3.md
-GOAL-orchestratore.md
+# ── privato/ ─────────────────────────────────────────────────────────────────
+# Questo repo e' pubblico. Tutto cio' che non puo' esserlo vive in privato/, che
+# non entra in git — nemmeno i nomi dei file, che da soli direbbero gia' troppo.
+# Ci stanno dati personali di terzi e materiale interno di conformita'.
+# Se produci un file sensibile, mettilo li' e non serve toccare questo elenco.
+privato/
 .backlog/ledger.jsonl
