@@ -19,3 +19,8 @@
 .DS_Store
 *.log
 node_modules/
+
+# Dati personali. Il registro delle soppressioni contiene 184 indirizzi reali e
+# lo dice da solo nell'header: «Riservato: NON versionare, NON pubblicare».
+# Resta sul disco perche' serve, ma fuori da git — anche in un repo privato.
+registro-soppressioni-*.tsv
