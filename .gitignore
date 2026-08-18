@@ -27,4 +27,8 @@ node_modules/
 # Ci stanno dati personali di terzi e materiale interno di conformita'.
 # Se produci un file sensibile, mettilo li' e non serve toccare questo elenco.
 privato/
-.backlog/ledger.jsonl
+.backlog/
+
+# .backlog/ e' lo stato operativo delle sessioni lunghe: contiene misure sul
+# funzionamento interno e decisioni ancora aperte. Resta sul disco e continua a
+# funzionare (led.sh, osservatore.sh); semplicemente non si pubblica.
