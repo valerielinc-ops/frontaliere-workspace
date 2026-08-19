@@ -511,12 +511,30 @@ prima di qualunque operazione che scrive tanto, e nessun secondo clone del sito.
 sgoccioli, ma perche' `public/` e `data/` sono **6,7 GB tracciati in git** che non
 servono quasi mai: un checkout pieno per worktree li ricopia tutti.
 
+Dal 2026-08-19 c'e' un comando solo, che fa tutto e **verifica** il risultato
+invece di fidarsi (un `--no-checkout` che materializza l'albero pieno lo stesso
+e' gia' successo, il 15-08, due volte):
+
 ```bash
-git worktree add .claude/worktrees/<nome> -b <branch> origin/main
+frontaliere-si-o-no/scripts/dev/fast-worktree.sh <nome> [--add <path>]
+```
+
+Misurato: **214 MB / 6.978 file in 2 secondi**, contro 6,7 GB / 41.707 file.
+I percorsi esclusi li legge da `scripts/ci/checkout-buckets.json`, la stessa
+tabella che usano i workflow in CI — una sorgente di verita' sola.
+
+A mano, se serve deviare dalla ricetta:
+
+```bash
+git worktree add --no-checkout .claude/worktrees/<nome> -b <branch> origin/main
 cd .claude/worktrees/<nome>
 printf '/*\n!/public/\n!/data/\n' | git sparse-checkout set --no-cone --stdin
+git checkout
 ln -s ../../../node_modules node_modules   # NON lanciare npm install
 ```
+
+`--no-checkout` non e' facoltativo: senza, git scrive i 6,7 GB **prima** che tu
+possa applicare la sparsita', e li hai gia' pagati.
 
 Serve un file sotto `data/` o `public/`? Leggilo senza materializzare la
 cartella: `git show HEAD:data/<file>`, oppure `git ls-tree -r --name-only HEAD
