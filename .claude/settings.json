@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "( cd \"$CLAUDE_PROJECT_DIR/frontaliere-si-o-no\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1 & ) || true"
+            "command": "( cd \"$CLAUDE_PROJECT_DIR/frontaliere-si-o-no\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true"
           }
         ]
       }
