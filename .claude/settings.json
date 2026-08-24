@@ -68,7 +68,7 @@
           {
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/frontaliere-si-o-no/scripts/ci/pr-watch-gate.mjs\"",
-            "timeout": 30
+            "timeout": 75
           }
         ]
       }
