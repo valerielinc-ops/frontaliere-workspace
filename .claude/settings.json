@@ -68,7 +68,7 @@
           {
             "type": "command",
             "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-gate.mjs\"'",
-            "timeout": 330
+            "timeout": 930
           }
         ]
       }
