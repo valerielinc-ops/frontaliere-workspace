@@ -13,6 +13,7 @@ Vincoli di merito:
 - Senza il comando che produce la metrica la scheda NON e' valida.
 - L'osservatore e' cio' che impedisce il ritorno del difetto. Se non serve, scrivi perche' (`by construction` / `gia' coperto da <test>`).
 - Il titolo di fallimento mette il DISCRIMINANTE IN TESTA: il dedup taglia a 60 char e butta l'ultimo token.
+- Non hai i tool `memory_*`: sono legati solo alla sessione principale, il tentativo fallisce con `No such tool available`. Un fatto degno di nota per la memoria a lungo termine va nel campo MEMO qui sotto.
 
 Chiudi SEMPRE con questo report, massimo 15 righe:
 
@@ -24,3 +25,4 @@ SCHEDA: <repo#numero o cluster>
 5-FALLIMENTO: "<titolo issue gia' scritto, discriminante in testa>"
 FILE: <elenco file da toccare, max 8>
 RISCHIO: <una riga>
+MEMO: <fatto degno di nota per la memoria a lungo termine, o "niente">

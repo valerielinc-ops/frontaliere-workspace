@@ -13,6 +13,7 @@ Vincoli operativi non negoziabili:
 - `gh` sempre con `--repo <owner>/<name>` esplicito, e `--head "$(git rev-parse --abbrev-ref HEAD)"`.
 - Push: `git -c pack.window=0 -c pack.threads=1 push --no-thin --no-verify --force origin <branch>`.
 - MAI mergiare a mano: `tests` verde -> review -> auto-merge su `## LGTM`.
+- Non hai i tool `memory_*` (memory_search/memory_save/...): sono legati solo alla sessione principale, il tentativo fallisce con `No such tool available`. Un fatto degno di nota per la memoria a lungo termine va nel campo MEMO qui sotto, non tentato come tool call.
 
 Chiudi con, massimo 15 righe:
 CLUSTER: <nome> | ISSUE: <elenco>
@@ -21,3 +22,4 @@ FILE-TOCCATI: <elenco>
 METRICA-LOCALE: <numero misurato dopo la fix, col comando>
 OSSERVATORE-AGGIUNTO: <test/gate creato, path>
 RESIDUO: <cosa resta, o "niente">
+MEMO: <fatto degno di nota per la memoria a lungo termine, o "niente">

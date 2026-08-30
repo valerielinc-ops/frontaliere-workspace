@@ -8,18 +8,9 @@ verificato leggendo i repo, non dedotto dai nomi.
 La root del workspace e' **`~/Projects/frontaliere`**, ed e' da li' che va lanciato
 Claude Code — non da dentro un repo, e non da `~/Projects`.
 
-```
-~/Projects/frontaliere/            ← apri la sessione QUI
-├── CLAUDE.md                      questo file: cio' che vale per entrambi i repo
-├── .claude/settings.json          condivisi e versionati
-├── .claude/settings.local.json    personali, gitignored
-├── .claude/agents/                i 5 agenti bl-*
-├── bin/rc-env.sh                  i secret da Remote Config
-├── bin/gh-nanako                  gh come proprietario, per gli 11 shard in sola lettura
-├── .backlog/                      stato delle sessioni lunghe
-├── frontaliere-si-o-no/           repo, con il suo CLAUDE.md e i suoi hook
-└── frontaliere-articles/          repo
-```
+`.backlog/` (nella root) tiene lo stato delle sessioni lunghe — il resto del contenuto
+della root (agenti, secret, gh-nanako, i due repo figli) e' spiegato in dettaglio piu'
+sotto in questo stesso file.
 
 Aprirla dalla root e' cio' che rende possibile il lavoro che **attraversa** i due
 repo — ed e' il caso normale, non l'eccezione: per `mode: identical` la fix va sul
@@ -38,8 +29,17 @@ I percorsi di questo documento sono relativi alla root, quindi
 
 | Cartella | Origin | Cos'e' |
 |---|---|---|
-| `frontaliere-si-o-no/` | `valerielinc-ops/frontaliere-si-o-no` | Il sito + la SPA. React 19, TypeScript, Tailwind, Vite. npm workspaces (`packages/articles`). Vitest + Playwright. 5,3 GB, 33k file, 185 workflow, ~980 script, ~1100 test. |
+| `frontaliere-si-o-no/` | `valerielinc-ops/frontaliere-si-o-no` | Il sito + la SPA (stack e conteggi in `package.json`/`.github/workflows`). |
 | `frontaliere-articles/` | `nanakokyobashi-rgb/frontaliere-articles` | Copia mirrorata del corpus + engine, che pubblica la superficie dati. Vedi la sezione sotto: e' un mirror, non l'originale. |
+
+C'e' anche un terzo repo, piu' piccolo e indipendente dal ciclo sopra:
+`frontaliere-reddit-devvit/` (`nanakokyobashi-rgb/frontaliere-reddit-devvit`, privato,
+push aggiunto il 2026-08-25) — l'app Devvit che posta i nuovi articoli del blog su
+r/frontaliere, sostituendo il poster API-key bloccato dalla review Data Access
+Request di Reddit. Nessun `.git` prima di quella data: era lavoro locale non
+backuppato, spinto su un repo proprio perche' non c'e' motivo di tenerlo a rischio
+di sparire con la macchina. `devvit upload` resta fermo su una reCAPTCHA
+manuale allo step di registrazione app — non automatizzabile da qui.
 
 Su **questa** macchina il clone del sito e' **completo**, non shallow: 94.023 commit
 di storia, `.git` da 15 GB (misurato il 2026-08-18). Questo cambia in meglio diverse
@@ -183,15 +183,10 @@ Il file `.env.example` del sito contiene solo la config Firebase pubblica
 # corpus articoli
 cd frontaliere-articles
 npx -y tsx@4 scripts/build-api.mjs   # genera dist/api/
-npm test                              # node --test generator/tests/*.test.mjs
-
-# sito
-cd frontaliere-si-o-no
-npm install
-npm run dev
-npm test                              # vitest
-npm run build:fast                    # build locale saltando i collector lenti
 ```
+
+Sito: comandi npm standard (`install`/`dev`/`test`/`build:fast`), vedi `scripts` in
+`frontaliere-si-o-no/package.json`.
 
 `tsx` e non `node` per il corpus: i sorgenti usano specificatori relativi senza
 estensione, che Node ESM puro non risolve.
@@ -572,17 +567,5 @@ Non clonare altri shard.
 
 ## Aggiungere un terzo repo qui dentro
 
-Il caso e' previsto: il sito e' grande e altre parti potrebbero staccarsi, come
-gia' successo a `packages/articles` → `frontaliere-articles` (issue #4959).
-
-```bash
-cd ~/Projects/frontaliere
-git clone https://github.com/<owner>/<nuovo-repo>.git
-printf '/<nuovo-repo>/\n' >> .gitignore     # la root non versiona i repo figli
-```
-
-Poi una riga nella tabella «I due repo» qui sopra, e — se il repo nuovo ha regole
-sue (gate della PR, mirror, cicli) — una sezione che dica **dove si fa la
-correzione**, che e' la domanda che fa perdere piu' tempo quando i repo sono piu'
-di uno. Nient'altro: gli agenti, i settings e `bin/` della root valgono gia' per
-chiunque arrivi.
+Procedura spostata nella skill `add-repo-workspace` (`.claude/skills/add-repo-workspace/SKILL.md`),
+invocata su richiesta invece di restare sempre in contesto.

@@ -13,6 +13,7 @@ Regole:
 - Un numero dentro il testo di una issue e' SCADUTO fino a prova contraria: rimisuralo.
 - Se una misura richiede un browser, un deploy o un segreto che non hai, dillo: e' esito NON-MISURABILE, non un fallimento.
 - Distingui sempre due tipi di needs-human: (A) decisione del proprietario (dati utente, LPD, spese, prodotto) vs (B) il fixer autonomo non aveva i permessi ma un umano con credenziali si'. Questa sessione HA le credenziali.
+- Non hai i tool `memory_*`: il tentativo fallisce con `No such tool available`. Un'osservazione degna di nota va in CAUSA-SOSPETTA o NEEDS-HUMAN, non tentata come tool call.
 
 Chiudi SEMPRE con questo report, massimo 15 righe, niente altro dopo:
 
