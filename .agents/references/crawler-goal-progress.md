@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 07:03 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 07:04 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | reviewer code+TS | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | doppia rereview finale; #7009 resta non reclamata | 4 | freeze clean `9da2801af`, base `ecb147092`, merge-tree clean; resolver25/25 e tsc mirato verdi; rereview code+TS in corso, no push |
+| #7008 probe website | `/root/resume_6959_lidl` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | PR/CI/review remota/auto-merge; #7009 resta non reclamata | 4 | freeze `9da2801af`, doppia rereview locale LGTM0/0; publisher autorizzato alla head esatta, nessun dispatch crawler |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -154,6 +154,12 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   e cleanup `mkdtemp` in `finally`. Resolver25/25, tsc mirato/node/diff verdi;
   sibling 48 candidati lessicali classificati, stesso antipattern0. Doppia
   rereview code+TS avviata sulla head esatta; nessun push/PR.
+- 07:04: entrambe le rereview finali di #7008 `9da2801af` sono `## LGTM`,
+  Important0/Nit0. Code reviewer: resolver25/25, registry22/592 = URL20/null2.
+  TS reviewer: resolver25 + public-policy19 + atomic-writer5 = 49/49,
+  typecheck sui file #7008 zero errori, WT ancora clean. Publisher autorizzato
+  a push/PR sulla sola head esatta, CI, una review remota canonica e auto-merge
+  nativo site; vietati merge manuale, claim #7009 e dispatch crawler.
 
 ### Percorso critico esatto
 
