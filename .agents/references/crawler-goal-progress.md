@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:26 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:32 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -50,7 +50,7 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth | 2 | refreeze `2a038daf8` su `ce615a816`, merge-tree clean; code+TS LGTM0/0, 7/7; pronto per publish |
 | #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | correggere review; #7009 attende | 4 | freeze iniziale bloccata: code Important2/Nit2, TS Important3/Nit1; hardening in corso |
-| mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub, read-mostly | entrambi | auth GitHub | admin | crea due parent goal + due audit child e collega tutte le issue esistenti come native subissue |
+| mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0; #7008 bloccata e da rifreezare/rivedere |
 
 Il vecchio owner `/root/fix_corpus_658_commit_window` non deve piu' ricevere
@@ -81,6 +81,15 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
 - 06:26: l'utente ha richiesto parita' locale/remoto. Il publisher sta creando
   due issue madre (site/corpus), due child di audit finale e relazioni native
   verso ogni issue esistente; nessun duplicato deve essere creato.
+- 06:31: mirror remoto completato. Site parent #7138, audit child #7139 e 36
+  relazioni native; corpus parent #727, audit child #728 e 9 relazioni native.
+  I parent sono cross-linkati, hanno checkpoint corrente e mutex. Nessuna issue
+  implementativa duplicata e' stata creata.
+- 06:32: body follow-up #658 v3 ratificato in
+  `/tmp/pr-corpus-658-injected-resolver-v3.md`, sha256
+  `0ca99a2068bac260ddb7bd211f40c5996f7851aaf9f292f13848acd407832f40`;
+  chiude #658 e non riusa il body obsoleto di #726. Publisher autorizzato a
+  push/PR/review/automerge nativo.
 
 ### Percorso critico esatto
 
@@ -214,12 +223,12 @@ immagini eventi.
 
 - File locale versionato nel repo root: commit `8331750a`, `cce62a19`,
   `414f733b`, `f4d3f7a3`; push remoto ancora bloccato dal DNS/token standard.
-- In creazione: parent site `[crawler-goal] Piano esecutivo crawler fino ad
-  audit e persistenza verdi` e parent corpus `[crawler-goal] Piano esecutivo
-  corpus, API, parity e manifest`.
-- In creazione: una child audit finale per ciascun repo. Tutte le issue elencate
-  sopra devono essere relazioni native subissue quando GitHub lo consente;
-  niente issue duplicate. Incompatibilita' di parent vanno documentate nel body.
+- Site parent #7138 `[crawler-goal] Piano esecutivo crawler fino ad audit e
+  persistenza verdi`; audit child #7139; 36 issue collegate come native subissue.
+- Corpus parent #727 `[crawler-goal] Piano esecutivo corpus, API, parity e
+  manifest`; audit child #728; 9 issue collegate come native subissue.
+- I parent sono cross-linkati e contengono checkpoint, definition of done,
+  dipendenze e guardrail. Non sono state duplicate issue esistenti.
 - Ogni futura transizione locale deve aggiornare sia questo file/commit sia il
   parent remoto (body o commento checkpoint) e la issue specifica coinvolta.
 
