@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 07:22 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 07:27 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `tests/resolve-company-website.test.ts` | site | follow-up post-merge #7140; #7009 resta non reclamata | 4 | #7140 auto-merged `59b4a5804`, ma review remota Important0/Nit1/Questions3; #7008 riaperta/mutex, correggere limit default e budget timeout unico, classificare Q2/Q3 |
+| #7008 probe website | reviewer code, poi TS | `scripts/resolve-company-website.mjs`, `tests/resolve-company-website.test.ts` | site | doppia review follow-up; #7009 resta non reclamata | 4 | freeze clean `4efd576c9`, 28/28 + tsc/node/diff verdi; code review in corso, TS dopo liberazione slot; no push |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -184,6 +184,13 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   redirect-cap resta fail-closed senza GET; late DNS rejection deve essere
   consumata, senza fingere cancellazione non offerta dall'API. Servono test
   causali, nuova freeze e doppia review locale/remota 0/0.
+- 07:27: follow-up congelata come
+  `4efd576c90b3f474fcc35893c55884a4987dd95e`, delta origin/main esattamente
+  resolver+test (117 aggiunte/9 rimozioni). Observer causali 28/28,
+  tsc mirato/node/diff verdi; sibling sette token `lookupImpl` classificati,
+  stesso antipattern0; GitNexus due file/zero simboli per indice. Code review
+  locale avviata; TS review sara' serializzata sullo slot esistente, nessun
+  nuovo test ridondante e nessun push.
 
 ### Percorso critico esatto
 
