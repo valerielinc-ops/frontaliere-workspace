@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 07:08 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 07:09 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | `/root/resume_6959_lidl` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | PR/CI/review remota/auto-merge; #7009 resta non reclamata | 4 | freeze `9da2801af`, doppia rereview locale LGTM0/0; publisher autorizzato alla head esatta, nessun dispatch crawler |
+| #7008 probe website | `/root/resume_6959_lidl` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | CI/review remota/auto-merge; #7009 resta non reclamata | 4 | PR #7140, head exact `9da2801af`, closing=[7008], body sameTrim/sibling48; auto-merge nativo armato, vitest in corso, review assente |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -166,6 +166,10 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   ciascuno `per scelta: falso positivo`; simulazione del gate body-aware exit0.
   Ratificato `push --no-verify` soltanto per superare questo limite locale: la
   head resta `9da2801af` e nessun check/review remoto viene bypassato.
+- 07:09: site PR #7140 pubblicata, head remota esatta `9da2801af`, body
+  trim-identico con sibling48/48 e `closingIssuesReferences=[7008]`.
+  Auto-merge nativo gia' armato dal check `enable` SUCCESS; PR OPEN/BLOCKED,
+  vitest in corso e review remota assente. Non duplicare review/dispatch.
 
 ### Percorso critico esatto
 
