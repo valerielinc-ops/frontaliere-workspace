@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:41 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:44 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -59,8 +59,8 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
-| #658 follow-up Nit post-#726 | `/root/resume_6959_lidl` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | check `rebase` terminale | 2 | PR #729 DRAFT, head `2a038daf8`, closing=[658], review remota canonica `5085615049` LGTM Important0/Nit0; rendere ready solo a check verdi, poi custom auto-merge |
-| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | freeze finale + doppia review; #7009 resta non reclamata | 4 | commit `a291ad0a8`, 68/68 + tsc/node/diff verdi; review ha scoperto delta WIP unstaged su `response.url` effettivo, da testare e congelare prima del verdetto |
+| #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
+| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | freeze finale + doppia review; #7009 resta non reclamata | 4 | commit `a291ad0a8` non pubblicabile: review Important2/Nit0; WIP risolve `response.url`, resta DNS lookup pendente fuori timeout da correggere/testare |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -118,6 +118,18 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   `https://127.0.0.1/admin`. Non pubblicare `a291ad0a8`: il fixer deve adottare
   il delta, rieseguire le prove e creare una nuova freeze clean, poi servono
   code review e TS review 0/0 sulla stessa HEAD.
+- 06:43: corpus PR #729 e' stata resa ready dopo CI verde; poiche' l'evento
+  review aveva fotografato `draft=true`, il solo recovery custom canonico e'
+  stato il rerun attempt2 del workflow `33591417551`. Run SUCCESS e custom
+  auto-merge alle 04:43:32Z, merge `f74e7a649268660773a2c0c171ee82b8cab46295`.
+  #658 e' CLOSED, mutex rimosso, branch remoto assente e WT/branch locale v3
+  puliti. Nessun merge manuale e nessun secondo dispatch di review.
+- 06:44: review read-only di #7008 `a291ad0a8` conclusa Important2/Nit0.
+  Il WIP `response.url` risolve il primo finding. Il secondo e' un hang reale:
+  `lookupImpl()` precede l'AbortController e con una Promise mai risolta supera
+  `timeoutMs` bloccando resolver/pool/Agent. Il fixer Tier4 deve includere la
+  lookup nel budget fail-closed e aggiungere un test con lookup davvero
+  pendente; poi nuova freeze clean e doppia review 0/0.
 
 ### Percorso critico esatto
 
