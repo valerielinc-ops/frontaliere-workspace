@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:36 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:41 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -34,6 +34,17 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 - Aggiornare questa sezione prima di terminare ogni ondata, cosi' un nuovo
   orchestratore non spende quota per ricostruire fatti gia' provati.
 
+### Modalita' arresto controllato richiesta dall'utente
+
+Dal 2026-09-02 06:38 CEST il goal e' in fase di **parcheggio**, non di
+completamento. Non reclamare nuove issue, non avviare audit globali, non fare
+dispatch crawler e non iniziare #7009 o altri task del percorso critico.
+Le sole attivita' autorizzate fino allo stop sono: portare a review/merge
+stabile i due WIP gia' attivi (#658 e #7008), registrare prove e SHA, pulire
+mutex/worktree/branch, pubblicare questo trackpoint su `main` della root e
+specchiare il checkpoint nei parent remoti site #7138 e corpus #727. Il goal
+resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
+
 ### Snapshot dei repository e della produzione
 
 | Superficie | Stato autorevole noto | Nota |
@@ -48,10 +59,10 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
-| #658 follow-up Nit post-#726 | `/root/resume_6959_lidl` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | CI + review remota | 2 | PR #729, head `2a038daf8`, closing=[658], CI in corso; auto-merge nativo da armare mentre blocked |
-| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | correggere review; #7009 attende | 4 | freeze iniziale bloccata: code Important2/Nit2, TS Important3/Nit1; hardening in corso |
+| #658 follow-up Nit post-#726 | `/root/resume_6959_lidl` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | check `rebase` terminale | 2 | PR #729 DRAFT, head `2a038daf8`, closing=[658], review remota canonica `5085615049` LGTM Important0/Nit0; rendere ready solo a check verdi, poi custom auto-merge |
+| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | freeze finale + doppia review; #7009 resta non reclamata | 4 | commit `a291ad0a8`, 68/68 + tsc/node/diff verdi; review ha scoperto delta WIP unstaged su `response.url` effettivo, da testare e congelare prima del verdetto |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
-| review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0; #7008 bloccata e da rifreezare/rivedere |
+| review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
 Il vecchio owner `/root/fix_corpus_658_commit_window` non deve piu' ricevere
 #7008: ha terminato tre volte senza edit scambiando per blocker il checkout main
@@ -94,13 +105,29 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   reference [#658]. GitHub ha normalizzato solo il newline terminale del body;
   contenuto trim-identico. CI pending/in-progress, review remota ancora assente,
   nessun merge manuale.
+- 06:39: #729 ha review remota canonica `5085615049` sulla head esatta
+  `2a038daf8`, `## LGTM`, Important0/Nit0. La PR resta DRAFT mentre il check
+  `rebase` termina; non fare un secondo dispatch. A check verdi renderla ready
+  una sola volta e lasciare il merge alla custom automation del corpus, che non
+  supporta l'auto-merge nativo.
+- 06:40: #7008 ha nuova freeze `a291ad0a8a3f68528922614ff62d2530b55d7a37`
+  da main `a807bdea1`, merge-tree pulito, tre file, 68/68 test, tsc/node/diff
+  verdi e probe 592/registry22 = URL20/null2. Durante la review e' emerso un
+  WIP unstaged di due file (25 aggiunte/3 rimozioni) che valida anche
+  `response.url` effettivo contro SSRF e aggiunge il caso
+  `https://127.0.0.1/admin`. Non pubblicare `a291ad0a8`: il fixer deve adottare
+  il delta, rieseguire le prove e creare una nuova freeze clean, poi servono
+  code review e TS review 0/0 sulla stessa HEAD.
 
 ### Percorso critico esatto
 
-1. Pubblicare `b87795329` su branch fresh dal corpus main, preservando solo due
-   file; test, review remota Nit0 e auto-merge nativo; poi chiudere #658.
-2. Completare #7008 su tre file, review/merge; solo dopo reclamare #7009.
-3. Alle 09:00 UTC osservare una sola canonical token-bound. Verificare prima il
+1. **Prima di riprendere il goal:** verificare che #729/#658 e la futura PR
+   #7008 siano merged/closed con prove finali e nessun mutex/worktree/branch
+   residuo. Se il parcheggio non li ha conclusi, terminare questi due WIP senza
+   reclamare altro.
+2. Completato il parcheggio, il primo nuovo task e' #7009, poi #7010; non
+   reclamarli prima del merge #7008.
+3. Alla prima schedule naturale utile osservare una sola canonical token-bound. Verificare prima il
    preflight: se non ready deve abortire prima del primo POST. Se ready, seguire
    23 gruppi, sentinel, observer, barrier, artifact e commit dati fino a terminale.
 4. Con lo stesso run misurare #6806, #6862 Accor, #6932 adapter,
