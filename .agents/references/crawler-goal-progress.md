@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 07:27 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 07:31 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | reviewer code, poi TS | `scripts/resolve-company-website.mjs`, `tests/resolve-company-website.test.ts` | site | doppia review follow-up; #7009 resta non reclamata | 4 | freeze clean `4efd576c9`, 28/28 + tsc/node/diff verdi; code review in corso, TS dopo liberazione slot; no push |
+| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `tests/resolve-company-website.test.ts` | site | correggere review follow-up; #7009 resta non reclamata | 4 | freeze `4efd576c9` bloccata Important1/Nit0: lookup socket riapre timeout e Agent.close supera budget; propagare deadline assoluta + Agent bounded per resolution, observer, refreeze |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -191,6 +191,12 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   stesso antipattern0; GitNexus due file/zero simboli per indice. Code review
   locale avviata; TS review sara' serializzata sullo slot esistente, nessun
   nuovo test ridondante e nessun push.
+- 07:31: code review di `4efd576c9` ha trovato Important1/Nit0 reale: il
+  lookup socket-time riapriva un nuovo `timeoutMs` e `Agent.close()` poteva
+  portare il totale oltre due budget. Fix ratificata nello stesso scope:
+  propagare la deadline assoluta al dispatcher e usare un Agent bounded per
+  risoluzione (pool domini ancora concurrency2), con observer DNS preliminare
+  ritardato + socket lookup pendente. Freeze bloccata, nessun push.
 
 ### Percorso critico esatto
 
