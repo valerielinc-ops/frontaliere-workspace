@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:32 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:36 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -48,7 +48,7 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
-| #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth | 2 | refreeze `2a038daf8` su `ce615a816`, merge-tree clean; code+TS LGTM0/0, 7/7; pronto per publish |
+| #658 follow-up Nit post-#726 | `/root/resume_6959_lidl` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | CI + review remota | 2 | PR #729, head `2a038daf8`, closing=[658], CI in corso; auto-merge nativo da armare mentre blocked |
 | #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | correggere review; #7009 attende | 4 | freeze iniziale bloccata: code Important2/Nit2, TS Important3/Nit1; hardening in corso |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0; #7008 bloccata e da rifreezare/rivedere |
@@ -90,6 +90,10 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   `0ca99a2068bac260ddb7bd211f40c5996f7851aaf9f292f13848acd407832f40`;
   chiude #658 e non riusa il body obsoleto di #726. Publisher autorizzato a
   push/PR/review/automerge nativo.
+- 06:36: corpus PR #729 pubblicata sulla head esatta `2a038daf8`, closing
+  reference [#658]. GitHub ha normalizzato solo il newline terminale del body;
+  contenuto trim-identico. CI pending/in-progress, review remota ancora assente,
+  nessun merge manuale.
 
 ### Percorso critico esatto
 
