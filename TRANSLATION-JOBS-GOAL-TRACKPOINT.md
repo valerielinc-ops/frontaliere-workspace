@@ -1,8 +1,8 @@
 # Traduzioni job — piano esecutivo, stato e handoff
 
-Ultimo aggiornamento autorevole: 2026-09-02 06:23 CEST
+Ultimo aggiornamento autorevole: 2026-09-02 06:57 CEST
 
-Goal backend: attivo, non completo, non bloccato
+Goal operativo: sospensione richiesta; stabilizzazione/merge in corso; non completo, non bloccato.
 
 Prova finale corrente: **0/14 generazioni naturali consecutive**
 
@@ -41,11 +41,12 @@ attivi, qualita' sopra i gate, nessun costo aggiuntivo e cleanup finale.
 
 ## Prossima azione globale univoca
 
-Acquisire e ispezionare il freeze exact-HEAD del core runtime quando il subagent
-lo consegna, senza duplicarne file o modifiche. Nell'attesa T00 continua soltanto
-il monitor read-only del run manuale #54, senza dispatch. Le colonne "Prossima
-azione" della tabella Txx sono code locali dei rispettivi owner, non alternative
-alla prossima azione globale.
+Portare a freeze, doppia review, CI, remote `## LGTM` exact-HEAD e auto-merge il
+core runtime gia' aperto, senza avviare T15-T23 o altre fasi produttive. Poi
+aggiornare e mergiare questo trackpoint, ripulire i worktree conclusi e lasciare
+il goal sospeso/riprendibile. Nell'attesa T00 puo' soltanto osservare run gia' in
+corso, senza dispatch. Le colonne "Prossima azione" della tabella Txx sono code
+per una futura ripresa, non autorizzazione ad avviarle ora.
 
 ## Vincoli operativi
 
@@ -93,6 +94,24 @@ alla prossima azione globale.
 Per #7123: pre-merge HEAD `c87937d34ea1ef5765c2662564bf658555322020`,
 CI `vitest (unit + integration)` success e review remota `## LGTM` sulla stessa
 HEAD. Auto-merge SQUASH. Worktree e branch locale rimossi; branch remoto 404.
+
+### Trackpoint e backlog remoto
+
+- PR root del trackpoint: [frontaliere-workspace#1](https://github.com/valerielinc-ops/frontaliere-workspace/pull/1),
+  branch `codex/translation-goal-trackpoint`; auto-merge capability abilitata.
+- Parent backlog: [#2 — goal T00-T23 sospeso e riprendibile](https://github.com/valerielinc-ops/frontaliere-workspace/issues/2).
+- Vere subissue GitHub: [#3 T00-T02](https://github.com/valerielinc-ops/frontaliere-workspace/issues/3),
+  [#4 T03-T05](https://github.com/valerielinc-ops/frontaliere-workspace/issues/4),
+  [#5 T06-T09](https://github.com/valerielinc-ops/frontaliere-workspace/issues/5),
+  [#6 T10-T12](https://github.com/valerielinc-ops/frontaliere-workspace/issues/6),
+  [#7 T13-T15](https://github.com/valerielinc-ops/frontaliere-workspace/issues/7),
+  [#8 T16-T18](https://github.com/valerielinc-ops/frontaliere-workspace/issues/8),
+  [#9 T19-T21](https://github.com/valerielinc-ops/frontaliere-workspace/issues/9) e
+  [#10 T22-T23](https://github.com/valerielinc-ops/frontaliere-workspace/issues/10).
+- La relazione parent -> otto subissue, la copertura unica T00-T23 e i body
+  dettagliati per stato/successo/prossima azione sono stati verificati via API.
+  Il P1 iniziale su template generici/newline letterali e' stato corretto su tutte
+  le issue #2-#10; solo #5 collega le follow-up scheduler #7096-#7099.
 
 ### Misura live
 
@@ -142,25 +161,23 @@ quality gate senza superare 350m/run o 60s/sample shadow e senza costi.
 - Worktree:
   `frontaliere-si-o-no/.claude/worktrees/feat-translation-execution-ledger-v1`
 - Branch: `feat/translation-execution-ledger-v1`
-- HEAD del branch prima degli edit:
-  `69304b16b29185b8c63b3b3537f634c61569d8a3`.
-- Base dell'attuale branch: site
-  `d437da21b0d79940e20797dab6773295d3fb419f`. Non e' il main remoto corrente.
-- Site `origin/main`/`ls-remote` al 2026-09-02 06:19 CEST:
-  `7a3f9647e47842165aff0b870f4134ccd97213d8`; branch ahead 3/behind 10.
-- Tre commit preesistenti: ledger, store CAS e successor guard con sei file.
-- GitNexus full index completato sulla exact HEAD: 70.627 nodi, 153.709 edge,
-  300 flow; status up-to-date.
-- Baseline suite prima degli edit: 66 test, 64 pass. Un test ledger ha misurato
-  3,475s contro gate 2s; un test state-store e' fallito `ENOSPC`, altri 26 sono
-  passati. `ENOSPC` non e' un difetto funzionale: dopo cleanup mirato sono
-  disponibili 15 GiB; entrambi i test devono essere ripetuti, e il gate ledger
-  deve comunque tornare <2s senza abbassare la soglia.
+- Frozen HEAD: `4503bfa54e2b8fc60940646e6fd02a803810a0cf`; base originaria
+  `d437da21b0d79940e20797dab6773295d3fb419f`; site `origin/main` verificato
+  `a807bdea178c03cdf34e44e1e295baf82e9b1ba4`; merge-tree pulito.
+- Sei commit, 14 file, +3.714/-9. Provider Argos `50c1497...` incluso senza
+  riscrittura. Worktree clean, nessun push/PR.
+- 148 test unici verdi; state-store 28/28; ledger/store/guard/runtime/deploy
+  122/122; provider+executor 26/26; parser/guard deploy 44/44. Property ledger
+  circa 470-550ms con gate 2s invariato. Generator `--check` senza drift.
+- Closure 26 file: `sha256:34969783b660cc09bcc4ab818e3335b3ee55d028792a7ea36df30c7fb8c395ef`.
+  GitNexus detect: 14 file, rischio low; PII blocklist, metadata, ownership e
+  diff-check puliti. Node locale 26.4.0; Node 22 demandato alla CI.
 - Subagent: `/root/implement_integrated_translation_runtime`, Sol/high.
-- Stato: implementazione in corso, non frozen. Dirty ownership verificata:
-  modificati ledger e state-store; nuovi runtime, policy e runtime test. Nessun
-  commit/push/PR per questi edit. Riallineare hot main soltanto al freeze, dopo
-  test e verifica semantica del merge-tree.
+- Stato: freeze consegnato ma review non CLEAN. Finding: P1 typing `FakeChild`,
+  P1 rollout fail-open, P1 Git senza deadline, P2 privacy metriche, P2 owned-path
+  TOCTOU e P2 identita' Argos non content-addressed. Il contratto correttivo e'
+  ratificato e restituito allo stesso worker. Nessun merge finche' tutti i P0-P2
+  non sono corretti e le due review exact-HEAD sono CLEAN.
 
 Ownership core consentita:
 
@@ -175,9 +192,9 @@ Ownership core consentita:
 - `scripts/lib/translation-state-store-v2.mjs`
 - test ledger/store/guard/state-store/runtime/workflow corrispondenti.
 
-Vietati al core: file candidate #7123, generator, provider Argos e test, crawler,
-corpus repo, checkout main. Se il generator emette file aggiuntivi o serve una
-permission/secret nuova, il worker deve fermarsi.
+Vietati al core: file candidate #7123, generator, crawler, corpus repo e checkout
+main. L'ownership dei due file provider e' stata trasferita al core soltanto per
+l'integrazione del commit frozen e per correggere finding sulla stessa PR.
 
 ### Provider Argos v2
 
@@ -198,8 +215,8 @@ permission/secret nuova, il worker deve fermarsi.
 - `node --check` e 26/26 test provider+executor verdi.
 - GitNexus `detect_changes` eseguito prima dell'amend finale: 2 file,
   36 simboli, 0 processi, rischio low. PII/diff clean. Worktree clean.
-- Nessun push/PR. Il core non deve riscrivere questi file: integrare il commit
-  con cherry-pick soltanto dopo il freeze del core o in un punto coordinato.
+- Nessun push/PR sul branch provider. Il commit e' incluso nel frozen core
+  `4503bfa...`; rimuovere branch/worktree provider soltanto dopo il merge core.
 
 ### Trackpoint
 
@@ -207,6 +224,9 @@ permission/secret nuova, il worker deve fermarsi.
 - Worktree:
   `/Users/saggesel/Projects/frontaliere/.claude/worktrees/translation-goal-trackpoint`
 - Branch: `codex/translation-goal-trackpoint`, base `origin/main` `b59d3983`.
+- PR root #1 aperta. HEAD remoto iniziale `8aa23869`; localmente sono stati
+  aggiunti CI docs-only `352e5fbe...` e fix mutation-proof `67eba3d7...`; questo
+  aggiornamento del trackpoint deve ancora essere committato/pushato.
 - Il checkout root `main` contiene modifiche/untracked dell'utente e non deve
   essere modificato, ripulito o usato per commit.
 - Questo file deve essere committato e poi aggiornato con commit incrementali o
@@ -295,18 +315,18 @@ dopo validazione automatica completa.
 |---|---|---|---|---|---|
 | T00 | Snapshot, follow-up e metriche live | read-only | #53 auditato; #54 in monitor | ID/SHA/date/denominatori | poll #54 senza dispatch |
 | T01 | Quality executor/memory/provider protocol | sito #7123 | merged | CI+LGTM+auto-merge exact | nessuna |
-| T02 | Provider Argos offline zero-cost | 2 file provider/test | frozen locale | 26/26, detect low, no download | integrare nel core |
-| T03 | Ledger/store/successor primitive | 6 file core | in modifica, non frozen | CAS/replay test | estendere bounds/wiring e rifare freeze |
-| T04 | Runtime closure, policy e state machine | runtime/policy/test | in corso | failure matrix e digest reset | implementare |
-| T05 | State lineage immutabile | state-store/test | in corso | single+double deletion/history fail | implementare/testare |
-| T06 | Scheduler follow-up #7097 pivot | runtime metrics/test | aperto | pivot missing osservabile | includere T04 |
-| T07 | Scheduler follow-up #7098 fairness | runtime/state test | aperto | CAS cross-generation, rollback near-empty | includere T04 |
-| T08 | Scheduler follow-up #7099 replay gap | state-store/test | aperto | replay dopo >=3 generation idempotente | includere T05 |
-| T09 | Runtime wiring #7096 | workflow/runtime | aperto | shadow stesso snapshot, main byte-identico | includere T04/T10 |
-| T10 | Workflow translate/deploy | 2 source + generated | in corso | permissions invarianti, parity generated | implementare |
-| T11 | Shadow metrics e feedback loop | runtime/state refs | aperto | record canonici, candidate main writes=0 | includere site PR |
-| T12 | Canary/production/rollback automatici | runtime policy | aperto | transizioni deterministicamente testate | includere site PR |
-| T13 | Doppia review locale integrated HEAD | read-only reviewer | pendente | general CLEAN + JS CLEAN exact | dopo freeze |
+| T02 | Provider Argos offline zero-cost | 2 file provider/test | integrato nel core; P1/P2 review | 26/26, identity content-addressed | correggere typing/identity |
+| T03 | Ledger/store/successor primitive | core frozen | review P1/P2 | CAS/replay/timeout test | correggere timeout/TOCTOU |
+| T04 | Runtime closure, policy e state machine | runtime/policy/test | frozen, review P1/P2 | failure matrix e digest reset | correggere schema/binding |
+| T05 | State lineage immutabile | state-store/test | frozen, 28/28 | single+double deletion/history fail | mantenere nel fix |
+| T06 | Scheduler follow-up #7097 pivot | runtime metrics/test | core dormiente frozen | pivot missing osservabile | sospeso dopo merge |
+| T07 | Scheduler follow-up #7098 fairness | runtime/state test | core dormiente frozen | CAS cross-generation, rollback near-empty | sospeso dopo merge |
+| T08 | Scheduler follow-up #7099 replay gap | state-store/test | primitive frozen | replay dopo >=3 generation idempotente | sospeso dopo merge |
+| T09 | Runtime wiring #7096 | workflow/runtime | non implementato live | shadow stesso snapshot, main byte-identico | sospeso dopo merge |
+| T10 | Workflow translate/deploy | deploy intent soltanto | translate invariato | permissions invarianti, parity generated | sospeso dopo merge |
+| T11 | Shadow metrics e feedback loop | runtime/state refs | schema dormiente in fix | record canonici, candidate main writes=0 | correggere privacy; sospendere |
+| T12 | Canary/production/rollback automatici | runtime policy | reducer dormiente in fix | transizioni deterministicamente testate | correggere fail-open; sospendere |
+| T13 | Doppia review locale integrated HEAD | read-only reviewer | primo giro non CLEAN | general CLEAN + JS CLEAN exact | fix e rereview |
 | T14 | PR sito integrata | sito | pendente | CI verde, remote exact LGTM, auto-merge | dopo T13 |
 | T15 | Trasporto caller corpus PR A | corpus sync | pendente | caller/contract byte-identici, blob nuovo | dopo T14 |
 | T16 | Prova target sul nuovo caller | produzione dry-run/naturale | pendente | locator+resume+guard manuale e scheduled | dopo T15 |
@@ -403,9 +423,9 @@ minima sicura: **site PR -> corpus PR A -> prova live -> corpus PR B**.
    ```
 
 4. Prossimo passo unico corrente: attendere la consegna del core e ispezionarne
-   exact HEAD, diff e test senza duplicare T04-T12. Nell'attesa fare soltanto il
-   poll read-only del #54. Poi integrare con cherry-pick del solo commit provider
-   `50c1497...`, eseguire suite combinata e freeze.
+   exact HEAD, diff e test senza duplicare T04-T12. Il provider `50c1497...` deve
+   essere incluso nello stesso freeze. Non avviare T15-T23: la richiesta corrente
+   e' stabilizzare/mergiare, aggiornare backlog e sospendere.
 5. Sul freeze combinato: GitNexus `detect_changes`, sibling audit per-file, PII,
    general reviewer Sol/high e JS reviewer Terra/high. Finding P0-P2 torna al
    worker; il reviewer non corregge.
@@ -439,6 +459,31 @@ Prossima azione unica:
 ```
 
 ## Journal corrente
+
+### 2026-09-02 06:57 CEST — core frozen, review non CLEAN
+
+- Core frozen `4503bfa5`, provider incluso, 148 test implementer e 203 test
+  reviewer verdi; merge-tree con site main pulito e nessun push/PR.
+- Review JS: P1 sul typing del mock Argos. Review generale: P1 schema/binding
+  rollout fail-open e Git senza deadline; P2 privacy metriche, path TOCTOU e
+  identita' package/modelli Argos non content-addressed.
+- Ratificato un solo ciclo correttivo fail-closed; niente wiring live o nuove
+  fasi. Dopo fix servono entrambe le review CLEAN prima della PR sito.
+
+### 2026-09-02 06:41 CEST — terminale cambiato a sospensione stabile
+
+- L'utente ha richiesto di non proseguire alle fasi successive: tutto il lavoro
+  gia' aperto deve essere reso stabile, revisionato e mergiato; poi cleanup e
+  sospensione esplicita, senza dichiarare il goal completo.
+- Aperta PR root #1 sul trackpoint. Due review locali CLEAN e review GitHub
+  `## LGTM` exact `8aa23869`; l'auto-merge richiede un check remoto, quindi e'
+  stato aggiunto un workflow docs-only frozen nel commit `352e5fbe...`.
+- Create parent issue #2 e subissue vere #3-#10 con copertura T00-T23. La prima
+  verifica dei body ha aperto un P1 per dettaglio insufficiente/newline letterali.
+  Correzione completata e GET finale pulito: ogni T appare una volta nel child
+  corretto, relazioni intatte e solo #5 cita #7096-#7099.
+- Core in chiusura stabile: 78/78 test target verdi, ledger perf circa 0,7s;
+  runtime/workflow e provider devono ancora essere congelati e revisionati.
 
 ### 2026-09-02 06:23 CEST — audit artifact #53 completato
 
