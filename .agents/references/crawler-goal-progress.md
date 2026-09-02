@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:52 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:57 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | reviewer code+TS | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | doppia review finale; #7009 resta non reclamata | 4 | freeze clean `a14169407`, base `480b806cf`, merge-tree clean; 70/70 e probe verdi; review code+TS in corso, nessuna PR prima di 0/0 |
+| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | correggere TS review; #7009 resta non reclamata | 4 | freeze `a14169407`: code LGTM0/0, TS Important1/Nit2; tipizzare confini senza `any`, test dispatcher/TOCTOU socket e cleanup temp, poi refreeze+rereview |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -139,6 +139,13 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   URL20/null2. Full tsc sparse resta baseline exit2/596 errori ma match sui
   file #7008 = 0. Doppia review finale code+TS avviata sulla head esatta;
   fixer sospeso e nessun push/PR prima di Important0/Nit0.
+- 06:57: code review #7008 su `a14169407` e' `## LGTM`, Important0/Nit0.
+  TS review blocca con Important1/Nit2: i JSDoc `any` e i cast del fake eludono
+  il typecheck sul confine fetch/DNS/dispatcher; manca un test che provi il
+  wiring reale dell'Agent e il rifiuto del secondo lookup privato al socket;
+  il test idempotenza non rimuove la directory temporanea. Tutti e tre i
+  finding sono stati classificati come dovuti e assegnati al fixer sulla
+  stessa ownership; nessuna PR prima di nuova freeze e doppia rereview 0/0.
 
 ### Percorso critico esatto
 
