@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:10 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:15 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -48,14 +48,30 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
-| #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth | 2 | commit locale `b87795329`, test causale 7/7; push/PR da fare su main fresco |
-| #7008 probe website | `/root/fix_7008_website_probe` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | nessuna; #7009 attende | 2 | WT esistente pulito da adottare; implementazione in corso |
+| #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth + review locale | 2 | freeze `b87795329`, 7/7; full 95/96 con solo baseline comune-guide; push/PR da fare su main fresco |
+| #7008 probe website | `/root/fix_7008_website_probe` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | publisher/auth + review locale; #7009 attende | 2 | freeze `0dcce8d00`, diff3; test 6+20 verdi; 22 probe = 19 URL + 3 null fail-closed |
 | censimento globale | `/root/resume_6959_lidl` | issue/PR/workflow read-only | entrambi | auth GitHub | 1 | in corso; scartare il censimento scout che ha ricevuto 401 |
+| review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | una coppia di reviewer condivisa, in corso; nessun push prima del verdetto |
 
 Il vecchio owner `/root/fix_corpus_658_commit_window` non deve piu' ricevere
 #7008: ha terminato tre volte senza edit scambiando per blocker il checkout main
 vecchio, i nuovi file attesi e la sorgente gia' identificata. Il mutex #7008 e'
 stato aggiornato al nuovo owner nel commento `5504246629`.
+
+### Ultime transizioni registrate
+
+- 06:12: #658 follow-up congelata su branch
+  `codex/fix-658-injected-resolver-v2`, commit
+  `b87795329cbda1eb52a451def0d2a8e4773143fb`. GitNexus upstream LOW;
+  detect post-diff due file/un simbolo MEDIUM; node-check e diff-check verdi;
+  test causale 7/7, full watchdog 95/96 con unico rosso baseline estraneo.
+- 06:14: #7008 congelata su branch `issue-7008-company-websites`, HEAD
+  `0dcce8d00` (feature `4d8edff8` + latest main). Diff esatto tre file, test
+  resolver 6/6 e sibling retry 20/20; probe live limit22 = 19 risolti e 3
+  `null`, senza fallback inventato.
+- Entrambi i push sono bloccati dal token GitHub standard invalido. Il publisher
+  deve adottare i commit con il percorso auth gia' usato, dopo il verdetto dei
+  due reviewer locali condivisi. Non ricreare le fix.
 
 ### Percorso critico esatto
 
