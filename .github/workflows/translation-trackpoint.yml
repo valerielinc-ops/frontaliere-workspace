@@ -52,10 +52,23 @@ jobs:
             }
           done
 
-          if grep -Eiq '^Goal backend:[[:space:]]*completo([[:space:],]|$)' "$document"; then
-            echo 'goal must not be declared complete' >&2
+          status_count=$(grep -Ec '^Goal (backend|operativo):' "$document" || true)
+          [[ "$status_count" -eq 1 ]] || {
+            echo 'expected exactly one Goal backend: or Goal operativo: status line' >&2
             exit 1
-          fi
+          }
+          status_line=$(grep -E '^Goal (backend|operativo):' "$document")
+          [[ "$status_line" == *'non completo'* ]] || {
+            echo 'goal status must contain the canonical non completo state' >&2
+            exit 1
+          }
+          residual_status=${status_line//non completo/}
+          shopt -s nocasematch
+          [[ ! "$residual_status" =~ (^|[^[:alpha:]])completo([^[:alpha:]]|$) ]] || {
+            echo 'goal status must not declare completion' >&2
+            exit 1
+          }
+          shopt -u nocasematch
 
           grep -Eq '^Prova finale corrente: \*\*((0|[1-9]|1[0-4])/14 generazioni naturali consecutive)\*\*$' "$document" || {
             echo 'final proof must be an admitted 0/14..14/14 natural-generation state' >&2
