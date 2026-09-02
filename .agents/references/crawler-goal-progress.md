@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:44 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:52 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -60,7 +60,7 @@ resta incompleto e dovra' essere ripreso dal percorso critico qui sotto.
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
 | #658 follow-up Nit post-#726 | nessuno | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | nessuna | 2 | COMPLETO: PR #729 auto-merged `f74e7a649268`, head `2a038daf8`, CI SUCCESS, review `5085615049` LGTM0/0; #658 chiusa, mutex/branch/WT puliti |
-| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | freeze finale + doppia review; #7009 resta non reclamata | 4 | commit `a291ad0a8` non pubblicabile: review Important2/Nit0; WIP risolve `response.url`, resta DNS lookup pendente fuori timeout da correggere/testare |
+| #7008 probe website | reviewer code+TS | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | doppia review finale; #7009 resta non reclamata | 4 | freeze clean `a14169407`, base `480b806cf`, merge-tree clean; 70/70 e probe verdi; review code+TS in corso, nessuna PR prima di 0/0 |
 | mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub | entrambi | nessuna | admin | COMPLETO: site #7138/#7139 con 36 native; corpus #727/#728 con 9 native; cross-link/checkpoint/mutex parent |
 | review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0 locale e remota; #7008 attende nuova HEAD pulita dopo finding `response.url`, poi code+TS 0/0 |
 
@@ -130,6 +130,15 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   `timeoutMs` bloccando resolver/pool/Agent. Il fixer Tier4 deve includere la
   lookup nel budget fail-closed e aggiungere un test con lookup davvero
   pendente; poi nuova freeze clean e doppia review 0/0.
+- 06:52: #7008 rifreezata clean come
+  `a14169407db9afdbbcf9106a5b0cb0bcc72faba8` su origin/main
+  `480b806cf98016e1c048daef19cf5b51c03618b9`; merge-tree exit0/tree
+  `7770e84159b4ba0ffe159884af2d0a1f5e34b4b8`, tre file, estraneo0,
+  diff-check0. Test resolver24 (inclusa lookup realmente pendente), identity27
+  e public-policy19 = 70/70; node-check0; probe source592/registry22 =
+  URL20/null2. Full tsc sparse resta baseline exit2/596 errori ma match sui
+  file #7008 = 0. Doppia review finale code+TS avviata sulla head esatta;
+  fixer sospeso e nessun push/PR prima di Important0/Nit0.
 
 ### Percorso critico esatto
 
