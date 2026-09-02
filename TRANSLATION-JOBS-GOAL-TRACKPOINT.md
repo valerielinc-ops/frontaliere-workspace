@@ -1,6 +1,6 @@
 # Traduzioni job — piano esecutivo, stato e handoff
 
-Ultimo aggiornamento autorevole: 2026-09-02 06:20 CEST
+Ultimo aggiornamento autorevole: 2026-09-02 06:23 CEST
 
 Goal backend: attivo, non completo, non bloccato
 
@@ -41,12 +41,11 @@ attivi, qualita' sopra i gate, nessun costo aggiuntivo e cleanup finale.
 
 ## Prossima azione globale univoca
 
-Completare l'audit read-only degli artifact/shadow del run manuale #53
-`33570724601`, registrare qui digest, metriche e finding, senza dispatch. Il core
-runtime continua nel proprio subagent e non va duplicato; dopo l'audit live la
-successiva azione globale sara' prendere in carico il freeze consegnato dal core.
-Le colonne "Prossima azione" della tabella Txx sono code locali dei rispettivi
-owner, non alternative alla prossima azione globale.
+Acquisire e ispezionare il freeze exact-HEAD del core runtime quando il subagent
+lo consegna, senza duplicarne file o modifiche. Nell'attesa T00 continua soltanto
+il monitor read-only del run manuale #54, senza dispatch. Le colonne "Prossima
+azione" della tabella Txx sono code locali dei rispettivi owner, non alternative
+alla prossima azione globale.
 
 ## Vincoli operativi
 
@@ -97,20 +96,28 @@ HEAD. Auto-merge SQUASH. Worktree e branch locale rimossi; branch remoto 404.
 
 ### Misura live
 
-Snapshot API autenticato: 2026-09-02T04:19:33Z.
+Snapshot API e artifact autenticati: 2026-09-02T04:20:44Z.
 
 - Workflow corpus: id `342441975`.
-- Run `33570724601`: `workflow_dispatch`, completato `success` alle
-  2026-09-02T04:14:28Z. Il job era entrato in Phase 2c Argos dopo circa 1h39 di
-  bulk e un cascade lungo. Artifact/shadow finali non ancora auditati.
-- Run `33585398593`: `workflow_dispatch`, passato da `pending` a `in_progress`
-  alle 2026-09-02T04:14:32Z, subito dopo la conclusione del precedente.
+- Run #53 `33570724601`: `workflow_dispatch`, HEAD `ca61108fb526`, job
+  `100087920945`, completato `success`; runtime 2h59m33s. Artifact unico
+  `translation-observability-33570724601` (id `9831347479`, 2492 B): nessun
+  artifact `translation-shadow-preflight-v2-*`.
+- Nel #53 la popolazione e' 25.274 -> 25.275, incomplete 14.075 -> 13.842,
+  verified translated 7.091 -> 11.428, flagged 4.108 -> 5, drain 4.336 e ingress
+  0. Pending finale 12.915, tutti `needs_retranslation`; missing IT 4.396, EN
+  4.076, DE 822, FR 3.942.
+- Qualita' #53: descrizioni wrong-language 15/99.370 = 0,0151%; titoli sospetti
+  29.186/74.612 = 39,12%. Transizioni: flagged->complete 4.104,
+  incomplete->complete 232, incomplete->flagged 1.
+- L'evidenza shadow del #53 e' insufficiente: `baseline.measured=false`,
+  `stateTransition.advanced=false` (`same_run_population_changed`), continuity e
+  perfect reuse tutti zero, delete/re-add non osservabile e nessun contatore
+  N/14. Il run tecnico riuscito non abilita shadow -> canary.
+- Run #54 `33585398593`: `workflow_dispatch`, HEAD `bafd37d8ed42`, ancora
+  `in_progress` alle 2026-09-02T04:20:44Z e senza artifact a quel timestamp.
 - Entrambi sono manuali: non contano e non spezzano la serie naturale.
 - Ultimi 20 run misurati: 6 cancellati. Recovery e ledger restano critici.
-- Osservabilita' committata: 25.225 job; incomplete 13.734 -> 13.710; drain 20;
-  12.796 `needs_retranslation`; 76 `locale_mismatch_suppressed`.
-- Titoli sospetti: 28.913 / 74.468 = 38,826%. Descrizioni wrong-language:
-  15 / 99.140 = 0,01513%.
 - Il contatore finale resta 0/14 finche' runtime/workflow/schema finali non sono
   live. Ogni modifica alla closure dopo l'avvio azzera la serie.
 
@@ -286,7 +293,7 @@ dopo validazione automatica completa.
 
 | ID | Subissue | Repository/ownership | Stato | Successo verificabile | Prossima azione |
 |---|---|---|---|---|---|
-| T00 | Snapshot, follow-up e metriche live | read-only | audit #53 in corso | ID/SHA/date/denominatori | chiudere artifact audit #53 |
+| T00 | Snapshot, follow-up e metriche live | read-only | #53 auditato; #54 in monitor | ID/SHA/date/denominatori | poll #54 senza dispatch |
 | T01 | Quality executor/memory/provider protocol | sito #7123 | merged | CI+LGTM+auto-merge exact | nessuna |
 | T02 | Provider Argos offline zero-cost | 2 file provider/test | frozen locale | 26/26, detect low, no download | integrare nel core |
 | T03 | Ledger/store/successor primitive | 6 file core | in modifica, non frozen | CAS/replay test | estendere bounds/wiring e rifare freeze |
@@ -376,6 +383,9 @@ minima sicura: **site PR -> corpus PR A -> prova live -> corpus PR B**.
     `--cacert /etc/ssl/cert.pem --resolve api.github.com:443:140.82.121.5`.
 15. **Il checkout main puo' essere sporco.** Non usare reset/checkout/clean sul
     main. Ogni branch/task nasce da `origin/main` in worktree isolato.
+16. **Success non equivale a evidenza shadow.** #53 ha drenato 4.336 elementi,
+    ma non ha baseline, artifact shadow, state advance, continuity/replay o
+    contatore N/14. Il gate resta chiuso anche con outcome tecnico verde.
 
 ## Direzione esatta per un nuovo agente
 
@@ -392,10 +402,10 @@ minima sicura: **site PR -> corpus PR A -> prova live -> corpus PR B**.
    git -C frontaliere-si-o-no/.claude/worktrees/feat-translation-argos-provider-v2 status --short --branch
    ```
 
-4. Prossimo passo unico corrente: completare l'audit read-only artifact/shadow
-   del run #53 e registrarlo nel journal. Non duplicare il core T04-T12. Dopo la
-   consegna core: revisionare diff/test, integrare con cherry-pick del solo
-   commit provider `50c1497...`, eseguire suite combinata e freeze.
+4. Prossimo passo unico corrente: attendere la consegna del core e ispezionarne
+   exact HEAD, diff e test senza duplicare T04-T12. Nell'attesa fare soltanto il
+   poll read-only del #54. Poi integrare con cherry-pick del solo commit provider
+   `50c1497...`, eseguire suite combinata e freeze.
 5. Sul freeze combinato: GitNexus `detect_changes`, sibling audit per-file, PII,
    general reviewer Sol/high e JS reviewer Terra/high. Finding P0-P2 torna al
    worker; il reviewer non corregge.
@@ -429,6 +439,15 @@ Prossima azione unica:
 ```
 
 ## Journal corrente
+
+### 2026-09-02 06:23 CEST — audit artifact #53 completato
+
+- Artifact unico di #53 verificato: observability, nessun shadow preflight.
+- Drain 4.336 e verified 7.091 -> 11.428, ma pending finale 12.915.
+- Baseline assente, state non avanzato, delete/re-add e continuity non
+  osservabili, N/14 mancante: shadow -> canary resta fail-closed.
+- #54 era ancora manuale/in progress senza artifact. Prossima azione globale:
+  acquisire e revisionare il freeze core; T00 continua il solo poll read-only.
 
 ### 2026-09-02 06:20 CEST — drift audit e run #53 concluso
 
