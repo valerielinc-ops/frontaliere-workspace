@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:21 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:26 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -48,10 +48,10 @@ Non lavorare su #6957 o sui worktree translation. Mai merge manuale.
 
 | Task | Owner | File/moduli esclusivi | Repo | Dipendenze | Tier | Stato |
 |---|---|---|---|---|---|---|
-| #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth + rereview locale | 2 | refreeze `2a038daf8` su `ce615a816`, merge-tree clean; 7/7, full 95/96 baseline-only |
-| #7008 probe website | `/root/fix_7008_website_probe` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | integrare latest main + rereview; #7009 attende | 2 | freeze `0dcce8d00`, diff3; merge-tree con `7a3f964` clean ma main non ancestor; test 6+20, probe 19+3 |
-| censimento globale | `/root/resume_6959_lidl` | issue/PR/workflow read-only | entrambi | auth GitHub | 1 | in corso; scartare il censimento scout che ha ricevuto 401 |
-| review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | una coppia di reviewer condivisa, in corso; nessun push prima del verdetto |
+| #658 follow-up Nit post-#726 | `/root/fix_658_injected_resolver` | `scripts/ci/scan-generation-health.mjs`, `generator/tests/generation-health-watchdog.test.mjs` | corpus | publisher/auth | 2 | refreeze `2a038daf8` su `ce615a816`, merge-tree clean; code+TS LGTM0/0, 7/7; pronto per publish |
+| #7008 probe website | `/root/fix_7008_hardened` | `scripts/resolve-company-website.mjs`, `data/company-website-resolved.json`, `tests/resolve-company-website.test.ts` | site | correggere review; #7009 attende | 4 | freeze iniziale bloccata: code Important2/Nit2, TS Important3/Nit1; hardening in corso |
+| mirror backlog remoto | `/root/resume_6959_lidl` | issue/subissue GitHub, read-mostly | entrambi | auth GitHub | admin | crea due parent goal + due audit child e collega tutte le issue esistenti come native subissue |
+| review freeze #658+#7008 | `/root/review_freezes_658_7008` + `/root/ts_review_freezes_658_7008` | read-only sui cinque file totali | entrambi | freeze locali | review | #658 approvata 0/0; #7008 bloccata e da rifreezare/rivedere |
 
 Il vecchio owner `/root/fix_corpus_658_commit_window` non deve piu' ricevere
 #7008: ha terminato tre volte senza edit scambiando per blocker il checkout main
@@ -72,6 +72,15 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
 - Entrambi i push sono bloccati dal token GitHub standard invalido. Il publisher
   deve adottare i commit con il percorso auth gia' usato, dopo il verdetto dei
   due reviewer locali condivisi. Non ricreare le fix.
+- 06:23: code e TS reviewer hanno approvato #658 `2a038daf8` con LGTM0/0.
+  #7008 `0dcce8d00` e' stata bloccata: SSRF/redirect automatici e schema
+  inventato, write non atomica, arbitration che perde il singolo host valido,
+  pool/body non bounded, timeout/idempotenza non realmente osservati e TS2322
+  nel mock. Blast HIGH: ownership trasferita a `/root/fix_7008_hardened` Tier4,
+  commento remoto `5504334982`.
+- 06:26: l'utente ha richiesto parita' locale/remoto. Il publisher sta creando
+  due issue madre (site/corpus), due child di audit finale e relazioni native
+  verso ogni issue esistente; nessun duplicato deve essere creato.
 
 ### Percorso critico esatto
 
@@ -124,9 +133,95 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
 | site #5198 | tracker permanente transient | HTTP transient registrati | non e' closure target del goal salvo finding non classificati | continuare dedup transient |
 | site #6957 | esclusa | traduzioni, owner esterno | non toccare | nessuno |
 
-Il recensus live in corso deve sostituire ogni riga `da ricensire` e aggiungere
-eventuali issue crawler mancanti. Non usare la lista stale prodotta dal primo
-scout (401/API): includeva issue gia' chiuse e non e' evidenza.
+### Recensus live autorevole 2026-09-02 04:22Z — sostituisce le righe incerte
+
+Il publisher ha censito via GraphQL 39 candidate OPEN site e 11 corpus,
+escludendo #6957/traduzioni. Ha classificato 41 core/tracker e 9 adiacenti.
+L'unica PR site crawler aperta al censimento e' #7137 per #7021; nessuna PR
+corpus era aperta. La precedente misura scout con 401 e' invalida.
+
+#### Site: core dovute, bloccate o da verificare
+
+| Issue | Stato/claim | Tier e dipendenza | Metrica di chiusura |
+|---|---|---|---|
+| #5253 | OPEN+mutex, code-level gia' verde | T1, natural 09:00 | artifact fresh, parser strict CRITICAL0 |
+| #6504 | parent logo decomposta | T3 parent -> figli | missing-logo affected jobs 8227->0 o registry accettato |
+| #6918 | 5 key high-impact, 4.759 annunci | T4, asset/decisioni visuali | 5 key -> 0, weekly observer |
+| #6919 | 5 key, 760 annunci | T2, domini verificati | 5 -> 0 |
+| #6920 | 5 key, 443 annunci | T2, domini ratificati | 5 -> 0 |
+| #6921 | 5 key, 323 annunci | T4, asset VD/visual check | 5 -> 0 |
+| #6922 | 5 key, 260 annunci | T4, asset ZKB/Google visual | 5 -> 0 |
+| #6923 | residuo 120 key/1.682 annunci | T3 batch ~5 key, ownership disgiunta | missing120 -> 0 per batch |
+| #6529 | parent website decomposta | tracker #7008->#7009->#7010 | tutte child merged e gate reachability verde |
+| #7008 | OPEN+mutex, Tier4 attivo | hardening review; blocca #7009 | >=22/592 verdict deterministici, timeout bounded, SSRF0 |
+| #7009 | OPEN fix-queued | T2 dopo #7008 | hardcoded www 21->0, fallback registry |
+| #7010 | OPEN fix-queued | T2 dopo #7009 | unreachable <=22 e fail on growth |
+| #6781 | OPEN LOW, causa nota | T2 max2 file | missing-dir warning1, empty-dir0 |
+| #6806 | OPEN+mutex, code fix #7135 | T1 live + history | 23 group verified, >=14 durable, token-null push0 |
+| #6816 | OPEN LOW | T2 se branch davvero dead; prima live | ramo dead eliminato/retirement test, foreign publish0 |
+| #6862 | OPEN+mutex, code fix #7111 | T1 natural | Accor 20/20+, receipt valid, identity/route loss0 |
+| #6903 | OPEN retention | T4 | rejected tombstone >90d, no re-onboard, store bounded |
+| #6908 | OPEN slug journal | T4 identity/history | owner diretti 6 campi 1->0, route/history loss0 |
+| #6932 | OPEN live-verification | T1 | adapter 4/4 live/fixture, identity idempotent |
+| #6979 | OPEN+mutex Gardenia | T4 transport | polite/sticky/deadline 3/3, live identity/route delta0 |
+| #6983 | OPEN+mutex ma code-fixed | T1 live/admin | iPersonal token-bound e route proof, poi close |
+| #7021 | OPEN, PR #7137 e owner esterno | non collidere | acceptance della PR/issue, remote LGTM e merge nativo |
+| #7025 | OPEN Faulhaber JSON/WAF200 | T4 parser/transport | raw payload, WAF fail-closed, live/idempotence |
+| #7026 | OPEN Fust encoding/canonical | T4 identity/parser | accentate preservate, canonical equivalenti, loss0 |
+| #7055 | OPEN Apple false ZH | T4 HIGH geografia | 3/18 national no fake HQ, city/identity/history0 |
+| #7061 | OPEN expiredAt/IT collapse | T4 HIGH route | sort cronologico, no collapse IT, exemption bounded, loss0 |
+| #7064 | OPEN+mutex, code fix #7122/#7110 | T1 natural | prima persist valida e route/history0 |
+| #7107 | OPEN trigger-workflow edge cases | T4 transport | Retry-After, body>1MB, race post-dispatch, attach duplicate0 |
+| #7116 | OPEN exit42 batch commit | T3 ratifica -> T4 | contention bounded senza violare token/receipt; parity artifact |
+| #7128 | OPEN iPersonal wiring/alias | T1 scout -> T4 se reale | removed-set archiviato, alias contamination0 |
+
+#### Site: tracker, stale amministrative e recurrence non indipendenti
+
+- #5198 e' il tracker rolling transient: non chiuderlo; escalation solo 3/3.
+- #5321/#5429 sono tracker sector/profession zero-match, non coverage gap del
+  registry crawler. Il coverage gap crawler e' gia' pre-audit0.
+- #6315 e' un gate corpus-wide con ultima recurrence 25 agosto: rimisurare e
+  auto-chiudere se verde, non dedurre una fix crawler.
+- #6803 e' gia' risolta da #6877/#6851 item2 ma OPEN stale: chiusura admin.
+- #6857, #6930, #6953 e #7024 sono recurrence del run legacy token-null/no-push,
+  non nuovi parser defect: attendere natural token-bound, poi dedup/chiusura.
+- #6983 e' code-fixed da #7039 + route #7108 ma aspetta prova live/admin.
+- Adiacenti esclusi dal goal job-crawler: #4854 (aste), #5510 (article slug),
+  #6611 (article AI smoke), #6681 (consent), #6687 (sparse profiles), #6752
+  (farmacie scheduler). #6957/#7096 traduzioni sono esplicitamente escluse.
+
+#### Corpus: core dovute o tracker
+
+| Issue | Stato | Tier/dipendenza | Metrica |
+|---|---|---|---|
+| #25 | rolling transient | T1, escalation 3/3 | consecutive failures |
+| #331 | identical transport cross-repo | T3 -> T4 dopo confinement | tutti identical trasportati, extra0 |
+| #339 | parent drift | T3 tracker, figli #480/#653/#722 | loop-drift strict0 |
+| #480 | ai-models both-moved parent | T3, figli626-629 closed; #630 open | ai-models byte-identico post-#630+transport |
+| #630 | recordScore opt-out assente | T4 cross-repo/scoring | diagnostico non altera ledger, gemelli byte-identici |
+| #653 | 7 ghost baseline | T3 evidence/manifest | ghost7->0 senza `--init` cieco |
+| #658 | OPEN+mutex | T2 follow-up pronta | `2a038daf8`, review locale 0/0, suite/remote merge |
+| #722 | 7 adapted + scan-job-timeouts drift | T3 cluster -> fix stream | loop-drift strict0 |
+
+Drift live ancora reale su `scan-job-timeouts`, `ai-models`,
+`article-factuality-gates`, `orphanQuerySource` e `github-issue-creator`:
+#722/#480 non sono stale. #662/#668/#692 sono CLOSED. Non esiste una issue
+corpus #6380; il vecchio riferimento non va trasformato in lavoro. Adiacenti
+esclusi: #316 bookkeeping route:none, #659 retry workflow articoli, #694
+immagini eventi.
+
+### Parita' trackpoint locale / backlog remoto
+
+- File locale versionato nel repo root: commit `8331750a`, `cce62a19`,
+  `414f733b`, `f4d3f7a3`; push remoto ancora bloccato dal DNS/token standard.
+- In creazione: parent site `[crawler-goal] Piano esecutivo crawler fino ad
+  audit e persistenza verdi` e parent corpus `[crawler-goal] Piano esecutivo
+  corpus, API, parity e manifest`.
+- In creazione: una child audit finale per ciascun repo. Tutte le issue elencate
+  sopra devono essere relazioni native subissue quando GitHub lo consente;
+  niente issue duplicate. Incompatibilita' di parent vanno documentate nel body.
+- Ogni futura transizione locale deve aggiornare sia questo file/commit sia il
+  parent remoto (body o commento checkpoint) e la issue specifica coinvolta.
 
 ### Matrice dei requisiti finali
 
