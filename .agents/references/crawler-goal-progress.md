@@ -1,6 +1,6 @@
 # Crawler goal — ledger di avanzamento
 
-Ultimo aggiornamento: 2026-09-02 06:15 CEST (Europe/Zurich)
+Ultimo aggiornamento: 2026-09-02 06:17 CEST (Europe/Zurich)
 
 ## TRACKPOINT CORRENTE PER LA RIPRESA — LEGGERE PRIMA DI TUTTO
 
@@ -157,9 +157,10 @@ scout (401/API): includeva issue gia' chiuse e non e' evidenza.
 - Audit loghi su `origin/main@abae6fb4`: 28.562 job, 569 aziende, 432 con
   logo, 137 mancanti/7.579 job. Delle 137, 87 chiavi/5.864 job hanno almeno un
   dominio non-ATS; 50/1.715 hanno solo ATS/aggregator.
-- Assembly temporanea delle 588 slice ha prodotto 25.272 job dopo esclusione
-  foreign/whitelist, backfill 152 ID e risoluzione di 80 collisioni locali.
-  Questi numeri sono diagnostici; non sono il post-run richiesto.
+- Assembly temporanea delle 588 slice ha raggiunto lo stadio `jobs.json` con
+  25.272 job dopo esclusione foreign/whitelist, backfill 152 ID e risoluzione
+  di 80 collisioni locali, ma il processo successivo e' terminato ENOSPC prima
+  del report location. I numeri sono diagnostici parziali, non un gate verde.
 
 ### Errori gia' commessi e come non ripeterli
 
@@ -197,6 +198,11 @@ scout (401/API): includeva issue gia' chiuse e non e' evidenza.
     non ricreare la fix.
 14. Non inviare ripetutamente allo stesso agent un blocker gia' smentito. Dopo
     tre turni #7008 senza edit, sostituire l'owner e registrare il motivo.
+15. Materializzare `scripts+data+build-plugins` in `/private/tmp` ha consumato
+    3,1 GiB e l'assembly e' finita ENOSPC. Le due temp esatte create da questa
+    sessione sono state eliminate (spazio libero tornato a 17 GiB). Per il
+    prossimo audit location usare un worktree/snapshot mirato o attendere il
+    commit dati canonico; non conservare copie complete del corpus.
 
 ### Istruzioni per un nuovo orchestratore
 
