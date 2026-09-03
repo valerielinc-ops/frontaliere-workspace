@@ -1,0 +1,84 @@
+name: Translation trackpoint
+
+on:
+  pull_request:
+    paths:
+      - TRANSLATION-JOBS-GOAL-TRACKPOINT.md
+      - .github/workflows/translation-trackpoint.yml
+  push:
+    branches: [main]
+    paths:
+      - TRANSLATION-JOBS-GOAL-TRACKPOINT.md
+      - .github/workflows/translation-trackpoint.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: translation-trackpoint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate trackpoint invariants
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          set -euo pipefail
+
+          document=TRANSLATION-JOBS-GOAL-TRACKPOINT.md
+          [[ -f "$document" ]] || { echo "missing $document" >&2; exit 1; }
+
+          required_headers=(
+            '# Traduzioni job — piano esecutivo, stato e handoff'
+            '## Definizione di successo invariata'
+            '## Prossima azione globale univoca'
+            '## Vincoli operativi'
+            '## Piano esecutivo atomico'
+            '## Matrice test/failure injection obbligatoria'
+            '## Journal corrente'
+            '| ID | Subissue | Repository/ownership | Stato | Successo verificabile | Prossima azione |'
+          )
+          for header in "${required_headers[@]}"; do
+            grep -Fqx "$header" "$document" || {
+              echo "missing required header: $header" >&2
+              exit 1
+            }
+          done
+
+          status_count=$(grep -Ec '^Goal (backend|operativo):' "$document" || true)
+          [[ "$status_count" -eq 1 ]] || {
+            echo 'expected exactly one Goal backend: or Goal operativo: status line' >&2
+            exit 1
+          }
+          status_line=$(grep -E '^Goal (backend|operativo):' "$document")
+          [[ "$status_line" == *'non completo'* ]] || {
+            echo 'goal status must contain the canonical non completo state' >&2
+            exit 1
+          }
+          residual_status=${status_line//non completo/}
+          shopt -s nocasematch
+          [[ ! "$residual_status" =~ (^|[^[:alpha:]])completo([^[:alpha:]]|$) ]] || {
+            echo 'goal status must not declare completion' >&2
+            exit 1
+          }
+          shopt -u nocasematch
+
+          grep -Eq '^Prova finale corrente: \*\*((0|[1-9]|1[0-4])/14 generazioni naturali consecutive)\*\*$' "$document" || {
+            echo 'final proof must be an admitted 0/14..14/14 natural-generation state' >&2
+            exit 1
+          }
+
+          table_ids=$(awk -F '|' '/^\| T[0-9][0-9] \|/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }' "$document")
+          expected_ids=$(printf 'T%02d\n' {0..23})
+          [[ $(printf '%s\n' "$table_ids" | wc -l | tr -d ' ') -eq 24 ]] &&
+            [[ $(printf '%s\n' "$table_ids" | sort) == "$expected_ids" ]] || {
+              echo 'T00..T23 must each appear exactly once in the plan table' >&2
+              exit 1
+            }
