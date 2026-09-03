@@ -11,7 +11,7 @@ Vincoli operativi non negoziabili:
 - Body PR: `## Implementato` + `## Non implementato (ancora)` — sempre `(ancora)`, entrambi i repo. Bullet sostanziosi PRIMA di qualunque `###` (un heading chiude la sezione). Ogni bullet della seconda sezione ha uno stato letterale: `in questa PR` / `PR concatenata #N` / `blocked: <causa>` / `per scelta`.
 - `--body-file` con heredoc quotato, MAI `--body "..."` (i backtick vengono sostituiti da bash).
 - `gh` sempre con `--repo <owner>/<name>` esplicito, e `--head "$(git rev-parse --abbrev-ref HEAD)"`.
-- Push: `git -c pack.window=0 -c pack.threads=1 push --no-thin --no-verify --force origin <branch>`.
+- Push normale sul clone completo; non usare `--force`, `--no-thin` o i workaround del vecchio clone shallow.
 - MAI mergiare a mano: `tests` verde -> review -> auto-merge su `## LGTM`.
 - Non hai i tool `memory_*` (memory_search/memory_save/...): sono legati solo alla sessione principale, il tentativo fallisce con `No such tool available`. Un fatto degno di nota per la memoria a lungo termine va nel campo MEMO qui sotto, non tentato come tool call.
 

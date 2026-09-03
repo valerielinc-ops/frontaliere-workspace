@@ -12,8 +12,10 @@ git clone https://github.com/<owner>/<nuovo-repo>.git
 printf '/<nuovo-repo>/\n' >> .gitignore     # la root non versiona i repo figli
 ```
 
-Poi una riga nella tabella «I due repo» di `CLAUDE.md`, e — se il repo nuovo ha regole
+Poi una riga nella tabella dei repo di `CLAUDE.md`, e — se il repo nuovo ha regole
 sue (gate della PR, mirror, cicli) — una sezione che dica **dove si fa la
 correzione**, che e' la domanda che fa perdere piu' tempo quando i repo sono piu'
-di uno. Nient'altro: gli agenti, i settings e `bin/` della root valgono gia' per
-chiunque arrivi.
+di uno. `CLAUDE.md` resta la sorgente condivisa: Claude lo legge nativamente e
+Codex tramite `project_doc_fallback_filenames` in `.codex/config.toml`; non creare
+una seconda copia in `AGENTS.md`. Gli agenti, i settings e `bin/` della root
+valgono gia' per chiunque arrivi.

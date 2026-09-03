@@ -22,11 +22,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'"
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'"
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-body-check-gate.mjs\"'"
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-body-check-gate.mjs\"'"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; ( cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true'"
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; ( cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true'"
           }
         ]
       }
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'"
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'"
           }
         ]
       }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-register.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-register.mjs\"'"
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-register.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-watch-register.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-register.mjs\"'"
           }
         ]
       }
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-gate.mjs\"'",
+            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-gate.mjs\"'",
             "timeout": 930
           }
         ]

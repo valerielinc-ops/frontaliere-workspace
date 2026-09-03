@@ -1,0 +1,28 @@
+# Codex legge direttamente il CLAUDE.md esistente: una sola sorgente di verita'
+# mantiene la compatibilita' in entrambe le direzioni.
+project_doc_fallback_filenames = ["CLAUDE.md"]
+project_doc_max_bytes = 65536
+model_verbosity = "low"
+
+[features]
+hooks = true
+multi_agent = true
+
+[agents]
+max_concurrent_threads_per_session = 4
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+WORKSPACE = "/Users/saggesel/Projects/frontaliere"
+SKIP_FUEL_DAILY = "1"
+SKIP_WEEKLY_EMPLOYERS = "1"
+SKIP_JOB_MARKET_SNAPSHOT = "1"
+SKIP_HEALTH_PREMIUMS = "1"
+SKIP_ORPHAN_LANDINGS = "1"
+SKIP_BORDER_WAIT = "1"
+SKIP_CI_CHECK = "1"
+FAST_BUILD = "1"
+NODE_OPTIONS = "--max-old-space-size=12288"
+GOOGLE_APPLICATION_CREDENTIALS = "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json"
