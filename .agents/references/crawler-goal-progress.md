@@ -74,7 +74,7 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
 - 06:20: la prima freeze #658 `b87795329` e' stata scartata per conflitto reale
   con main nei due file. Il fixer ha rifatto l'adozione da `ce615a816` in un
   WT fresh e congelato `2a038daf8c5db815797b5ff7944b77208cd09bd3`.
-  GitNexus upstream LOW/detect due file-un simbolo; node/diff check verdi;
+  impact upstream LOW/detect due file-un simbolo; node/diff check verdi;
   test 7/7, full 95/96 baseline estraneo; merge-tree main pulito.
 - 06:14: #7008 congelata su branch `issue-7008-company-websites`, HEAD
   `0dcce8d00` (feature `4d8edff8` + latest main). Diff esatto tre file, test
@@ -188,7 +188,7 @@ stato aggiornato al nuovo owner nel commento `5504246629`.
   `4efd576c90b3f474fcc35893c55884a4987dd95e`, delta origin/main esattamente
   resolver+test (117 aggiunte/9 rimozioni). Observer causali 28/28,
   tsc mirato/node/diff verdi; sibling sette token `lookupImpl` classificati,
-  stesso antipattern0; GitNexus due file/zero simboli per indice. Code review
+  stesso antipattern0; impact due file/zero simboli per indice. Code review
   locale avviata; TS review sara' serializzata sullo slot esistente, nessun
   nuovo test ridondante e nessun push.
 - 07:31: code review di `4efd576c9` ha trovato Important1/Nit0 reale: il
@@ -618,7 +618,7 @@ immagini eventi.
 - #7101 e' stata ricostruita sopra #7110 e #7114 mantenendo old remote e
   latest main entrambi ancestor, diff 15 file, projection corpus 151+6=157/157,
   train372/372, manifest39/39, ownership19/19, typecheck23<baseline24 e
-  GitNexus LOW/0. Il related finale su 588 file e' ancora running; nessun push
+  impact LOW/0. Il related finale su 588 file e' ancora running; nessun push
   fino al suo esito.
 - #6889 e' reclamata e assegnata a Tier4 perche' include generator+test+tre
   artifact. Nessun WIP remoto esiste; il vecchio WT catchall e' 4408 commit
@@ -716,7 +716,7 @@ immagini eventi.
   live non inventariato; il secondo round ha poi impedito di escludere interi
   file misti dal gate. Il fix deve ora separare soltanto i case live in file
   dedicati, lasciando test unit/causali nel PR gate, poi ottenere nuovo LGTM.
-- #6862 Accor resta Tier4 ma non tocchera' `runSpecInProduction`: GitNexus ha
+- #6862 Accor resta Tier4 ma non tocchera' `runSpecInProduction`: l'impact ha
   misurato il runtime condiviso CRITICAL (25 direct, 50 impacted, 20 moduli).
   La fix ratificata resta locale al crawler: bound conservativo da marker e
   total/pageSize, discovery iterativa fino al cap e replay dello snapshot
@@ -794,7 +794,7 @@ immagini eventi.
 - #7085 `ai-models` e' congelato nel commit `fe2510fd99da`, base
   `34c6032ea9c5`, dopo avere corretto tutti i quattro Important della prima
   review (ranking, delta/snapshot, flush write-failure e test cap). Rereview
-  exact `## LGTM`, Important0/Nit0, 119/119 essenziali e GitNexus LOW/0; il
+  exact `## LGTM`, Important0/Nit0, 119/119 essenziali e impact LOW/0; il
   commit e' stato consegnato invariato al train #7084, senza PR autonoma.
 - Deploy canonico #7049 `33551931249` resta IN_PROGRESS senza dispatch o
   cancel duplicati: FR ed EN sono SUCCESS; DE e' fermo nello step 63 di
@@ -850,7 +850,7 @@ immagini eventi.
   `codex-train-5253-wave-a`: W0 `09ac3baf`, Cippa, KSURI+JobUp, Coop, 1123 e
   2649. Diff esatto 33 file/nessun overlap o estraneo, guard #7076
   preservato, suite combinata 435/435, W0 71/71, syntax/diff/PII/secrets verdi
-  e GitNexus LOW/affected0. Body `/tmp/pr-5253-wave-a-body.md` passa sections
+  e impact LOW/affected0. Body `/tmp/pr-5253-wave-a-body.md` passa sections
   e closes gate, contiene `Refs #5253` + `Closes #6821` e dichiara run/audit
   post-merge come `blocked:`. Attende exact review dell'assemblato; nessun
   push/PR ancora.
@@ -893,7 +893,7 @@ immagini eventi.
   `Closes #6943`, poi un solo push documentato della head `3c8705ba`.
 - Recruitingapp-1123 ha exact rereview interna `Important:0, Nit:0, ## LGTM`
   ed e' congelato clean post-rebase su `48aed9c4046` (main `d58a86c`):
-  102/102 test, diff quattro file, GitNexus LOW/affected0, live x2
+  102/102 test, diff quattro file, impact LOW/affected0, live x2
   0 published/10 detail/10 foreign, URL-ID-route stabili. Nessun push.
 - Recruitingapp-2649 conferma una diversa stale-slice: source live x2 ha 6/6
   detail ricche tutte Bonn/DE; main pubblica zero ma conserva sei falsi
@@ -924,7 +924,7 @@ immagini eventi.
   suite e prova live proprie.
 - Coop e' gia' rebasata su site main `25892705150` come `b62f80128c54`:
   guard #7076 preservato, 169/169 test (166 WIP + 3 regressione #7076),
-  diff/PII verdi e GitNexus LOW/affected0. Nessun push.
+  diff/PII verdi e impact LOW/affected0. Nessun push.
 - Recruitingapp-1123 ha corretto i due Important (conflitto Swiss/foreign e
   canonical URL/ID `/Vacancies/<id>/Description/1`); 28/28 mirati e 102/102
   sibling/route/archive verdi, live doppio idempotente 0/10/10/10. Attende
@@ -942,7 +942,7 @@ immagini eventi.
   `origin/main` in una sola PR/remota review e in un solo audit globale. I run
   gruppo post-merge restano canonici e non duplicati. Nessun altro scope
   entra nel train.
-- KSURI+JobUp e' congelato su `7ad3dc563585`: 201/201 test, GitNexus LOW/0
+- KSURI+JobUp e' congelato su `7ad3dc563585`: 201/201 test, impact LOW/0
   processi, diff/PII verdi; Important batch atomico, geografia/conflitto e
   identita' JSON-LD corretti, Nit throttle/date corretti. Il push e' fallito
   prima dell'invio per autenticazione site; nessun remote/PR e nessun retry.
@@ -1237,7 +1237,7 @@ immagini eventi.
 - Corpus #664/#654/#677 ha gia' 9 twin byte-identici, fingerprint
   SiteShellContract verde, suite seriale 2.520 pass/0 fail/4 skip e build-api
   verde: 30 artifact, manifest 3.663+1.660, sitemap 3.656/1.657, ticker
-  shadowed 0. GitNexus CRITICAL conferma il Tier4 per il fan-out dei 12 file;
+  shadowed 0. L'impact CRITICAL conferma il Tier4 per il fan-out dei 12 file;
   gate e review remota restano obbligatori. Nessun delta site #7050 e' stato
   copiato prima del merge della SSOT.
 - #7038 e' gia' claimed dall'orchestratore; PR #7047 e' merged, ma il nuovo
@@ -1356,7 +1356,7 @@ immagini eventi.
   partito.
 - #7050 ha corretto anche l'Important remoto per tutte le letture/stat
   per-file: commit locale recuperabile `be6edc9d5a1...`, 15/15 observer,
-  63/63 suite mirata, render 6.620 pagine byte-identico, GitNexus LOW e diff
+  63/63 suite mirata, render 6.620 pagine byte-identico, impact LOW e diff
   pulito. Il remote #7058 resta a `5ebebdf7...`; un solo push normale appena
   torna una credenziale site valida.
 - #7040 e' nella PR #7072, head `3821a6a2001...`, con binding al canonical
@@ -1809,7 +1809,7 @@ route, non cancellare gli archive.
   iPersonal ha scritto expired 95→110 e creato il descriptor, poi il sibling
   Agroscope ha eseguito la riconciliazione ghost globale; il batch commit ha
   riletto i path live e ha committato solo 98 expired, perdendo 12 record e 22
-  route. I blob remoti escludono merge/push race. Impact GitNexus del helper
+  route. I blob remoti escludono merge/push race. Impact del helper
   globale: 1 caller diretto, 1.244 simboli impattati, CRITICAL. #7045 richiede
   quindi Tier5 Sol xhigh e descriptor immutabile (blob/hash) con staging dal
   descriptor e test di mutazione sibling post-defer. L'agent diagnostico ha
@@ -1879,7 +1879,7 @@ Nuovi WIP autonomi censiti:
   prefisso generico sono classificate con live path en/ja/zh-hans e gate
   origin/namespace fail-closed. #6949 resta OPEN per item2 Laederach e item3
   Davos; nessuna collisione col filone autonomo.
-- Adozione #6943 rivalutata prima di editare: GitNexus misura LOW sui parser
+- Adozione #6943 rivalutata prima di editare: l'impact misura LOW sui parser
   Prada/Agroscope/Agie/Federal/KSGR, ma CRITICAL su
   `createProspectiveChParser` (66 impattati: 33 direct + 33 depth2). Il Tier4
   si e' fermato correttamente e ha lasciato WT clean
@@ -1904,7 +1904,7 @@ Il goal persistente resta **active**: drenare tutte le issue crawler dei due bac
 ### Snapshot operativo esatto
 
 - Goal: `active`, `tokensUsed=7.101.794`, `remainingTokens` non esposto al 2026-09-01 07:51 CEST. Il weekly limit e' imminente: riusare i tre subagent e la review remota; non aprire review locali o analisi duplicate.
-- Spazio: 18 GiB liberi, filesystem 96%. Non ripulire worktree con WIP/foreign file; gli indici `.gitnexus` ignorati gia' rimossi dove sicuro.
+- Spazio: 18 GiB liberi, filesystem 96%. Non ripulire worktree con WIP/foreign file; gli indici di code-intelligence ignorati gia' rimossi dove sicuro.
 - Nessuna delle PR #6900/#6901/#6905/#6907/#6909/#6912 richiede piu' review: sono tutte merged. L'unico handle di persistenza ancora attivo e' il run corpus Coop esplicitato sotto:
   - **#6900 / #6898 KSM COMPLETATO** — merge `2b271f0a15d3e5809a2164705a1522bdce81e087`, CI e rereview remota LGTM 0/0. Singolo Group18 corpus `33469926943` COMPLETED/SUCCESS; commit dati `1079e63fd35f7b7c215333940b1f38beb6e23df8`. Slice 10→10/common10, ID change0, slug change0, history-loss0; ID/URL/slug unici 10/10, invalid0, thin0. Tre URL Unicode raw mantengono identita'; live source 11 validi/unici, il nuovo detail404 non supera la pubblicazione localizzata e non crea identita' spuria. #6898 richiusa con prova; nessun redispatch.
   - **#6901 / #6822 retirement `de` COMPLETATO** — auto-merge squash `911049299563b9264ad84d3a5b62ff641c9eeb7c`, required run `33469114060` SUCCESS e rereview remota sulla head finale `bb629b48bed14debabff6ce3c3d31de346c1d28b` LGTM 0/0. Persistenza su `main`: 2→0 active, 2 expired Köln, 8 route slug/history preservate, parser/updater/spec/summary assenti, candidate terminale `rejected/DE`, audit canonico `de` 0/0/0 exit 0. #6822 chiusa con evidenza; il percorso reale di ri-elezione dopo prune 90d e' separato in #6903. Russell e' passato a #6784.
@@ -2107,13 +2107,13 @@ Il manifest deve riferire il corpus atteso e conteggi completi/non troncati; i f
 - #6790 LOW: semantics `persisted:true` follow-up site.
 - #6814 LOW: evitare la doppia query `findRecentlyClosedIssueByTitlePrefix` nel cold-start con `dedupKey`.
 - #6784 data-quality / PR #6909 **COMPLETATA**: auto-merge `074cb8b7dfc3f9f634eb734ab0188da70983c29c`, required CI SUCCESS e remote LGTM Important0/Nit0. Origin/main post-merge: dry-run decontamination 0 file/0 slug; confronto parent→merge 20 slice, 9.129→9.129 job, core identity mismatch file0, route loss/add0/0. #6784 CLOSED e commentata con evidenza. Q reviewer: corpus 29.380 record, 159 senza id ma tutti con fingerprint URL stabile, collisioni `dup`0; `needsRetranslation` intenzionale/audit separato; `trackSlugHistoryDrift` same-identity. Sibling LOW #6908 resta.
-- #6786 data-quality / PR #6914: inventario deduplicato finale **118 writer crawler** (43 update locali + 67 dedicated parser + Workday/Greenhouse/SuccessFactors + cleanup/EOC/Swisscom + ABB/Fust). Migrazione chirurgica completata con `dedicated-crawler-common.slugify` invariato; ratchet AST 118/raw0 verde, syntax 119 script verde, suite 103 file/1.763 test verde. Live Burkhalter 255: mid-token 7→0, collision groups1→0, unique255, secondo run byte-identico. GitNexus post-change LOW su 77 file/81 simboli; fan-out Workday CRITICAL preautorizzato e coperto (17 moduli/19 call + 37 upstream). PR head `d330dfaa`, base `82f839ad`, 122 file, diff `91c667f7...`, patch-id `5151a74a`; auto-merge REBASE armato, required CI/review remota in corso. L'hook normale ha bloccato 30 candidati e il push `--no-verify` e' avvenuto solo dopo classificazione per-path completa nel body. Nessun article/taxonomy/SEO/traduzioni.
+- #6786 data-quality / PR #6914: inventario deduplicato finale **118 writer crawler** (43 update locali + 67 dedicated parser + Workday/Greenhouse/SuccessFactors + cleanup/EOC/Swisscom + ABB/Fust). Migrazione chirurgica completata con `dedicated-crawler-common.slugify` invariato; ratchet AST 118/raw0 verde, syntax 119 script verde, suite 103 file/1.763 test verde. Live Burkhalter 255: mid-token 7→0, collision groups1→0, unique255, secondo run byte-identico. Impact post-change LOW su 77 file/81 simboli; fan-out Workday CRITICAL preautorizzato e coperto (17 moduli/19 call + 37 upstream). PR head `d330dfaa`, base `82f839ad`, 122 file, diff `91c667f7...`, patch-id `5151a74a`; auto-merge REBASE armato, required CI/review remota in corso. L'hook normale ha bloccato 30 candidati e il push `--no-verify` e' avvenuto solo dopo classificazione per-path completa nel body. Nessun article/taxonomy/SEO/traduzioni.
 - #6785 data-quality: `mergeUrlKey` preferisce tag `data` al ref reale per PageExecutive (17/19 Michael Page).
 - #6787 HIGH: workflow Crawler Data Quality Audit settimanale fallito; usare come tracker/validazione dei fix #6784-#6786.
 - #6793 parser-health: `chicco-doro` shrink 0/1, da rimisurare live prima di intervenire.
 - #6794 job-content: `gemeinde-st-moritz` usa una voce menu come titolo; da correggere e testare.
 - #6803 follow-up Fust: race summary read/write e fail-loud su rollout misto.
-- #6805 follow-up compatibilita' corpus: artefatto remoto PR #6863/`fix/issue-6805` adottato nel WT sparse `codex/fix-6805-adopt`, rebase clean. Il vecchio rosso era drift di `translate-pending.yml` gia' risolto in main (#6879); il WIP closure-check resta 5 file helper/test. Il difetto reale residuo e' `crawlerIdsFromArtifact`, regex posizionale `id`→`background` nel portable observer identical verso corpus. Blast manuale: 3 call site closure + 2 assert observer; GitNexus UNKNOWN per helper test. In corso parser field-order + fixture, poi rigenerazione contract/hash e test sito/corpus; nessuna PR duplicata.
+- #6805 follow-up compatibilita' corpus: artefatto remoto PR #6863/`fix/issue-6805` adottato nel WT sparse `codex/fix-6805-adopt`, rebase clean. Il vecchio rosso era drift di `translate-pending.yml` gia' risolto in main (#6879); il WIP closure-check resta 5 file helper/test. Il difetto reale residuo e' `crawlerIdsFromArtifact`, regex posizionale `id`→`background` nel portable observer identical verso corpus. Blast manuale: 3 call site closure + 2 assert observer; impact UNKNOWN per helper test. In corso parser field-order + fixture, poi rigenerazione contract/hash e test sito/corpus; nessuna PR duplicata.
 - #6806 follow-up generation barrier: `generationToken` non vincolante e storico durevole non validato.
 - #6870 follow-up careers: per-item malformed non deve abortire l'intero feed; Nord Anglia silent URL-drop e rischio `urlHash` su link grezzo/token rotante. Funnel/slug, da trattare dopo i CRITICAL parser correnti.
 - #6871 follow-up ownership audit: identity query-param allow-list globale non host-scoped e skew suppression 24h che puo' mascherare crawler fermo. File condiviso `crawler-source-hosts.mjs`, richiede audit dataset/impact prima del fix.
@@ -2150,7 +2150,7 @@ Il manifest deve riferire il corpus atteso e conteggi completi/non troncati; i f
 - #6891 HIGH completata/chiusa: PR #6899 merge `5ce254d08b533a125d0507412bf94f67511e9f11`, CI verde e remote LGTM 0/0. Post-merge: Locarno run `33468113915` SUCCESS/source0/no byte change; Hilcona `33468115293` SUCCESS→data `05464ff6`, 160→158 e 158 common con ID/slug/history change0, invalid/thin0; Prada `33468117215` SUCCESS→`810ca859`, 3→1 churn, invalid/thin0 e 3 route rimosse registrate nel ledger. Q remote classificate con prova nel commento; nuovo difetto geo Prada separato HIGH #6904.
 - #6868 CSC HIGH completata/chiusa: PR #6888 merge `7aca9b3b5bfa2fac967f9bbf7b168708dc3b4a01`, primo HIGH redirect corretto e rereview LGTM 0/0; Group09 `33461676649` SUCCESS. Residui reali corretti da #6890/#6896 e verificati col Group09 `33468097013`: adapter/summary source-zero, live+expired assenti, route/ID/slug 0→0. Nessun lavoro CSC residuo.
 - #6857 Faulhaber completata/chiusa: PR #6878 merge `1568e779778c`, remote LGTM/CI verde; unico Group05 `33457398891`, target SUCCESS; commit dati `7a74fb061212`. Persistito 3/3, thin 0, min desc 156, allow-list 3/3; ID/slug/URL live invariati e route univoche nei 4 locali, nessuna route precedente da perdere. Nit LOW #6880.
-- #6800 farmacia Ticino completata/chiusa: PR #6840 merge `907ebddc7029206c031914ba8ce67259968ea4c1`, head `2a6d8de95440`, CI `33462198369`, remote LGTM 0 Important/1 Nit (prefisso `console.warn` Damiani cosmetico). Fix esteso a Wuerth, Damiani e Skyguide: contatori e fail-closed con soglia >=50%, farmacie `_warnings` separati da `_errors`, envelope schema compatibile; 98 test mirati, syntax/merge-tree e GitNexus LOW verdi.
+- #6800 farmacia Ticino completata/chiusa: PR #6840 merge `907ebddc7029206c031914ba8ce67259968ea4c1`, head `2a6d8de95440`, CI `33462198369`, remote LGTM 0 Important/1 Nit (prefisso `console.warn` Damiani cosmetico). Fix esteso a Wuerth, Damiani e Skyguide: contatori e fail-closed con soglia >=50%, farmacie `_warnings` separati da `_errors`, envelope schema compatibile; 98 test mirati, syntax/merge-tree e impact LOW verdi.
 - #5198 transient ledger permanente; #6109 locale quality resta aperta finche' queue >100.
 - Censimento label crawler/data-quality aggiornato: restano anche #5617 job-title locale weekly, #6504 logo aziende, #6529 host `www.` inesistenti, #6772 Fust zero-snapshot, #6781 warning slice newsletter, #6814 cold-start dedup, #6816 Mabetex legacy e #6862 pagination Accor. Sono gia' ordinati sotto i blocker HIGH/parser.
 - Corpus: #663 `searchSafePrefix` risulta CLOSED (2026-08-31). Restano #662 kill-switch/write failure; #676 trasporto `site-ahead:identical` di 24 crawler-group/contract da copiare byte-identico dal sito con baseline manifest; #668 watchdog commit-window troncata dal burst di commit crawler, osservatore gia' implementato e auto-closer ma il burst va ridotto con #6380. Corpus #679 e' drift misto non specificamente crawler, da trattare nel sweep di sync senza violare le ownership `identical`/`adapted`.
@@ -2172,7 +2172,7 @@ Il manifest deve riferire il corpus atteso e conteggi completi/non troncati; i f
 
 - Stash GSC site da preservare: `stash@{0}` / `7f461dfb...`.
 - Non toccare il WT corpus superseded `fix-6746-loop-runtime-contract` o il sentinel staged `fix-6746-observer-sentinel` senza nuova ispezione.
-- Ultimo spazio noto: 18 GiB (filesystem 96%) alle 06:22 CEST. Oltre al detached clean `codex/fix-6760-rebase` (+~669 MiB), rimossi solo indici `.gitnexus/` ignorati e rigenerabili da tre WT storici (~6,9 GB): SuccessFactors, coverage e careers. Preservati `AGENTS.md` foreign nei primi due e l'intero staged WIP careers (8 file); nessun codice/dato cancellato. Preservare stash/sentinel/traduzioni e i WT correnti #6897/#6898; il WT #6822 puo' essere rimosso solo se clean e se non contiene file foreign.
+- Ultimo spazio noto: 18 GiB (filesystem 96%) alle 06:22 CEST. Oltre al detached clean `codex/fix-6760-rebase` (+~669 MiB), rimossi solo indici di code-intelligence ignorati e rigenerabili da tre WT storici (~6,9 GB): SuccessFactors, coverage e careers. Preservati `AGENTS.md` foreign nei primi due e l'intero staged WIP careers (8 file); nessun codice/dato cancellato. Preservare stash/sentinel/traduzioni e i WT correnti #6897/#6898; il WT #6822 puo' essere rimosso solo se clean e se non contiene file foreign.
 - Root worktree dirty preesistente da preservare: `.claude/agents/bl-fixer-lite.md`, `.claude/agents/bl-fixer.md`, `.claude/skills/add-repo-workspace/SKILL.md`, `CLAUDE.md`; `.agents/` e `.codex/` sono untracked/session data. Non includere questi file in PR crawler.
 - Review remota e auto-merge possono richiedere retry per HTTP 429: non cambiare/re-pushare una head approvata solo per forzare il retry.
 
