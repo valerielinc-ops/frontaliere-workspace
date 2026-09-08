@@ -1,0 +1,48 @@
+#!/usr/bin/env node
+
+import { fileURLToPath } from 'node:url';
+import {
+  findWorkspaceRoot,
+  formatHuman,
+  loadManifest,
+  resolvePath,
+  WhereToFixError,
+} from './where-to-fix-lib.mjs';
+
+const args = process.argv.slice(2);
+const json = args[0] === '--json';
+const paths = json ? args.slice(1) : args;
+
+if (!paths.length) {
+  console.error('uso: bin/where-to-fix [--json] <path> [<path> ...]');
+  process.exit(2);
+}
+
+try {
+  const workspaceRoot = findWorkspaceRoot(fileURLToPath(import.meta.url));
+  const manifest = loadManifest({ workspaceRoot });
+  const reports = paths.map((inputPath) => resolvePath(inputPath, {
+    workspaceRoot,
+    index: manifest.index,
+  }));
+
+  if (json) {
+    console.log(JSON.stringify(reports, null, 2));
+  } else {
+    console.log(reports.map(formatHuman).join('\n\n'));
+  }
+
+  process.exitCode = reports.some((report) => !report.repoMatchesFix) ? 1 : 0;
+} catch (error) {
+  if (error instanceof WhereToFixError) {
+    console.error(`✖ ${error.message}`);
+    process.exitCode = error.code === 'ARTICLES_MISSING'
+      ? 3
+      : error.code === 'MANIFEST_UNREADABLE' || error.code === 'MANIFEST_SHAPE'
+        ? 4
+        : 2;
+  } else {
+    console.error(`✖ Errore inatteso: ${error.message}`);
+    process.exitCode = 2;
+  }
+}

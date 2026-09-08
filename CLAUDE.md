@@ -126,6 +126,9 @@ Non correggere direttamente nel corpus un file `identical`: crea
 test nominati dal codice ma non importati; il drift check confronta solo i file
 elencati e non vede queste dipendenze implicite.
 
+Prima di modificare un file condiviso, esegui
+`bin/where-to-fix <percorso>` per verificare il repo corretto.
+
 ## Residui e snapshot
 
 Prima di recuperare un branch o worktree apparentemente orfano, confronta il
