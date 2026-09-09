@@ -178,3 +178,103 @@ morso davvero:
    senza denominatore chiude una issue per sbaglio. (§31, §39)
 3. **Una condizione «su due misure consecutive» nasce con il ref parametrizzato.** Se lo script ha
    `origin/main` hardcodato, la seconda misura non sara' confrontabile con la prima. (§39)
+
+---
+
+## Runbook: come terminare le tre misure rimaste
+
+Le schede sono gia' scritte. **Non riscriverle**: rilanciarle. Ogni scheda contiene i predicati
+corretti, le trappole gia' pagate e la forma della consegna.
+
+### Prima di lanciare: la RAM decide quante ne puoi tenere
+
+```bash
+vm_stat | sed -n '2p'
+sysctl -n vm.swapusage
+```
+
+Sotto **~10.000 pagine libere non dispacciare**. Sopra le 20.000 puoi tenerne tre in parallelo;
+in mezzo, una alla volta. La macchina e' condivisa con le altre sessioni: `ListAgents` dice
+quante sono attive in questo momento.
+
+### La forma di invocazione, obbligatoria
+
+```bash
+cd /Users/saggesel/Projects/frontaliere
+P=~/.claude/plugins/cache/openai-codex/codex/1.0.6
+CODEX_COMPANION_SANDBOX=danger-full-access node "$P/scripts/codex-companion.mjs" \
+  task --write --fresh --model gpt-5.6-luna --effort max "$(cat .scratch/codex-<nome>.txt)" \
+  > .scratch/out-<nome>.txt 2>&1
+```
+
+Sempre in background, sempre con output su file. `CODEX_COMPANION_SANDBOX=danger-full-access` non
+e' opzionale: senza, il companion ricade su `workspace-write`, la rete e' chiusa e i comandi
+falliscono con `Could not resolve host`.
+
+I tre `<nome>` da usare: `m3reg`, `m2b`, `m24b`.
+
+### L'ordine, e perche' e' questo
+
+1. **`m3reg`** — la causa della regressione della condizione 3. Va per prima perche' e' l'unica
+   che va nella direzione sbagliata: finche' la causa e' aperta, le due misure consecutive non
+   possono nemmeno partire.
+2. **`m2b`** — coorte 24-48h. E' una lettura sola e dice se la PR #8080 ha funzionato.
+3. **`m24b`** — punti dati di #24. Non e' bloccante: la issue si chiude da se' quando i punti
+   arrivano a 10.
+
+Se ne lanci una sola, lancia `m3reg`.
+
+### Terminarle: **per ID, mai per firma**
+
+Al lancio in background il tool restituisce un `task_id`. Fermale cosi', una per una:
+
+```
+TaskStop con task_id = <l'id restituito al lancio>
+```
+
+**Mai `pkill -f codex-companion`.** Su questa macchina girano piu' sessioni Claude e tutte
+lanciano Codex con la stessa riga di comando: il pattern non distingue i tuoi job da quelli di un
+peer. E' gia' costato il job di una sessione vicina il 2026-09-09. Vale per qualunque comando che
+selezioni processi per pattern: `pkill`, `killall`, `kill` su output di `ps | grep`.
+
+Se lo fai comunque, **avvisa i peer**: `ListAgents` li elenca, e un messaggio con l'ora e la firma
+usata permette a chi ha perso un job di riconoscerlo invece di inseguire un guasto inesistente.
+
+### Prima di fermare: guarda se ha gia' finito
+
+Un job che sembra fermo di solito ha gia' consegnato. Prima di terminarlo:
+
+```bash
+tail -c 2000 .scratch/out-<nome>.txt
+```
+
+Se ha aperto una PR, cercala prima di rilanciare: un rilancio su lavoro gia' fatto ne produce una
+seconda.
+
+### Quando rientrano: verificare il codice, non il rapporto
+
+Il rapporto di un agente non e' la prova. Per ogni affermazione che tocca il codice:
+
+```bash
+git -C /Users/saggesel/Projects/frontaliere/frontaliere-si-o-no show origin/<branch>:<file> | grep '<la riga>'
+```
+
+Due trappole in questo comando:
+
+- `git show origin/<branch>:<file>` su un ref **non risolto** non fallisce: rende un commit, con
+  exit 0 e nessun errore. Se l'output non ha la forma del file atteso, risolvi prima il ref con
+  `git fetch origin <branch>:refs/tmp/x` e leggi da `refs/tmp/x`.
+- Un `cwd` alla deriva fa dire a git «il file non esiste» invece di «sei nel repo sbagliato».
+  Usa sempre `git -C <path assoluto>`.
+
+### Cosa accettare come risultato
+
+Per ognuna delle tre, il risultato e' valido solo se porta **numeratore e denominatore insieme**.
+Un numeratore solo — soprattutto uno zero — non e' una misura: ha gia' quasi chiuso una issue per
+errore. E per la condizione 3, la seconda misura vale solo se presa **rieseguendo lo script anche
+sul commit precedente** (`REF=<commit> node .scratch/cond3c.mjs`), non confrontandola con un
+numero citato.
+
+Ogni scheda autorizza esplicitamente a **smentire la premessa**. Una premessa smentita con la
+misura che la smentisce e' un risultato corretto, non un fallimento: tre delle sei issue chiuse
+finora si sono chiuse cosi'.
