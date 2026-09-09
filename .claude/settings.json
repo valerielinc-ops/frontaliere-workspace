@@ -22,6 +22,14 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/run-mutation-gate.mjs\"'"
+          },
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-body-write-gate.mjs\"'"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'"
           },
           {

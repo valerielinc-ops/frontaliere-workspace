@@ -7,6 +7,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/run-mutation-gate.mjs\"'",
+            "statusMessage": "Blocco rerun/cancel per evitare review duplicate"
+          },
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-body-write-gate.mjs\"'",
+            "statusMessage": "Controllo riscrittura del body PR"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'",
             "statusMessage": "Controllo dei file gemelli prima della PR"
           },
