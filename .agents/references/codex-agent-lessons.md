@@ -1,11 +1,19 @@
 # Lezioni operative: delegare a Codex nel workspace frontaliere
 
-Raccolte il 2026-09-08 durante una tornata di ~40 deleghe Codex
-(`gpt-5.6-luna`, effort `xhigh`) per chiudere il backlog delle follow-up:
-79 issue chiuse, ~40 PR aperte. Ogni voce qui sotto e' costata un errore reale.
+Registro condiviso fra le sessioni che delegano lavoro a Codex in questo
+workspace. Ogni voce e' costata un errore reale ed e' scritta per essere
+riusata da chiunque deleghi, non come cronaca di chi l'ha pagata.
 
-Aggiungi in fondo, con la data e la misura che l'ha prodotta. Non scrivere
-lezioni non misurate.
+**Come si scrive una voce.** La regola per prima, in forma impersonale; poi la
+misura che la giustifica, col comando o il dato che la produce. Niente prima
+persona, niente riferimenti a «questa sessione»: il caso serve come prova, non
+come racconto. Non scrivere lezioni non misurate, e aggiungi in fondo con la
+data.
+
+Provenienza: il nucleo (punti 0-17) e' stato raccolto il 2026-09-08 durante una
+tornata di ~40 deleghe (`gpt-5.6-luna`) per chiudere un backlog di follow-up —
+79 issue chiuse, ~40 PR aperte — e ampliato lo stesso giorno da altre
+sessioni.
 
 ## 0. La skill del runtime non e' la fonte di verita' sui valori accettati
 
@@ -14,9 +22,10 @@ lezioni non misurate.
 d'errore elenca la stessa lista.
 
 La skill `codex-cli-runtime` del plugin si ferma pero' a `xhigh`. Il 2026-09-08
-ho letto quella skill, l'ho presa per completa, e ho passato ~40 deleghe a
-`xhigh` mentre era stato chiesto `max` — riportando per giunta all'utente che
-«max non e' un valore accettato», che e' falso.
+quella skill e' stata presa per completa: ~40 deleghe sono partite a `xhigh`
+mentre era stato chiesto `max`, e al proprietario e' stato riportato come fatto
+accertato che «max non e' un valore accettato». E' falso, e la premessa e'
+stata usata per decidere.
 
 **Regola: prima di dichiarare che un valore non esiste, chiedilo allo strumento**
 (`--help`, o il messaggio d'errore che elenca le scelte valide), non alla
@@ -68,7 +77,7 @@ voler evitare.
 1. **Metti la forma nel prompt e chiudila**: elenca gli stati letterali ammessi
    (`in questa PR` · `PR concatenata #N` col numero · `blocked: <causa>` ·
    `per scelta` · `by construction`) e di' esplicitamente che **ogni altra
-   formulazione viene respinta**. Le violazioni viste oggi erano tutte
+   formulazione viene respinta**. Le violazioni osservate il 2026-09-08 erano tutte
    invenzioni plausibili ma non canoniche: «deferred, non funnel-critical»,
    «follow-up — review 🟡», «PR concatenata» senza `#N`.
 2. **Chiedi all'agente di eseguire il gate da solo prima di aprire la PR**:
@@ -145,13 +154,13 @@ Sono occasioni di cancellazione che il sito non ha, perche' ha fuso tutto dentro
 `tests.yml`. Coerente con l'osservazione che il fenomeno colpisce le PR su cui il
 ciclo ha gia' lavorato di piu'.
 
-La popolazione istantanea puo' essere vuota (a fine giornata: zero PR aperte
+La popolazione istantanea puo' essere vuota (in una verifica del 2026-09-08: zero PR aperte
 colpite in entrambi i repo), quindi **la prevalenza va misurata sullo storico**,
 non su una fotografia.
 
 ## 0-quinquies. Un token cercato come stringa invece che come verdetto
 
-La classe di errore piu' frequente della giornata: **tre volte, in due sessioni
+La classe di errore piu' frequente del 2026-09-08: **tre volte, in due sessioni
 diverse, su misure indipendenti**. Ogni volta la forma e' la stessa — si cerca la
 presenza di un token nel testo, quando cio' che conta e' il **verdetto** che quel
 token esprime.
@@ -245,10 +254,9 @@ che lo dimostra, non la frase.
 
 ## 4-bis. Non ordinare a un agente di procedere «nonostante» un gate
 
-Corollario del punto 3, imparato subito dopo. Verificato che la
-`pii-blocklist` non esiste nel corpus, ho scritto all'agente: «quel gate non e'
-richiesto qui, procedi con commit e push». **L'agente ha rifiutato**, e ha
-fatto bene: un messaggio che dice a un altro agente di andare avanti nonostante
+Corollario del punto 3. Verificato che la `pii-blocklist` non esiste nel
+corpus, a un agente e' stato scritto: «quel gate non e' richiesto qui, procedi
+con commit e push». **L'agente ha rifiutato**, e ha fatto bene: un messaggio che dice a un altro agente di andare avanti nonostante
 un controllo di sicurezza e' indistinguibile da un tentativo di aggirarlo, e la
 regola giusta e' che nessun messaggio fra agenti autorizzi a cambiare
 comportamenti di sicurezza o permessi.
@@ -280,7 +288,7 @@ Otto run consecutive `skipped` e nessun segnale da nessuna parte.
 Se vuoi che il ciclo raccolga le PR degli agenti, chiedi nomi di branch che i
 suoi predicati riconoscono.
 
-**Il conto di quanto costa sbagliarlo, misurato a fine giornata.** Il predicato
+**Il conto di quanto costa sbagliarlo, misurato il 2026-09-08.** Il predicato
 del SITO non e' un difetto — e' una scelta: il 🔴-fixer commenta
 `REDFLAG_OUT_OF_SCOPE` e si ferma «per design» quando l'autore e' umano e il
 branch non e' `fix/*`. Il messaggio lo dice esplicitamente: *«Se il finding resta
@@ -305,10 +313,10 @@ vive in uno step e commenta, nel corpus viveva nell'`if:` e spariva.)
 
 ## 7. Il censimento invecchia mentre lo leggi
 
-Ho rilanciato un gruppo perche' «non aveva ancora una PR»: l'aveva aperta nel
-frattempo. Risultato, due agenti sullo stesso scope e due PR complementari ma
-ridondanti. Prima di rilanciare, ricontrolla lo stato di quel gruppo specifico,
-non la fotografia che hai in mano.
+Un gruppo rilanciato perche' «non aveva ancora una PR» l'aveva aperta nel
+frattempo: due agenti sullo stesso scope e due PR complementari ma ridondanti.
+Prima di rilanciare, ricontrollare lo stato di quel gruppo specifico, non la
+fotografia gia' in mano.
 
 ## 8. Cosa ha funzionato, e conviene rifare
 
@@ -474,14 +482,15 @@ mappa wayfinder. Risultato: **10 PR mergiate**, tutte con `## LGTM` e zero
 Important sulla review finale. Tutte le voci qui sotto sono costate un errore
 misurato.
 
-## 9. Il costo piu' grosso e' stato il mio brief, non l'agente
+## 9. Il costo piu' grosso e' il brief, non l'agente
 
 **Non rendere assoluto lo «fermati se una premessa e' falsa».** Scritto cosi',
 ferma Codex anche su un dettaglio che non regge il ragionamento. Misura: **due
 giri persi** prima che una riga di codice fosse scritta. Al primo giro si era
-fermato perche' un mio `grep` era stato troncato da un `head` e affermavo che
-uno script non avesse chiamanti — aveva ragione lui. Al secondo si e' fermato
-perche' delle cinque PR che citavo, due erano rosse per un'altra ragione: vero,
+fermato perche' un `grep` del brief era stato troncato da un `head` e
+affermava che uno script non avesse chiamanti — aveva ragione l'agente. Al
+secondo si e' fermato perche' delle cinque PR citate, due erano rosse per
+un'altra ragione: vero,
 ma irrilevante per il difetto da riparare.
 
 La forma che funziona e' dichiarare **quali due o tre affermazioni, se cadono,
@@ -491,13 +500,14 @@ mergiata in un giro.
 
 ## 10. Codex smonta bene le premesse sbagliate: e' un pregio, va autorizzato
 
-Nelle 12 deleghe ha falsificato **due mie premesse su due** in cui avevo torto,
-citando il codice. In un terzo caso ha corretto la mia diagnosi in meglio: avevo
-detto «lo step di rebase e' stato cancellato», lui ha trovato che esiste ma e'
-gattato sulla condizione che manca — piu' preciso e piu' utile.
+Su 12 deleghe ha falsificato **due premesse del brief su due** che erano
+sbagliate, citando il codice. In un terzo caso ha corretto una diagnosi in
+meglio: il brief diceva «lo step di rebase e' stato cancellato», l'agente ha
+trovato che esiste ma e' gattato sulla condizione che manca — piu' preciso e
+piu' utile.
 
-Scrivi nel brief che ha il permesso di fermarti, e nel giro dopo digli che
-aveva ragione. Costa una riga e cambia il comportamento.
+Scrivere nel brief che ha il permesso di fermare chi lo ha scritto, e nel giro
+dopo dirgli che aveva ragione. Costa una riga e cambia il comportamento.
 
 ## 11. Un blocco dichiarato dall'agente va verificato come una misura
 
@@ -587,13 +597,1179 @@ scrive prima che il vecchio venga cancellato.
 
 ## 17. La lista «NON toccare» ha retto anche qui
 
-Confermo la voce 8 di sopra su un campione diverso: **zero conflitti fra agenti
+Conferma della voce 8 su un campione diverso: **zero conflitti fra agenti
 in 12 deleghe**, con fino a 7 job simultanei, elencando per nome i file
-riservati ad altri. Un caso di collisione l'ho evitato a monte spostando il
+riservati ad altri. Una collisione e' stata evitata a monte spostando il
 predicato nuovo in un **modulo separato** invece che dentro il file condiviso,
 riducendo il diff sul file conteso a poche righe.
 
-Un agente ha applicato la regola meglio di come l'avessi scritta: gli avevo
+Un agente ha applicato la regola meglio di come era scritta: gli era stato
 detto di non toccare certi workflow, e ha deciso da solo di leggerli **dai
 commit remoti invece che dal checkout locale**, per non misurare uno stato che
 un altro agente stava modificando sotto i piedi.
+
+## Nota sulla numerazione
+
+Le sezioni 14 e 15 compaiono due volte: il registro viene scritto da piu'
+sessioni in parallelo. Non rinumerare, perche' altri documenti citano i punti
+per numero; aggiungere in fondo.
+
+## 18. Una misura lunga senza stadio intermedio persistito si rifa' da capo
+
+Una scansione che scarica molti artefatti e li aggrega in un solo passaggio
+non ha un punto di ripresa: **ogni correzione del metodo obbliga a
+riscaricare e riparsare tutto**.
+
+Misura: un job che leggeva 2.734 log di run a ~130 log/minuto — ~21 minuti di
+solo parsing per passata — ne ha eseguite **tre integrali in 6h15m**. Le tre
+cause erano tutte legittime e tutte diverse: (1) l'enumerazione incontrava il
+**limite implicito di 1.000 risultati** dell'API e perdeva run senza dirlo;
+(2) la paginazione e' stata rifatta giorno per giorno per recuperarle; (3) i
+conteggi sono stati rifatti dopo la correzione di un predicato (punto
+0-quinquies). Nessuna delle tre era lavoro sprecato per negligenza: due su tre
+erano correzioni che hanno reso la misura valida.
+
+**Nel brief di una misura che scarica molti artefatti, chiedere uno stadio
+grezzo persistito** — un JSONL di record normalizzati, una riga per unita' —
+separato dalla fase di aggregazione. Correggere un predicato diventa allora un
+ricalcolo di secondi invece di una scansione da capo.
+
+E' l'analogo, per gli script di misura, del checkpoint del punto 12: li' serve
+a non perdere il lavoro pagato di un agente troncato, qui a non ripagare il
+tempo di scansione.
+
+## 19. Il messaggio di chiusura di un agente non e' il suo rapporto
+
+Il messaggio finale e' una sintesi scritta a memoria a fine turno; il rapporto
+e' il prodotto verificato. **Possono contraddirsi, e chi relaziona il
+messaggio propaga l'errore.**
+
+Caso misurato: un job ha chiuso dichiarando una coda *«reale e concentrata»*;
+il rapporto che aveva appena scritto diceva *«reale e piccola»* e aggiungeva
+testualmente di non vedere «molte PR sopra 4-5 giri». I numeri davano ragione
+al rapporto. La differenza non e' cosmetica: «concentrata» suggerisce una
+classe da riparare strutturalmente, «piccola» dice che i casi estremi vanno
+capiti uno per uno — cioe' due decisioni opposte.
+
+**Leggere il file, sempre**, anche quando il messaggio sembra esaustivo, e
+soprattutto quando sembra esaustivo. Se il rapporto e' lungo, leggerne almeno
+l'apertura (finestra e snapshot) e la sezione dei bersagli.
+
+## 20. Autorizzare l'agente a smentire la premessa, esplicitamente
+
+Un brief che afferma una premessa la fa assumere. Un brief che **autorizza a
+smentirla** la fa verificare, e l'agente e' spesso nella posizione migliore
+per farlo perche' sta gia' leggendo i dati.
+
+Formule che hanno prodotto correzioni reali:
+
+> Se una di queste risulta falsa, dillo chiaramente: e' un risultato utile
+> quanto una conferma.
+
+> Dove una misura contraddice quanto ti ho scritto sopra, dillo
+> esplicitamente.
+
+Esempi di cosa hanno fatto emergere, tutti su premesse dell'orchestratore o
+del proprietario:
+
+- **un'identita' resa diversamente da due API**: GraphQL espone il login di un
+  bot senza il suffisso, REST con `[bot]`. Filtrando col nome REST, la misura
+  sottocontava proprio la grandezza da misurare;
+- **una quantificazione sbagliata di un ordine di grandezza**: «6-7 check
+  contro 2» era in realta' **13 contro 6**, perche' il conteggio corretto e'
+  sui check-run pubblicati sulla SHA, inclusi gli `skipped`;
+- **la spiegazione piu' comoda, smentita**: due workflow sospettati di usare
+  modelli o cap diversi usavano **lo stesso modello, lo stesso effort e gli
+  stessi cap**, spostando la causa altrove.
+
+## 21. Chiedere la scomposizione, non il confronto della grandezza sospetta
+
+Corollario del punto 20. **Un brief che chiede «verifica che A sia peggio di
+B» nasconde il caso inverso**, perche' orienta la misura su una sola
+grandezza e su un solo verso.
+
+Misura: richiesta la scomposizione di una durata invece del solo totale, la
+coda e' risultata identica nei due sistemi (3,0 s mediani), lo stadio
+sospettato piu' lento nel sistema sospettato (211 s contro 130 s) — e **uno
+stadio che nessuno stava guardando 4,6x piu' lento nell'altro** (399 s contro
+86 s), con un divario che in mediana pesava piu' di quello cercato. Col solo
+confronto del totale quel numero non sarebbe emerso.
+
+**Formulare l'ipotesi in modo simmetrico**: non «verifica che A sia piu'
+lento», ma «scomponi la durata nei suoi stadi e di' dove va il tempo nei
+due». Vale identico per un costo: chiedere la ripartizione, non il totale.
+
+## 22. I log dei job stanno in due directory diverse
+
+Il companion scrive i log sotto `<stateRoot>/<workspace>-<hash>/jobs/`, dove
+`stateRoot` dipende da una variabile d'ambiente del plugin:
+
+- impostata: `~/.claude/plugins/data/codex-openai-codex/state/...`
+- altrimenti, il fallback: `$TMPDIR/codex-companion/...`
+
+**Job lanciati dalla stessa sessione possono finire in posti diversi**, a
+seconda dell'ambiente della shell da cui parte il comando. Se `tail` non trova
+il log, non concludere che il job non e' partito:
+
+    find ~/.claude/plugins/data "$TMPDIR" -name "<job-id>.log" 2>/dev/null
+
+Va letto insieme al punto 15: lo `status` del companion nega il job da
+un'altra sessione, quindi il log e' l'unico oracolo, e sapere **dove** sta e'
+la meta' che manca. Il fatto che il job giri si verifica comunque con
+`pgrep -f "<job-id>"`.
+
+## 23. Instradare i job concorrenti su bucket di rate limit diversi
+
+Il rate limit GitHub e' condiviso fra tutti gli agenti della macchina, e le
+risorse hanno bucket separati: **Actions** (run, job, log) e' la piu' scarsa e
+va in 403 per prima; **core** (pull, review, issue) regge di piu'; **GraphQL**
+e' un bucket a se'.
+
+Misura: con un job che scaricava archivi di log Actions da ore, un secondo job
+instradato su GraphQL non ha incontrato un solo 403, e il controllo finale
+mostrava GraphQL ancora a 5.000/5.000 mentre il core era sceso a 3.883.
+
+> **Correzione, 2026-09-08 sera.** La riga sopra usa `gh api rate_limit` come
+> oracolo per GraphQL, e **non lo e'**. Un terzo job, poche ore dopo, ha letto
+> dallo stesso endpoint **GraphQL 5.000 residue e core 3.974** e ha ricevuto
+> comunque, dalla query successiva:
+>
+>     gh api graphql -f query='query { viewer { login } }'
+>     RATE_LIMIT / graphql_rate_limit — API rate limit already exceeded
+>
+> GraphQL non conta richieste ma **punti**, calcolati sulla dimensione della
+> query, e il contatore esposto da `rate_limit` non riflette ne' quel consumo
+> ne' i limiti secondari. Una query che pagina 60 PR con 40 check-run ciascuna
+> costa moltissimi punti pur restando **una** richiesta.
+>
+> **L'instradamento su bucket diversi resta valido; l'oracolo no.** Per GraphQL
+> il solo controllo affidabile e' **la risposta della query stessa**: tratta
+> `graphql_rate_limit` come condizione attesa, non come anomalia, e falla
+> gestire dallo script — fermarsi e riferire il parziale, come al punto 23.
+> Corollario generale: **un contatore che dice «hai credito» non e' una prova
+> di credito**; la prova e' la chiamata che riesce.
+
+**Prima di lanciare una misura mentre un'altra e' in volo, guardare su quale
+risorsa gira la prima e instradare la seconda altrove.** Nel brief va scritto
+esplicito quale bucket usare, di controllare periodicamente
+
+    gh api rate_limit --jq '.resources'
+
+e la regola che evita il 403 invece di subirlo:
+
+> Se ti avvicini all'esaurimento fermati e riferisci quello che hai: un
+> rapporto parziale con la finestra dichiarata vale piu' di un 403.
+
+## 24. Vietare per nome il comando di riparazione dentro il brief di una misura
+
+«Non modificare niente» non copre le azioni che un agente legge come
+**diagnostiche**. Se il fenomeno da misurare ha un rimedio a un comando,
+quel comando va nominato fra i divieti: un agente diligente puo' lanciarlo per
+«verificare» la propria ipotesi, alterando il dato.
+
+Esempio, in un brief che misurava run cancellate:
+
+> Non fare `gh run rerun` di niente, nemmeno per verificare: e' una misura,
+> non una riparazione.
+
+Stessa logica del punto 10: un vincolo enumerato non lascia spazio a un
+vincolo immaginato.
+
+## 25. Un vincolo di stop va scritto sulla conseguenza temuta, non sull'esistenza del fatto che la produrrebbe
+
+Un brief che ordina di fermarsi davanti a un fatto — «se esiste un
+consumatore che enumera le run per branch, fermati» — ferma l'agente anche
+quando quel fatto **non produce** la conseguenza temuta. Il vincolo va scritto
+sulla conseguenza: «fermati se quel consumatore, dopo la modifica, non trova
+piu' la run». Insieme al vincolo va nominata la verifica che distingue i due
+casi, altrimenti l'agente diligente non ha modo di superare lo stop.
+
+Misura, 2026-09-08: un giro intero perso. Il brief chiedeva di togliere il
+trigger `push` di `generator-ci.yml` nel corpus (462 occorrenze su 237 PR,
+cioe' 1,95 run per PR sulla stessa SHA, 1.802,22 minuti-runner in sette
+giorni) e imponeva lo stop davanti a qualunque lettore per branch. Un lettore
+vero esiste — `.github/workflows/pr-redcheck-fixer.yml:496-498`, che fa
+`gh run list --workflow=generator-ci.yml --branch "$HEAD_REF"` e poi filtra per
+`headSha` — e l'agente si e' fermato senza toccare nulla, come ordinato.
+
+Il fatto era vero e la conseguenza falsa. Le run innescate da `pull_request`
+portano **lo stesso `head_branch` e lo stesso `head_sha`** di quelle innescate
+da `push`, quindi quel lettore le enumera e le seleziona identicamente. La
+verifica costa una chiamata REST:
+
+    gh api "repos/<owner>/<repo>/actions/workflows/<file>.yml/runs?per_page=40" \
+      --jq '.workflow_runs[] | [.event, .head_branch, (.head_sha|.[0:8])] | @tsv'
+
+**Seconda regola dallo stesso caso: la rimozione di un trigger va sostituita
+da una restrizione su popolazione enumerata**, perche' la popolazione servita
+dal trigger non coincide quasi mai con quella dichiarata. Qui cinque SHA su
+~50 avevano **solo** una run da `push`, due delle quali sul branch del mirror
+automatico dell'engine, che viene pushato senza PR aperta: la rimozione
+avrebbe tolto loro il gate in silenzio. La riparazione e' diventata
+`push: branches: [<branch del mirror>]` invece della rimozione del trigger:
+piu' stretta, e con una popolazione enumerata invece che implicita.
+
+Corollario, dallo stesso caso: quando due percorsi producono un duplicato,
+**non risolverlo con la concorrenza**. Un gruppo di concorrenza sulla SHA
+farebbe cancellare una delle due run, e una run `cancelled` del check e' gia'
+stata in questo workspace la causa di PR bloccate pur essendo `MERGEABLE` con
+review approvante (punto 0-quater). Un duplicato costa minuti; un `cancelled`
+costa un merge.
+
+**Nota che conferma il punto 23 su un campione nuovo.** Nello stesso momento
+in cui una query GraphQL riceveva `API rate limit already exceeded`,
+`gh api rate_limit` riportava `core 4996/5000` e `graphql 5000/5000`. Il
+contatore non e' una prova di credito: la prova e' la chiamata che riesce.
+
+## 26. Un evento usato come battito d'orologio non si filtra con la sua semantica
+
+Un workflow puo' usare un evento non per cio' che l'evento *significa*, ma
+solo perche' arriva spesso: un `pull_request_review` che innesca uno sweep
+repo-wide non sta dicendo «questa PR e' cambiata», sta dicendo «e' passato del
+tempo». Filtrarlo con la semantica dell'evento — «lancia solo se la review
+approva» — toglie il battito alle classi che con quella review non c'entrano
+nulla.
+
+**Il discriminante, prima di filtrare un trigger:** guarda se il job usa
+l'identita' della PR dell'evento (`github.event.pull_request.number`,
+`$HEAD_REF`) o se ignora l'evento e rilegge tutto. Nel secondo caso il trigger
+e' un orologio, e l'unica riduzione legittima e' un debounce sul *tempo
+dall'ultimo giro*, non un predicato sul contenuto dell'evento. Se il debounce
+richiede stato persistito, il conto va rifatto: minuti-runner spesi su uno
+sweep frequente comprano una garanzia di latenza, e spenderli puo' essere piu'
+economico che rallentare le PR.
+
+Misura, 2026-09-08, corpus PR #1269. `pr-autorebase.yml` fa 458 run su 252 PR
+e 505,95 minuti-runner in sette giorni, e il brief proponeva di limitarne
+l'innesco alle sole review approvanti. Il reviewer ha falsificato la premessa
+citando il codice: `pr-autorebase.mjs` non lavora sulla PR dell'evento, e il
+suo `nearMerge` copre **quattro** classi (`## LGTM`, `collision-risk`,
+`stale-review`, piu' `stuck-red`). Le tre senza LGTM sarebbero rimaste al solo
+cron `22,52 * * * *`, cioe' proprio la rete che il commento in testa al
+workflow dichiara soggetta al throttling GitHub sui cron ad alta frequenza.
+Il fixer automatico ha riportato il guard alla forma non filtrata, il secondo
+review run ha approvato e la PR e' stata mergiata senza quella parte. Qui i
+505,95 minuti a settimana comprano la garanzia di latenza sulle PR near-merge.
+
+Corollario: **un argomento di sicurezza va verificato contro cio' che il
+codice fa con l'evento, non contro cio' che l'evento dichiara.** L'argomento
+che aveva fatto accettare il filtro era corretto **sul verdetto** (una ricerca
+testuale di `## LGTM` e' un sovrainsieme del verdetto, quindi non puo'
+sopprimere un'approvazione vera) e **irrilevante sul meccanismo**.
+
+## 27. Un gate che decide se qualcosa BLOCCA va scritto con la direzione di fallimento
+
+Quando un predicato decide se un finding, un test o un check **blocca**, la
+regola non e' «sia corretto»: e' **dove cade quando non sa rispondere**. Ogni
+caso non risolvibile — dato troncato, comando a mani vuote, parser incerto,
+path ambiguo — deve cadere sul ramo BLOCCANTE. L'asimmetria e' netta:
+declassare a torto manda in produzione un difetto con l'approvazione addosso,
+bloccare a torto costa un giro di review.
+
+**Nel brief, la regola va scritta come invariante e come test**, non come
+raccomandazione: un caso per ciascun ramo di fallimento che asserisca l'esito
+bloccante. Un test di sola esistenza non la cattura — in questo repo un test
+di esistenza e' gia' stato verde su un gate rotto.
+
+Misura, 2026-09-08, su due brief scritti nella stessa ora, uno con la regola
+dichiarata e uno senza:
+
+- **col default dichiarato** (gating dell'assemble sul sito, PR #8047): tutti
+  i rami non risolvibili rendono `required: true`, con `degraded: true` e un
+  warning CI. Mergiata al primo verdetto utile.
+- **senza** (declassamento dei finding fuori dal diff, corpus PR #1271): il
+  reviewer ha trovato **tre `Important` tutti della stessa classe fail-open**.
+  `fetchChangedFiles()` reimplementava la fetch dei file della PR ignorando il
+  tetto rigido di 3.000 file della REST — che il repo gia' gestiva in
+  `scripts/ci/lib/fetchPrFiles.mjs` con `REST_FILES_HARD_CAP` e
+  `{files, complete, reason}` — quindi su una PR di rigenerazione del corpus
+  (14.888 file sotto `content/`, che ordinano prima di `scripts/`) i file di
+  codice cadono oltre il cap, ogni finding risulta «fuori dal diff», il gate
+  diventa verde e l'auto-merge passa col difetto mai indirizzato. Un `gh` a
+  mani vuote produce lo stesso esito. Idem per un tree non recuperabile.
+
+Corollario, dallo stesso caso: **prima di scrivere una fetch, cerca se il repo
+ne ha gia' una che conosce il limite**. Il modulo che evita esattamente quella
+troncatura esisteva ed era stato scritto per quel motivo.
+
+## 28. Un tetto sui giri di review va tarato dove la coda si separa dal corpo della distribuzione
+
+Un tetto sui giri serve a fermare i loop che non convergono, e va tarato sulla
+distribuzione misurata dei giri, non su un numero plausibile: va sopra la
+mediana, e sotto la coda taglia dentro l'iterazione ordinaria e fabbrica punti
+morti — PR ferme con
+finding reali, piccoli e dentro lo scope. La fermata deve inoltre chiedere
+**quali** finding restano e se sono nuovi o gli stessi: un tetto che ferma
+senza quella domanda non distingue una PR che non converge da una che stava
+per chiudere.
+
+Misura: un tetto «se dopo due giri il rosso non si chiude, fermati», messo in
+un brief per evitare i loop, ha fermato una PR al terzo giro con tre finding
+reali, piccoli e tutti dentro lo scope della PR — iterazione ordinaria, non un
+loop. Il dato che lo avrebbe tarato correttamente era gia' misurato: su 750 PR
+in sette giorni, le PR con almeno 3 giri sono 29 su 490 nel sito (5,9%) e 30
+su 260 nel corpus (11,5%). **Un tetto a 2 taglia dentro il corpo della
+distribuzione, non sulla coda.** La coda vera comincia sopra i 5 giri, dove le
+PR sono 2 nel sito e 6 nel corpus. Un tetto serve comunque, perche' l'outlier
+osservato e' arrivato a 15 giri.
+
+## 29. Una tecnica non si dichiara inefficace sulla popolazione che ha appena drenato
+
+Prima di dichiarare che una tecnica non paga, va chiesto se la popolazione su
+cui la si misura e' stata **appena drenata da quella stessa tecnica**. Una coda
+vuota dopo un drenaggio riuscito e' indistinguibile da una coda che non c'e'
+mai stata, se si guarda solo la fotografia di oggi. Il discriminante e' il
+**flusso di ingresso**, non lo stock: quanti elementi raggruppabili *entrano* a
+settimana, non quanti ce ne sono adesso.
+
+Secondo vincolo, sullo **scope della misura**: va coperta la famiglia dove la
+tecnica si applica, non la label piu' comoda da interrogare. Le famiglie che si
+raggruppano meglio — errori ricorrenti dei crawler, fallimenti di validazione
+del deploy, issue aperte automaticamente con una firma strutturata nel titolo —
+non portano la label `follow-up`, quindi un funnel costruito su quella label
+misura il sottoinsieme sbagliato.
+
+**Regola generale**: una ricetta di raggruppamento va validata sulla
+**distribuzione viva** prima di scrivere una riga, e la domanda giusta non e'
+«quante issue ci sono» ma «quante sopravvivono a ogni stadio del funnel».
+Il conteggio a monte non predice i gruppi a valle.
+
+Corollario per chi delega: **autorizzare esplicitamente l'agente a fermarsi
+prima di implementare** se la distribuzione non paga. Senza quella riga nel
+brief, la macchina si costruisce lo stesso e raggruppa a vuoto; con quella
+riga, la misura qui sotto e' arrivata prima del codice.
+
+Misura, 2026-09-09, come fotografia delle sole issue con label `follow-up`.
+La ricetta valutata: «raggruppa le follow-up per il file citato nella riga
+`Suggested action`, ~191 issue in ~60 gruppi da 3, cosi' paghi un ciclo di
+review invece di tre». Popolazione viva:
+
+| repo | follow-up aperte | con `Suggested action` | con >=1 file risolvibile | con UN SOLO file (raggruppabili) | gruppi | distribuzione |
+|---|---:|---:|---:|---:|---:|---|
+| sito | 131 | 123 | 72 | 37 | 33 | 29x1, 4x2 |
+| corpus | 81 | 64 | 29 | 15 | 15 | 15x1 |
+
+**Nessun gruppo da 3**, gruppo massimo 2, e le quattro coppie del sito sono
+eterogenee per classe di difetto. Risparmio teorico 4 cicli di review,
+risparmio sicuro **zero**. Il collo non e' il criterio ma il **funnel**: di 131
+follow-up solo 37 arrivano a essere raggruppabili, perche' molte non hanno la
+riga, molte ne citano piu' d'uno e molte citano un file non risolvibile. La
+premessa era stata scritta quando il backlog era piu' grande e piu'
+concentrato; il drenaggio l'ha dispersa.
+
+**Conclusione ritirata.** Dagli stessi numeri era stato concluso che «il batch
+per file bersaglio non paga piu': la ricetta non regge sui dati attuali»: e' un
+fatto locale, e sbagliato come verdetto sulla tecnica. La popolazione era esaurita **proprio perche' il raggruppamento
+aveva appena funzionato** — il giorno prima oltre 100 issue erano state chiuse
+raggruppandole a mano — quindi il funnel misurato e' il **residuo** di una
+tecnica riuscita, non la prova che la tecnica non serve. I numeri della tabella
+restano validi come fotografia al 2026-09-09; la conclusione «non paga» no.
+
+## 30. Un agente di misura sostituisce il predicato che gli hai dato, e il numero sbagliato sembra un successo
+
+Chiesto a un agente di misurare una coorte usando `isIncomplete(job)` — la funzione canonica
+di 130 righe esportata dal codice di produzione — e `jobQueuedAtMs(job)` per l'eta'. L'agente
+ha reimplementato entrambi: soglie a mano su `titleByLocale`/`descriptionByLocale` al posto
+del primo, `job.crawledAt` nudo al posto del secondo.
+
+Risultato: **99,5%** contro una baseline di 73,9%. Sembrava un balzo di 25 punti.
+La stessa coorte, misurata col predicato vero da un secondo agente, dava **81,3%**.
+I 18 punti di differenza erano interamente artefatto della riscrittura: `isIncomplete` contiene
+controlli — fra cui `titleLooksUntranslated` — che una soglia di lunghezza non replica, e
+`jobQueuedAtMs` ha una catena di fallback (`firstSeenAt` -> `postedDate` -> `crawledAt` ->
+`datePosted`) di cui `crawledAt` e' solo un anello, quindi la coorte stessa era diversa.
+
+**Why:** un predicato reimplementato e' quasi sempre **piu' lasco** dell'originale, perche'
+l'agente replica i controlli che vede e non quelli che non ha letto. Un predicato piu' lasco
+produce un numero migliore. Quindi l'errore non si presenta come errore: si presenta come
+progresso, ed e' esattamente il numero che si voleva vedere.
+
+**How to apply:**
+- Nel brief, **nomina il predicato come funzione da importare**, col file e la riga, e scrivi
+  esplicitamente «non reimplementarlo». Spiega *perche'* non basta riscriverlo: quante righe e'
+  e quale controllo non ovvio contiene.
+- Spiega **come importarlo senza side effect** (estrarre il sorgente da `git show` in uno
+  scratchpad e importare la copia), altrimenti l'agente che sbatte contro un import fallito
+  reimplementa per andare avanti.
+- Pretendi nel rapporto **il predicato realmente eseguito, verbatim**, non solo il numero.
+  E' l'unico modo per accorgersi della sostituzione: il numero da solo non la rivela mai.
+- Autorizza esplicitamente il fallimento: «se non riesci a importarlo, fermati e dillo, meglio
+  nessun numero che un numero non confrontabile». Senza quella riga l'agente preferisce
+  consegnare qualcosa.
+
+## 31. Due agenti sulla stessa claim danno zero e quarantuno: vince quello che non ha riscritto il predicato
+
+Sulla stessa issue, a un giorno di distanza, due misure indipendenti dello stesso stato hanno
+reso **0 job** e **41 job su 16 crawler**. La differenza non era il tempo: era che una delle
+due aveva ricostruito a mano il predicato descritto a parole nella issue invece di eseguire
+quello del codice.
+
+Uno zero e' il risultato piu' pericoloso che un agente di misura possa consegnare, perche' e'
+indistinguibile da «difetto risolto» ed e' l'esito che chiude un ticket.
+
+**How to apply:** prima di chiudere una issue su uno zero, **fai rendere all'agente anche il
+conteggio del denominatore** — quanti record ha scandito, quanti hanno il campo, quanti
+passano il primo dei congiunti. Uno zero con denominatore zero e' un bug del misuratore; uno
+zero con denominatore grande e' un fatto. Chiedere i due numeri costa una riga di brief e
+smaschera la classe intera. Vedi [[30]] per il caso gemello dove la sostituzione produce un
+numero troppo buono invece di uno zero.
+
+## 32. Una condizione di destinazione puo' essere insoddisfacibile: misurane il massimo storico prima di lavorarci
+
+Una delle tre condizioni di chiusura di una mappa chiedeva che una metrica salisse e un'altra
+scendesse **per 7 esecuzioni consecutive**. Misurata sui 100 punti strumentati realmente
+esistenti — 99 transizioni su 24 giorni — la catena massima mai raggiunta era **5**, e quella
+corrente 0. La metrica saliva in 59 transizioni su 99 e l'altra scendeva in 67 su 99: due
+eventi indipendenti al ~60-68%, quindi sette di fila hanno probabilita' inferiore all'1%.
+
+La causa non era il lavoro: un processo esterno (crawler che immettono record nuovi) alzava il
+contatore «incompleti» per ragioni scorrelate. La condizione chiedeva implicitamente che quel
+rumore tacesse per sette giri.
+
+Sulla **stessa serie**, la quota `complete/(complete+incomplete)` su media mobile a 3 punti
+aveva una salita consecutiva massima di **22**, ed era passata da 57,2% a 75,5%. La convergenza
+c'era, e abbondante: era il criterio a non poterla vedere.
+
+**Why:** un criterio di destinazione formulato su una **differenza punto a punto** e' fragile a
+qualunque rumore additivo in ingresso; formulato su un **rapporto** o su una media mobile, non
+lo e'. La differenza fra i due non si vede leggendo la formulazione, si vede solo misurando il
+massimo storico.
+
+**How to apply:** appena una destinazione e' espressa come «per N volte consecutive», misura
+**subito** il massimo storico di quella catena sui dati che gia' esistono, prima di dispacciare
+un solo task per raggiungerla. Se il massimo storico e' sotto N, il lavoro non e' «non ancora
+finito»: e' diretto a un bersaglio che non esiste, e va rinegoziato col proprietario portando
+il massimo storico, la formulazione alternativa e **il suo** massimo storico — cosi' la
+riformulazione non sembra un ammorbidimento, che e' l'unica ragione per cui verrebbe rifiutata.
+
+## 33. Il tetto del job e' un vincolo di progetto, non un incidente
+
+Tre run di uno stesso workflow morte a **355 minuti esatti** in tre giorni consecutivi, sempre
+quella lanciata dallo stesso cron. Non era eviction della coda di concorrenza: era
+`timeout-minutes: 350` piu' i cinque minuti di grazia di GitHub. Il tetto non era alzabile —
+per un job su runner hosted il massimo e' 360 minuti.
+
+Il costo vero non era la run persa. Era **dove** moriva: dopo il commit dei risultati ma prima
+del commit della observability. Il punto dati che serviva a misurare la convergenza veniva
+prodotto e mai scritto, una volta su sei.
+
+**How to apply:**
+- Una `conclusion: cancelled` ripetuta si diagnostica confrontando `startedAt` e `completedAt`
+  **del job**, non della run: la durata della run include l'attesa in coda e nasconde la firma.
+  Una durata costante al minuto e' un tetto, non un caso.
+- In un workflow lungo, la domanda non e' «quanto dura» ma **«quali step stanno dopo l'ultimo
+  commit»**: quelli sono il lavoro che si perde per intero a ogni morte. Se fra loro c'e' uno
+  step che scrive una misura, il guasto e' doppio e il secondo e' invisibile.
+- Il rimedio non e' `timeout-minutes` sul singolo step, che uccide un processo a meta'
+  scrittura: e' un budget a orologio letto dallo script, che si ferma da solo e persiste quello
+  che ha completato. Se un altro script della stessa pipeline ce l'ha gia', **passa quello come
+  modello nel brief** invece di lasciare che l'agente ne inventi una forma nuova.
+
+## 34. La funzione giusta con la semantica sbagliata: un predicato di accodamento non e' una metrica di qualita'
+
+Dopo aver imposto in un brief «usa `genderFormOffence`, non riscriverla» — che e' la regola del
+punto 30 — l'agente ha obbedito alla lettera e ha reso **42,72%** contro una baseline di 30,0%.
+
+Il predicato era quello giusto e l'agente non aveva sbagliato niente di quanto chiesto. Ma
+`genderFormOffence(job)` guarda **solo il titolo sorgente**: rende non-nullo quando il titolo
+tedesco d'origine contiene una forma di genere, e ignora del tutto le traduzioni prodotte.
+Il titolo sorgente **non cambia mai**, nemmeno dopo una ritraduzione perfetta.
+
+Quel numero quindi **non puo' scendere per costruzione**. Usato come metrica di destinazione,
+avrebbe tenuto la condizione aperta per sempre, e ogni ciclo di lavoro fatto per abbassarlo
+sarebbe stato speso contro un bersaglio immobile.
+
+La funzione serviva a **scegliere cosa rimettere in coda** — un predicato di *accodamento*. La
+condizione chiedeva **quanto e' sbagliato l'output** — un predicato di *qualita'*. Due domande
+diverse che la stessa parola («offesa») copriva.
+
+**Why:** il punto 30 dice «non riscrivere il predicato», ed e' giusto. Ma applicato senza la
+domanda a monte produce l'errore simmetrico: si esegue fedelmente una funzione che misura
+un'altra cosa. Il primo errore rende un numero troppo buono, questo rende un numero che non si
+muove; entrambi passano inosservati perche' il codice eseguito e' inappuntabile.
+
+**How to apply:**
+- Prima di adottare una funzione esistente come metrica, chiedi: **cosa deve cambiare in questi
+  dati perche' il numero scenda?** Se la risposta e' «un campo che nessuno riscrive mai» — un
+  input, un sorgente, un identificatore — la funzione non e' una metrica, e' un filtro.
+- Una metrica di qualita' deve leggere **l'output** del processo che stai misurando, non il suo
+  input. Nel brief scrivilo esplicitamente: nomina il campo che la misura deve guardare, non
+  solo la funzione da chiamare.
+- Il controllo che smaschera la classe intera, e costa una riga: **un predicato di destinazione
+  deve poter valere zero.** Se non esiste nessuno stato raggiungibile dei dati in cui vale zero,
+  non e' una destinazione.
+
+## 35. Le misure vanno a Codex come le implementazioni, non a un subagent che legge a memoria
+
+Istruzione del proprietario, 2026-09-09: nel workspace frontaliere **nessun subagent Claude**.
+Non solo le implementazioni — anche le **misure** e le **schede**. L'orchestratore fa solo le
+letture brevi e decisive che gli servono per decidere; tutto il resto parte come task Codex.
+
+La ragione non e' formale. Nella stessa sessione due subagent di misura avevano gia' sbagliato
+in modi che appartengono alla loro natura: uno aveva **riscritto** il predicato canonico invece
+di importarlo, rendendo 99,5% al posto di 81,3% (vedi punto 30); un altro aveva reso **zero** su
+una claim che valeva 41 (punto 31). Un agente che lavora leggendo excerpt ricostruisce il
+predicato dalla descrizione; Codex, che apre il file e lo importa, non ha quel margine.
+
+**How to apply:** una misura delegata a Codex si scrive come una scheda di implementazione —
+bersaglio con file e riga, predicato da importare e non riscrivere, formato dell'output, e il
+denominatore da rendere insieme al numeratore. Per attivita' brevi si puo' usare il plugin
+ufficiale invece di un task lungo. Quello che l'orchestratore tiene per se' e' solo cio' che sta
+in una chiamata: uno `git show`, un conteggio, lo stato di una run.
+
+## 36. «Fermati se i numeri non tornano» ferma anche quando il criterio E' soddisfatto
+
+In una scheda erano scritte due cose che sembravano la stessa: il **criterio di successo**
+(«la fascia bersaglio al 100% e nessun'altra sotto il 12,7% di oggi») e la **previsione** di una
+simulazione (una tabella di percentuali attese per ogni fascia). In fondo la scheda diceva: «se
+la tua misura non riproduce questi numeri, fermati e riportalo invece di inseguirli».
+
+L'agente ha misurato **30,0%** su una fascia dove la previsione diceva ~32,7%, si e' fermato, e
+ha lasciato tutto non committato. Aveva ragione secondo l'istruzione. Ma il criterio vero era
+soddisfatto con margine — la fascia bersaglio era passata dal 12,7% al **100%**, il minimo fra
+tutte le fasce era **25,8%**, il doppio della soglia — e una fascia era perfino **migliorata**
+in un modo che nessuno aveva previsto.
+
+Lo scarto non era un difetto: la simulazione era girata su una coda di 15.986 elementi, la
+misura su una di 9.763. Code diverse, frazioni diverse.
+
+Costo: un giro di dispatch in piu' per far consegnare lavoro gia' finito e gia' corretto.
+
+**Why:** la clausola «fermati se i numeri non tornano» e' giusta e va tenuta — e' quella che
+impedisce a un agente di ritarare un tetto finche' la tabella non combacia, che e' il modo in
+cui si fabbricano numeri. Ma se nella stessa scheda convivono una previsione e un criterio senza
+che sia detto **quale dei due decide**, la clausola si attacca alla previsione, che e' la cosa
+piu' simile a «i numeri».
+
+**How to apply:** in una scheda che porta sia una previsione sia un criterio, **etichettali** e
+di' esplicitamente quale comanda. La forma che funziona:
+
+> Il criterio di accettazione e' X. La tabella qui sotto e' una **previsione** da una
+> simulazione su uno snapshot diverso: serve da riferimento, **non** da criterio. Se il criterio
+> e' soddisfatto ma la previsione no, **consegna** e spiega lo scarto nel body. Fermati solo se
+> il **criterio** non e' soddisfatto.
+
+E siccome una previsione nasce quasi sempre su dati piu' vecchi di quelli su cui l'agente
+misurera', **dichiara la dimensione dello snapshot** da cui viene: e' l'informazione che rende
+lo scarto spiegabile invece che sospetto.
+
+## 37. La `cwd` scivolata fa dire a git «il file non esiste», non «sei nel repo sbagliato»
+
+In una sessione con piu' repo affiancati, un `cd` dentro un comando composto lascia la shell
+degli strumenti in quella directory per **tutte le chiamate successive**. Il sintomo arriva dopo,
+su un comando che non c'entra:
+
+```
+fatal: path 'scripts/lib/job-traffic-priority.mjs' does not exist in 'origin/main'
+```
+
+Letto di corsa dopo un merge, quel messaggio dice «il file e' stato cancellato dalla PR appena
+mergiata» — che e' un allarme grosso, e in una verifica post-merge e' esattamente l'ipotesi che
+si ha in testa. La causa vera era che la directory corrente era una cartella di appoggio, e
+`origin/main` di *quel* contesto e' un altro albero.
+
+**Why:** il messaggio nomina il **path** e il **ref**, cioe' le due cose che hai scritto tu, e
+tace sull'unica che non hai scritto — il repository in cui sta guardando. Nessuna delle due
+informazioni stampate e' sbagliata, quindi non c'e' niente che stoni.
+
+**How to apply:** nelle verifiche post-merge usa sempre `git -C <path-assoluto-del-repo>` invece
+di affidarti alla directory corrente. Costa sei caratteri e rende il comando riproducibile da
+qualunque stato della shell. E se un `git show origin/<ref>:<file>` dice che un file non esiste,
+**prima di credere che sia stato cancellato stampa `pwd`**: la spiegazione noiosa viene prima di
+quella allarmante.
+
+## 38. `git show <ref>:<file>` su un ref non risolto rende altro, e sembra un file rotto
+
+Verifica post-PR di un branch appena pushato da un agente:
+
+```
+git fetch -q origin "$B"
+git show "origin/$B:scripts/relocalize-pending-jobs.mjs"
+```
+
+`git fetch origin <branch>` scrive in `FETCH_HEAD`, **non** crea il ref locale
+`origin/<branch>`. Il `git show` successivo non ha reso il file: ha reso **il commit**, cioe' un
+diff. Uscita 0, nessun errore.
+
+Il risultato letto di corsa e' allarmante nel modo peggiore: 326 righe invece di 2.274, 14 KB
+invece di 108 KB, e dentro righe che cominciano per `+` e `-` e assertion di test dentro quello
+che dovrebbe essere uno script di produzione. La lettura naturale e' «l'agente ha committato un
+file di patch sopra il sorgente e ha distrutto lo script». Falso: il branch era sano, il file
+aveva 2.291 righe.
+
+**Why:** l'errore non si annuncia. Non c'e' `fatal:`, non c'e' exit diverso da zero, e l'output
+e' plausibile come contenuto di *qualche* file. E' lo stesso genere di trappola del punto 37 —
+git risponde a una domanda diversa da quella che credi di aver posto, senza dirtelo.
+
+**How to apply:**
+- Per leggere un file da un branch remoto, **risolvi il ref esplicitamente**:
+  `git fetch origin <branch>:refs/tmp/<nome>` e poi `git show refs/tmp/<nome>:<path>`.
+- **Prima di trarre conclusioni, guarda la forma di cio' che hai letto**: conta le righe e
+  stampa la prima. Una prima riga `commit <sha>` dice che stai leggendo un commit; un conteggio
+  righe che si discosta di un ordine di grandezza da `origin/main` dice che non stai leggendo
+  quel file.
+- Vale in particolare quando la conclusione sarebbe grave. Un sospetto di rottura catastrofica
+  merita una seconda lettura **prima** del rapporto, non dopo: la spiegazione noiosa —
+  ho letto la cosa sbagliata — e' quasi sempre quella giusta.
+
+## 39. I giri di review hanno due cause opposte, e confonderle porta alla riparazione sbagliata
+
+Prima di intervenire su una PR che non converge, stabilire **dove cadono i
+finding rispetto al diff**: la riparazione e' diversa e sta in due punti opposti
+della catena.
+
+- **Finding FUORI dal diff corrente**: il reviewer allarga la superficie a ogni
+  giro e la convergenza e' impossibile per costruzione. Si ripara nella review,
+  declassando il finding fuori scope a lavoro coniato invece che bloccante.
+- **Finding DENTRO il diff, su codice appena scritto**: e' il fixer che
+  introduce un difetto nuovo mentre ne ripara uno. Si ripara nella qualita'
+  della fix, non nella review. Stringere il cap dei giri qui **peggiora**: fa
+  mergiare il difetto.
+
+Misura di riferimento, 2026-09-09, PR sito #8082 (tre giri, tre SHA diverse,
+cinque commit, un `Important` per giro, nessun rerun):
+
+1. iterazione per code point (`[...text]`) con offset in indici UTF-16;
+2. namespace di una chiave non uniforme fra due rami;
+3. il flag `m` su una regex di sezione che rompe la lettura su ogni input reale.
+
+**Le tre hanno la stessa firma: semantica di stringa che i test non coprono.**
+La suite passava a ogni giro; il reviewer ha trovato tre regressioni vere.
+
+**Regola operativa che ne segue:** una fix che cambia una regex, un calcolo di
+offset o la forma di una chiave deve portare un test su un **input realistico**,
+non sul caso che l'autore ha in mente. Il terzo finding sarebbe stato rosso con
+un solo file di configurazione vero nel fixture. Un test costa meno di un giro
+di review, che sul sito ha una mediana di 384.354 token.
+
+**Corollario sul giudizio:** un numero alto di giri non e' di per se' spreco. Su
+codice che finisce in una posizione critica — un hook davanti a ogni comando, un
+gate required — i giri che intercettano regressioni reali sono il prezzo giusto,
+e vanno confrontati col costo del difetto che avrebbero fatto passare.
+
+# Aggiunte del 2026-09-09 — audit Company Alerts
+
+## CA-1. Non si dichiara `exactly-once` per la sola presenza di una mappa di deduplica
+
+Per dichiarare `exactly-once` si devono provare separatamente interruzione fra
+provider e writeback, concorrenza, esito `ambiguous` e identità mancante; una
+`sentJobIds` map è memoria post-invio e non una riserva atomica.
+
+Misura: su quattro scenari B, `candidateAfterWritebackFailure` è 1/1, i
+candidati concorrenti sono 2/2 e i candidati id-less sono 1/1. Prova:
+
+```bash
+jq '.measures.dedupFailureModes, .actualPredicates' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/B/aggregate/metrics.json
+```
+
+## CA-2. Non si tratta un HTTP 2xx come acknowledgement senza un ack esplicito
+
+L'esito del provider si conserva come `accepted`, `failed` o `ambiguous`; un
+body `{}` non autorizza a marcare l'offerta inviata e fake acceptance, provider
+acceptance e delivery all'inbox restano prove distinte.
+
+Misura: nel probe B `empty200TreatedAsAccepted` è 1/1,
+`providerAcceptanceRequiresExplicitAck` è `false` ed `externalRequests` è
+`false`. Prova:
+
+```bash
+jq '.measures.provider, .actualPredicates.providerAcceptanceRequiresExplicitAck' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/B/aggregate/metrics.json
+```
+
+## CA-3. Un consenso o una soppressione ignoti si rinviano con motivo recuperabile
+
+Documento assente, `pending`, errore di lookup e stato sconosciuto non possono
+cadere nel ramo inviabile; il defer deve conservare motivo e percorso di
+recupero, non soltanto emettere un warning.
+
+Misura: quattro stati ignoti B su quattro sono stati inviati e zero differiti
+(`numeratorSent=4`, `numeratorDeferred=0`); il verdetto D rileva inoltre il
+catch fail-open del batch lookup. Prova:
+
+```bash
+jq '.measures.unknownConsent, .actualPredicates.unknownStatesDeferred' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/B/aggregate/metrics.json
+```
+
+## CA-4. Un cap deve lasciare un backlog osservabile e recuperabile
+
+Un recipient oltre il cap non è recuperato per il solo fatto che una seconda
+run esiste: il motivo del defer va persistito e il lavoro deve essere ripreso
+anche quando davanti arriva lavoro fresco.
+
+Misura: B seleziona 300/301 recipienti, differisce 1/301 e differisce ancora
+1/301 nella seconda run con lavoro fresco. Prova:
+
+```bash
+jq '.measures.cap' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/B/aggregate/metrics.json
+```
+
+## CA-5. Il matching aziendale richiede un negativo X≠Y e la quarantena degli irrisolti
+
+Alias e casing validi devono risolvere alla chiave canonica; un prefisso comune
+non basta: se X=`Acme` e Y=`Acme Holdings`, X≠Y deve essere rifiutato, mentre un
+record senza chiave canonica va quarantinato con motivo esplicito.
+
+Misura: nel probe B il negativo X≠Y è rifiutato 0/1 e l'irrisolto è
+quarantinato 0/1; la fixture positiva di alias non dimostra quindi da sola C1.
+Prova:
+
+```bash
+jq '.measures.matching' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/B/aggregate/metrics.json
+```
+
+## CA-6. Un replay che fallisce non può eliminare l'intento senza esito persistito o coda retryable
+
+Il replay deve conservare l'intento fino a un esito terminale oppure rendere
+persistente un defer ritentabile; rimuovere tutti gli intent dell'email per
+evitare un loop è perdita silenziosa.
+
+Misura: nel percorso D il catch dell'errore è riproducibile 1/1 e la rimozione
+della coda dell'email avviene 1/1 senza coda di retry. Prova:
+
+```bash
+git -C /Users/saggesel/Projects/frontaliere/frontaliere-si-o-no \
+  show a7b409042e29baed63688e4bba92d9f45ca0feb0:services/companyFollowIntent.ts \
+  | nl -ba | sed -n '126,182p'
+```
+
+## CA-7. La prova di consenso deve avere lo stesso purpose dell'azione abilitata
+
+Un registro generico `communicationsOptIn` con preferenze newsletter attive non
+prova il consenso a `companyFollow`; il purpose deve essere separato e
+specifico, senza allargare il consenso ad altre comunicazioni.
+
+Misura: D rileva 1/1 capture su `communicationsOptIn`, 0/1 su
+`companyFollow` e tre preferenze newsletter impostate a `true`. Prova:
+
+```bash
+node /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/D/run-isolated.mjs
+```
+
+## CA-8. Una superficie SSG idratata si valida con transizioni DOM, non con markup statico soltanto
+
+Il test minimo deve attraversare direct load, navigazione interna, back, forward,
+refresh e cambio lingua usando selettori del DOM idratato; un HTML statico
+corretto non prova che URL, H1, body e CTA restino coerenti dopo la transizione.
+
+Misura: la prova C riproduce il failure forward con contenuto dell'azienda A
+sotto URL B oltre 2.500 ms e il mismatch shell/CTA inglesi con body statico e
+placeholder italiani. Prova:
+
+```bash
+rg -n 'forward|back|refresh|lingua|2\.500|mismatch' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/C/03-browser-flow.md \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/C/05-handoff-report.md
+```
+
+## CA-9. Ogni misura che confronta codice e live deve riportare insieme snapshot sorgente e deploy pubblico
+
+Un verdetto di codice non dimostra la distribuzione: la riga di misura deve
+identificare sia lo SHA sorgente sia lo SHA del deploy pubblico, e dichiarare la
+divergenza invece di usarne uno come proxy dell'altro.
+
+Misura: C osserva la divergenza fra codice `a7b409…` e Pages
+`1199e4d6…`; A separa inoltre il runtime sender osservato `1744761…` dal Pages
+deploy. Prova:
+
+```bash
+rg -n 'a7b409|1199e4d|1744761|deploy|SHA' \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/A/VERDICT.md \
+  /Users/saggesel/Projects/frontaliere/company-alerts-audit-kit/artifacts/C/05-handoff-report.md
+```
+
+## 33. La quota API condivisa e' il tetto al parallelismo delle misure, prima del disco e della RAM
+
+Il numero di deleghe che misurano contro la stessa API non e' limitato dalle
+risorse della macchina ma dal **bucket di quota dell'utente**, che e' unico e
+condiviso fra tutti gli agenti in volo. Il punto 5 di questo registro dice che
+il disco cede a ~30 worktree e il punto 11 che la RAM cede molto prima; la
+quota cede prima di entrambi, e cede **in modo asimmetrico**: non ferma tutti i
+job, ferma quello che stava raccogliendo di piu'.
+
+**Regola: prima di dispacciare un job di misura, conta quanti job in volo
+interrogano la stessa API.** Se sono gia' due, il terzo va in coda. Il
+parallelismo che paga e' fra lavori di natura diversa — uno che misura, uno che
+implementa, uno che legge codice — non fra quattro raccolte simultanee sullo
+stesso endpoint.
+
+Misura, 2026-09-09: quattro job di misura lanciati insieme sul bucket `core` di
+GitHub (5.000/ora) lo hanno esaurito. Il quinto ha ricevuto
+`403 API rate limit exceeded` dopo aver persistito **283 righe su 1.567 attese**
+per uno dei suoi quattro target, e ha dovuto consegnare
+«non decidibile senza X» su una domanda che con la raccolta completa era
+decidibile. Le altre tre raccolte del suo giro erano complete: la quota non
+degrada in modo uniforme, taglia dove la raccolta e' piu' lunga.
+
+**Corollario sul contatore.** `gh api rate_limit` riportava `core 0/5000` con un
+`reset` gia' passato secondo l'orologio locale; la prova utile e' stata una
+chiamata reale, che ha reso il `403` con request ID. Il contatore non e' un
+oracolo di credito ne' in positivo (punto 25) ne' in negativo: la prova e'
+sempre la chiamata.
+
+**Cosa fare quando succede.** Il job che si ferma ha ragione a fermarsi: un
+parziale dichiarato e' recuperabile, un parziale interpretato come zero non lo
+e'. Chi orchestra rilancia **solo il join mancante**, non l'intera misura, e
+solo dopo il reset — e lo rilancia da solo, non insieme ad altri.
+
+## 40. Un produttore non fabbrica mai il dato che il consumatore usera' per giudicarlo
+
+**Regola:** quando A produce un dato e B lo usa per giudicare A, il valore «non
+disponibile» deve restare rappresentabile e propagarsi come terzo esito, mai
+essere colmato da un default sintetico. Corollario vincolante: 2xx senza ID non
+e' un fallimento e non va ritentato; e' un'accettazione senza prova. Sostituire
+il default con un throw fa cadere la cascata sul provider successivo dopo che il
+precedente ha gia' risposto 2xx, inviando due volte la stessa email.
+
+**Misura:** 2026-09-09 — nello stesso incarico sono state osservate quattro
+istanze. I sei adapter di `functions/src/emailCascade.js` fabbricano un
+`messageId` sintetico col timestamp quando il provider non ne restituisce uno:
+Mailjet `mj-${Date.now()}` (L922), Mailgun `mg-` (L992), Mailtrap `mailtrap-`
+(L1030), Maileroo `maileroo-` (L1086), Resend `resend-` (L1138) e Cloudflare
+`cf-` (L1238), impedendo al consumatore di distinguere «accettato con prova» da
+«accettato senza prova». La stessa forma ricompare nel reviewer del ciclo che
+riallinea il branch e cancella i propri finding precedenti, producendo l'LGTM
+che il gate poi consuma come verdetto; nel flush anonimo che rimuove la coda
+degli intenti dopo un errore, distruggendo la sola evidenza del fallimento; e
+nel catch fail-open del lookup delle soppressioni, che trasforma «stato ignoto»
+in «destinatario inviabile». In tutti e quattro i casi il produttore ha
+fabbricato o cancellato la prova che il consumatore usava per giudicarlo.
+
+## 41. Un vincolo di rilascio dichiarato senza meccanismo che lo imponga e' un'intenzione
+
+**Regola:** un vincolo con una via d'uscita e' una via d'uscita. Se non si sa
+quanto consuma un comando, quel comando deve passare dal semaforo; la categoria
+«pesante» non si deduce dal nome del comando. La formulazione «se esiste ed e'
+eseguibile, altrimenti procedi» non e' un controllo di rilascio, ma
+l'autorizzazione a ignorarlo.
+
+**Misura:** 2026-09-09 — la regola «passa dal semaforo
+`growth7/heavy.sh`» e' stata scritta nel prompt di un worker come condizionale:
+«se esiste e se e' eseguibile, altrimenti procedi». Il worker ha proceduto, il
+suo typecheck ha consumato 3,5 GB, l'OOM ha ucciso quattro lane di una sessione
+parallela e circa un'ora di lavoro non e' stata recuperabile.
+
+## 42. In un checkout sparse, `ls` e i test di esistenza mentono su un path che in git esiste
+
+**Regola:** in uno sparse checkout l'assenza di `public/` o `data/` non prova
+che un file non esista nel repository, e un nome non qualificato non e' un
+path. Il discriminante e' `readlink` applicato a tutti i path che corrispondono
+al nome, oppure `git show` / `git ls-tree` sull'oggetto; `ls` e il test del
+filesystem da soli non bastano.
+
+**Misura:** 2026-09-09 — una diagnosi ha attribuito il fallimento del
+typecheck a «moduli generati o dipendenze mancanti» — `siteShell`,
+`blogImageCdnMirror`, `canonicalOverrideFiles.mjs` — ma tutti e tre esistevano
+nel worktree. Il falso negativo nasceva dal trattare l'assenza o la presenza di
+un nome nella vista sparse come prova dell'albero git.
+
+**Comando probatorio:** risolvere tutti i candidati con `readlink` oppure
+interrogare direttamente l'oggetto con `git show <ref>:<path>` o
+`git ls-tree <ref> -- <path>` prima di dichiarare mancante un file.
+
+## 43. Il typecheck globale del sito non e' utilizzabile come gate isolato
+
+**Regola:** prima di attribuire un rosso di typecheck alla propria patch,
+riprodurlo sulla base. Un fallimento che si riproduce su `origin/main` pulito e'
+un fatto della baseline, non un effetto del diff, e va dichiarato come tale
+invece di essere spiegato con una causa non misurata.
+
+**Misura:** 2026-09-09 — `npm run typecheck` non produce alcuna diagnostica
+TypeScript; `tsc --noEmit` muore con `exit 134` (JavaScript heap out of memory)
+a circa 4,1 GB, identicamente su un `origin/main` pulito.
+
+**Comando probatorio:** i due riscontri da confrontare sono
+`npm run typecheck` e `tsc --noEmit`, eseguiti sia sulla patch sia sulla base
+pulita.
+
+## 44. Una suite verde prova soltanto cio' che i suoi test coprono
+
+**Regola:** il numeratore di una suite scritta insieme alla patch non e' una
+prova di copertura del contratto. Serve un oracolo che dichiari gli scenari
+prima, a partire dalla specifica, e che venga eseguito almeno due volte per
+verificare che i rossi siano stabili. Nel delta la domanda piu' importante non
+e' quanti rossi si sono chiusi, ma se un verde e' diventato rosso: una
+regressione introdotta dalle correzioni vale piu' di dieci difetti chiusi.
+
+**Misura:** 2026-09-09 — la remediation di uno scope ha riportato 297/297,
+108/108 e 41/41 verdi, mentre un oracolo indipendente, costruito senza guardare
+l'implementazione, misurava 83 assert con 29 rossi sugli stessi contratti. La
+suite dimostrava quindi solo la propria superficie di test, non la copertura
+del contratto ne' l'assenza di regressioni.
+
+## 45. «Dipendenza baseline» e' una risposta sulla responsabilita', mai sulla proprieta'
+
+**Regola:** dichiarare un rosso «fuori scope» chiude la responsabilita' di chi
+scrive, non il difetto. Chi lo incontra deve almeno aprire il segnale — un'issue
+con la misura dentro — anche senza toccarlo. Un errore che ogni agente vede,
+classifica correttamente come «non mio» e lascia dov'e' e' il modo in cui una
+pipeline resta ferma senza che nessuno stia sbagliando.
+
+**Misura:** 2026-09-09 — il report di remediation dello scope D di Company
+Alerts riportava testualmente «`npm run build:fast` ha trasformato 3.632
+moduli ma il gate locale fallisce su una dipendenza baseline:
+`scripts/lib/job-url-host.mjs` importa `domainToASCII` da `node:url`,
+externalizzato da Vite. Non e' stata modificata la dipendenza fuori scope per
+mascherare il rosso». L'agente ha fatto la cosa formalmente corretta: non ha
+mascherato un rosso non suo. L'orchestratore ha letto quella riga come rumore di
+baseline. Nessuno dei due ha posto la domanda successiva: se e' baseline, chi la
+possiede? Lo stesso errore ha poi bloccato ogni deploy del sito per 36 ore, e le
+build recenti sono morte sul successivo import `node:`-only della stessa classe
+(`createHash` da `node:crypto` in `functions/src/lib/jobEmailRanking.js`).
+
+**Corollario:** gli import `node:`-only in moduli che finiscono nel bundle
+browser sono una classe, non un caso. Chiuderne uno rende fatale il successivo.
+Il docblock in cima a `scripts/lib/job-url-host.mjs` descriveva gia' la trappola
+e la sua soluzione: la regressione e' ricomparsa in un modulo nuovo.
+
+## 46. Il record di deployment non prova i byte serviti
+
+**Regola:** per rispondere a «il commit X e' distribuito?» serve un oracolo
+emesso dal build e servito dall'artefatto, non il record di deployment. Su questo
+sito l'oracolo e' `/commit-hash.txt`, uno SHA completo emesso da
+`buildIdPlugin.closeBundle()` (`build-plugins/buildIdPlugin.ts`, `COMMIT_HASH`
+da `git rev-parse HEAD`). **Non** e' `/build-id.txt`, che restituisce un
+timestamp numerico. Verificare poi con `git merge-base --is-ancestor
+<merge_sha> <sha_live>`: exit 1 significa «non distribuito», non «comando
+fallito».
+
+**Misura:** 2026-09-09 — il deployment `github-pages` piu' recente con stato
+`success` dichiarava
+`1199e4d6b03b08e53179f90186508628eebe2cf3`, mentre il dominio canonico serviva
+`/commit-hash.txt` = `4711c1b7d0a4d0fe006312b1ab8dc787f55519d0`, anche con
+richiesta cache-busted. La prima spiegazione plausibile — cache CDN — e' falsa:
+il log del publish prova che il run 34079769787 ha scaricato l'artifact del
+build precedente 34071387366 (`deploy_ref=4711...`) e lo ha reimpacchettato come
+artifact di un publish il cui `pages_build_version` era `1199...`. Metadata del
+deployment e byte dell'artifact hanno quindi due provenienze diverse: e' un
+cross-run artifact handoff, non un problema di cache.
+
+**Comando probatorio:**
+
+```bash
+git merge-base --is-ancestor <merge_sha> <sha_live>
+```
+
+## 47. Un numero scritto in un commento non e' una misura, e sostituirlo puo' invertire la conclusione
+
+**Regola:** un margine dichiarato di 2 minuti su 130 sta dentro il rumore di
+qualunque deriva; prima di dedurne «per costruzione» va rimisurato. Un conteggio
+aggregato di run `cancelled` non distingue «la coda non fa passare nessuno» da
+«passa uno e quello muore»: i due casi hanno rimedi opposti. Il taglio che decide
+e' l'ultima run che ha DAVVERO eseguito il job di build, non le pending sfrattate;
+la stessa query rende anche la durata reale. La coda e' effetto, non causa, ed
+`validate-dist-postbuild` e' anch'esso effetto, perche' senza build non c'e'
+`dist` da validare.
+
+**Misura:** 2026-09-09 — il fermo dei deploy e' stato prima attribuito alla
+saturazione della coda, citando un commento dentro `deploy.yml` — «build mediano
+130 min, divario fra due build che partono 128 min, la coda e' satura non
+affamata» — e concludendo «margine chiuso per costruzione, non un guasto
+comparso». Rimisurate, le run che partono davvero durano 98 e 118 minuti e,
+soprattutto, le run non-`cancelled` dal 7 settembre sono TUTTE `failure`, la
+prima del 2026-09-08T15:18:59Z. La finestra si spezza in due con cause diverse:
+prima solo `cancelled` (la coda spiega), poi run che passano la coda, arrivano al
+build e muoiono li'.
+
+## 48. Import nominale contro namespace: il discriminante che tiene invisibile un difetto per mesi
+
+Misurato il 2026-09-09 sui log di `deploy.yml`, mentre si cercava perche' il
+sito non pubblicava piu'.
+
+`__vite-browser-external` e' il modulo su cui Vite mappa i builtin Node in una
+build browser, e non ha export nominati. Quindi la stessa violazione — un
+modulo del grafo browser che importa un builtin Node — ha due esiti opposti a
+seconda della **forma sintattica** dell'import:
+
+- `import { createHash } from 'node:crypto'` → rollup deve risolvere il
+  binding, non lo trova, **errore fatale**. La build muore al link, cioe' dopo
+  ~80 minuti per locale.
+- `import * as _fs from 'node:fs'` → nessun binding da risolvere, **warning**.
+  La build passa.
+
+Nello stesso log convivevano le due forme: rosso su
+`functions/src/lib/jobEmailRanking.js`, giallo su tre moduli di
+`build-plugins/` che importano `node:fs` in forma namespace e che erano li' da
+mesi senza fermare niente.
+
+**Non e' una questione di uso, ma di binding.** Nessuno chiamava `createHash`
+dal browser: in quel percorso il contesto di ranking e' `null` e la funzione non
+veniva mai eseguita. L'errore nasce dalla dichiarazione del nome, non dalla sua
+chiamata — ed e' esattamente per questo che i tre namespace non sono «meno
+gravi»: sono la stessa bomba con la spoletta non innescata. Il giorno in cui
+qualcuno riscrive uno di quei tre import in forma nominale, il deploy si ferma
+di nuovo senza che la classe del difetto sia cambiata.
+
+**Il rimedio che NON si applica.** Convertire il nominale in namespace e' un
+diff di tre righe e sblocca il deploy subito. E' vietato: e' alla lettera il
+Non-Negotiable #2, «mai downgrade error → warning per sbloccare deploy», e
+ricompone la trappola per il prossimo. Si taglia l'arco.
+
+**E il verso del taglio conta.** Estrarre la parte pura in un modulo senza
+dipendenze Node e farla ri-esportare dal modulo originale **non basta**: se il
+consumatore nel grafo browser continua a importare dal modulo originale, quel
+modulo resta nel grafo con il suo import Node e la foglia non sparisce. Il
+passo che la rimuove e' spostare il consumatore sul modulo puro; il ri-export
+serve solo ai consumatori Node, che nel grafo browser non ci sono. Verificato su
+#8123: dopo la fix l'unico importatore nel grafo SPA e'
+`services/newsletter-template.mjs`, e punta al modulo puro.
+
+**Come si misura, invece di temerlo.** Non inseguire la cascata un fatale per
+volta — rollup rende fatale il successivo appena chiudi il primo, e ogni giro
+costa 80 minuti. Si cammina il grafo dei moduli dall'entry SPA (`App.tsx`,
+`index.tsx`) seguendo import statici, dinamici e l'alias `@/`, e si contano le
+foglie che importano un builtin. Numeri di quel giorno, da confrontare:
+**546 moduli raggiunti, 4 foglie, 1 sola fatale**. Il criterio di accettazione
+utile e' «0 foglie», non «0 foglie con import nominale»: il secondo e' piu'
+debole e ricrea la spoletta.
+
+Follow-up strutturale con la misura dentro: issue 8125.
+
+## 49. Due superfici di distribuzione possono avere oracoli diversi (L-D)
+
+**Regola:** prima di dichiarare che una modifica è o non è in produzione,
+stabilire da quale superficie viene eseguita. Un workflow che fa `checkout` è
+distribuito all'istante del merge; una SPA servita da un artefatto statico è
+distribuita solo quando quell'artefatto cambia. Le due domande hanno oracoli
+diversi e vanno risposte separatamente.
+
+**Misura:** 2026-09-09 — il sito non distribuiva il frontend dal 7 settembre:
+l'artefatto pubblico serviva ancora uno SHA che non conteneva nessuno dei
+cinque merge della giornata. Nello stesso momento il workflow
+`Send CompanyAlert Emails (immediate)` girava regolarmente e con successo,
+perché si esegue da un checkout del repository, non dall'artefatto Pages. Le
+correzioni della catena di invio erano quindi già in produzione dal merge,
+mentre quelle del frontend non lo erano; l'orchestratore aveva dichiarato
+«nulla di oggi è distribuito», falso per metà.
+
+## 50. In una coda con `cancel-in-progress: false` viene sfrattato il pending, non l'in-progress (L-E)
+
+**Regola:** quando la coda è in questo stato, trattenere i merge serve solo
+finché nessun run è partito. Appena un run passa a `in_progress` è protetto e i
+merge successivi non lo uccidono più; trattenere oltre quel momento è costo
+senza beneficio. Un conteggio di run `cancelled` non distingue «la coda non fa
+passare nessuno» da «passa uno e quello muore»: la distinzione si fa sull'ultima
+run che ha davvero eseguito il job, e i due casi hanno rimedi opposti.
+
+**Misura:** 2026-09-09 — `deploy.yml`, con
+`concurrency: group: pages-build-run`, ha accumulato 18 run `cancelled` e zero
+`success` in due ore, perché su `main` arrivavano 30 commit in due ore — 17 dai
+bot `auto-translate`, `weather snapshot` e `tracking LinkedIn` — contro un build
+da 98–118 minuti. Ogni push sfrattava il run pending del push precedente, quindi
+nessuno raggiungeva mai l'esecuzione. Un dispatch manuale non aiutava: entrava
+nello stesso gruppo e veniva sfrattato ugualmente.
+
+## 51. Una finestra di sorveglianza fissa rende il silenzio ambiguo (L-F)
+
+**Regola:** ciò che si sorveglia va interrogato per identità, non pescato da una
+lista a finestra; ogni lista va inoltre ordinata esplicitamente prima di
+leggerne la testa, perché l'ordine di ritorno dell'API non è garantito. La
+domanda diagnostica generale è: «se la cosa che aspetto fallisse adesso, il mio
+filtro emetterebbe qualcosa?». Se la risposta è no, il filtro copre solo il
+percorso felice e il silenzio mente.
+
+**Misura:** 2026-09-09 — un monitor osservava «le 12 PR più recenti» per seguire
+una PR specifica. Quando altre PR sono state aperte, quella sorvegliata è uscita
+dalla finestra e ha smesso di comparire: nessun evento, esattamente come se non
+fosse cambiata. Nello stesso giro `gh run list` ha restituito righe di run di un
+mese prima, non ordinate, che il monitor ha emesso come nuove; solo un
+`sort_by(.createdAt)` esplicito ha smascherato il falso.
+
+## 52. La base di misura va fissata dopo l'ultimo fetch, non dopo il primo (L-G)
+
+**Regola:** in un repository con bot e merge frequenti, il ref «corrente» è una
+affermazione temporale. Fare fetch, creare la worktree e misurare molto dopo può
+lasciare il rapporto su un ref già vecchio; prima del commit rileggere
+`origin/main`, registrare la SHA e, se è avanzata, riallineare e ripetere le
+corse.
+
+**Misura:** 2026-09-09 — durante l'oracolo E `origin/main` è avanzata da
+`ad7c3d6…` a `c4f9e42…` con due merge non collegati al mandato. La prima worktree
+è stata quindi ribasata e la misura definitiva, inclusa la non-regressione, è
+stata eseguita sulla seconda SHA.
+
+## 53. Una worktree sparse può simulare un difetto d'import se manca la foglia (L-H)
+
+**Regola:** i symlink o gli import locali verso directory escluse dallo sparse
+checkout vanno materializzati per il path minimo necessario prima di classificare
+un fallimento. Un modulo mancante nel profilo della worktree non è un rosso del
+codice e non va mescolato ai rossi dell'oracolo.
+
+**Misura:** 2026-09-09 — l'oracolo E ha richiesto alcune foglie di
+`packages/articles/content` usate dai symlink locale; aggiungendole una per volta
+si sono eliminati gli errori di risoluzione, mentre i cinque rossi comportamentali
+sono rimasti identici nelle due corse sulla stessa base.
+
+## 54. Il denominatore di un oracolo dipende anche dai rami che diventano raggiungibili (L-I)
+
+**Regola:** non trattare un totale storico come proprietà statica del file.
+Un assert iniziale che fallisce o un export mancante può impedire di eseguire
+assert successivi; quando la correzione li rende raggiungibili, confrontare gli
+ID e il riepilogo runtime, non solo il vecchio denominatore.
+
+**Misura:** 2026-09-09 — il commit oracle remoto eseguiva `117` assert prima che
+il popup fosse raggiungibile; dopo #8105 e il reinserimento dei tre ID C6-bis, la
+misura completa è diventata `122/122`. Il report distingue i cinque ID realmente
+rossi iniziali dai tre C6-bis aggiunti al perimetro dichiarato.
+
+## 55. Query accessibili non univoche possono trasformare un verde DOM in timeout (L-J)
+
+**Regola:** se un test UI usa fake timers, dopo un click verificare che il
+selettore scelto identifichi un solo nodo. Un `label` e il controllo associato
+possono condividere il nome accessibile; in quel caso usare il seam stabile del
+controllo e documentare perché l'atteso/query precedente era ambiguo.
+
+**Misura:** 2026-09-09 — il popup aveva aperto correttamente il form, ma la query
+per label non distingueva label e input e il `waitFor` scadeva. Il controllo
+tramite id dell'input ha mantenuto l'invariante comportamentale e ha portato le
+due corse a `122/122`.
+
+## §39 — «seconda misura consecutiva» significa rieseguire lo strumento, non citare il numero
+
+Una condizione di chiusura nella forma «sotto la soglia su due misure consecutive» invita a
+prendere la seconda misura e confrontarla con la prima **citata a memoria**. È un confronto che
+non regge: fra le due misure la popolazione è cambiata, e non sai di quanto.
+
+Qui la condizione 3 era a 6,19%. La misura successiva ha reso 12,89%. Con il solo numero in mano
+le due letture erano indistinguibili da una crescita del corpus: più job `complete`, più
+occasioni di sbagliare, quota che sale senza che nulla sia peggiorato.
+
+La discriminante è stata **rieseguire lo stesso script sul commit precedente**, parametrizzando
+il ref (`REF=<commit>` al posto di `origin/main` hardcodato). Con entrambi i denominatori sul
+tavolo — 13.730 e 13.788, +0,4% — la crescita di popolazione è esclusa in una riga, e il
+numeratore raddoppiato (+109%) diventa una regressione vera con un colpevole da cercare.
+
+Costo: una `sed` su una riga e una riesecuzione. Rendimento: la differenza fra «archiviato come
+rumore» e «difetto aperto».
+
+Regola operativa: uno script di misura destinato a una condizione consecutiva **nasce con il ref
+parametrizzato**. Se lo scrivi con `origin/main` dentro, la seconda misura non sarà confrontabile
+con la prima, e te ne accorgerai quando è tardi.
+
+Corollario di §31: il denominatore non serve solo accanto al numeratore, serve **anche in
+entrambe le misure della coppia**. Un denominatore stabile è ciò che trasforma una variazione in
+un verdetto.
+
+## §40 — non terminare i job Codex per firma di comando: la firma è condivisa
+
+`pkill -f codex-companion` sembra il modo ovvio di chiudere i propri job. Non lo è: su questa
+macchina girano più sessioni Claude in parallelo, e tutte lanciano Codex con **la stessa riga di
+comando**. La firma non distingue i tuoi job da quelli di un peer, e il `pkill` li prende tutti.
+
+È successo: chiudendo tre job miei ho quasi certamente ucciso anche il job di una sessione
+vicina, che poco prima mi aveva scritto per coordinarsi. Il costo non è mio — è di chi perde
+un'ora di lavoro senza sapere perché.
+
+Termina sempre **per ID**: `TaskStop` con il `task_id` restituito al lancio, uno per job. È più
+verboso e non ha effetti collaterali fuori dalla tua sessione.
+
+Se l'hai già fatto, **dillo ai peer**. `ListAgents` li elenca; un messaggio con l'ora e la firma
+usata permette a chi ha perso un job di riconoscerlo invece di inseguire un guasto inesistente.
+
+Corollario: prima di qualunque comando che agisce su processi selezionati per **pattern** —
+`pkill`, `killall`, un `kill` su output di `ps | grep` — chiediti se il pattern può descrivere
+anche il lavoro di qualcun altro. In un workspace a più sessioni, quasi sempre può.
