@@ -264,26 +264,40 @@ stallo del residuo**, che comincia l'08-09. Le due copie dell'action differiscon
 `ae2dcc04b8bb`, corpus `a4e2bdde0347`), nessun vincolo di mirror, e quella che gira e' del
 **corpus**. Scheda: `.scratch/codex-haikufix.txt`.
 
-**Riparato: PR corpus #1352, mergiata il 2026-09-11 alle 06:46:51Z.** Verificato su
-`origin/main` del corpus, non sul rapporto: ogni ramo di rifiuto ora chiama `disable_haiku`, che
-scrive `available=false`, azzera `HAIKU_FALLBACK_GATE` e **esce 0**; lo step successivo e' gated su
-`steps.trusted_toolchain.outputs.available == 'true'`; anche il fallimento del sottoshell degrada
-con un `::warning::`. L'hardening non e' stato aggirato — nessun `|| true` — e `runner_home` e'
-stato **aggiunto** alle radici vietate, quindi il controllo e' piu' stretto di prima. La
-conseguenza che conta per la mappa: `Capture translation observability baseline`, cioe' il passo che
-scrive il punto della condizione 1, non muore piu' per indisponibilita' di un **fallback**.
-La PR **#1354** (aperta) e' un follow-up di hardening sui componenti scrivibili.
+**RETTIFICA del 2026-09-11 08:00Z: la copia che gira e' quella del SITO, non quella del corpus.**
 
-**Cio' che non e' ancora provato.** Il rapporto dell'agente afferma che dopo la fix resta respinto
-`/opt/hostedtoolcache/node/22.23.2/x64/bin/node` con modalita' `0777` — che e' il runtime reale del
-runner: se fosse vero, la corsia Haiku sarebbe spenta **sempre**, e in silenzio. Ma il log della run
-riuscita `34541569329` (10-09 23:18Z) mostra lo stesso candidato `mode=777 owner=1001` con lo step
-`trusted_toolchain` chiuso `outcome=success` e lo step seguente che consuma `TRUSTED_NODE`: li' era
-stato **accettato**. L'affermazione del rapporto e' una lettura del predicato, non una misura
-dell'ambiente (vedi `codex-agent-lessons.md` §50). La #1352 aggiunge a `report_runtime_candidates`
-il `PATH` e l'esito `trusted_prefix` / `path_components_trusted` per ogni candidato: **la prima run
-dopo il merge risponde da sola**. Se stampa `available=false`, il fallback e' spento e va deciso se
-e' accettabile; se stampa `available=true`, la questione e' chiusa.
+Il workflow del corpus fa `actions/checkout` di `valerielinc-ops/frontaliere-si-o-no` **senza
+`path:`** (`translate-pending.yml:54-62`), quindi il sito viene scritto nella radice di
+`$GITHUB_WORKSPACE`. Lo step successivo `uses: ./.github/actions/setup-claude-haiku-fallback`
+(riga 163) legge dalla stessa radice: esegue la copia del **sito**. La variabile
+`CODEX_ACTION_PATH` continua a mostrare
+`/home/runner/work/frontaliere-articles/frontaliere-articles/./.github/actions/...` perche' quella
+directory **si chiama** come il corpus, ma il suo contenuto e' il sito.
+
+**La prova e' nel log, non nel ragionamento.** La run `34541569329` stampa
+`trusted-runtime candidate=... mode=... owner=...` — tre campi. Al commit di quella run
+(`745f2765e`) la copia del **corpus non conteneva affatto** `report_runtime_candidates`; quella del
+**sito** lo contiene con esattamente quel `printf` a tre campi.
+
+**Chi ha davvero riparato la corsia: PR sito #8224**, mergiata il 2026-09-10 alle **17:35:51Z** —
+prima di qualunque lavoro di questa sessione. I quattro fallimenti sono tutti fra le 09:00Z e le
+16:54Z, la prima riuscita e' alle 23:18Z. La #8224 **non allenta** il predicato: mantiene
+`(( (8#$mode & 022) == 0 ))` e aggiunge un fallback fail-closed che scarica un Node
+`v24.21.0` a checksum fisso in una directory privata sotto `RUNNER_TEMP`, con il commento che lo
+dichiara: «Ubuntu's setup-node toolcache is runner-managed. It is intentionally rejected by
+`path_components_trusted()`».
+
+**Conseguenza sulle due PR del corpus.** #1352 (mergiata 06:46:51Z) e #1354 (mergiata 07:52:40Z)
+correggono la copia del corpus, che **questo workflow non esegue**. Non sono dannose — #1354
+raddrizza una maschera davvero sbagliata, `200` decimale al posto di `0200` ottale, che avrebbe
+respinto ogni componente runner-owned anche a `0555` — ma **non erano la causa** e non cambiano il
+comportamento del ciclo di traduzione. Se quella copia serve a un altro workflow va detto quale;
+se non serve a nessuno, le due copie vanno riconciliate o una va rimossa.
+
+**Ritirata la mia riserva.** Avevo scritto che l'affermazione dell'agente — «la riuscita usa una
+versione dell'action del sito che scarica Node in `RUNNER_TEMP`, quindi non dimostra un runtime
+trusted» — fosse una lettura del predicato e non una misura. **Era giusta**: e' esattamente cio'
+che fa la #8224.
 
 ### Cadenza reale
 
