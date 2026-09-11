@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 06:00Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 17:15Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,8 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 06:30Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3.
+**Stato al 2026-09-11 17:15Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+`2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
 (`6ee26149d9d`): lo step `Log translation stats (after)` sta ora alla riga **434** di
@@ -27,11 +28,11 @@ checkout (`:1777-1783`).
 
 **Conseguenze da tenere presenti leggendo la serie:**
 
-- **I 102 punti precedenti non sono confrontabili con i futuri**, e nessuno e' stato retrocorretto.
-  La condizione 1 **riparte da zero**: servono almeno nove punti nuovi, cioe' **21-38 ore** alla
-  cadenza reale.
-- **Il livello scendera' di circa nove punti percentuali**, verso il **70,6%** invece del 79,8%.
-  **Non e' una regressione**: e' la fine di una sovrastima.
+- **I punti pre-fix della serie non sono confrontabili con i futuri**, e nessuno e' stato
+  retrocorretto. Lo storico conserva 102 punti `after` per il limite di 200 righe, ma la condizione
+  1 **riparte da zero**: servono almeno nove punti nuovi, cioe' **21-38 ore** alla cadenza reale.
+- **Il primo livello confrontabile e' sceso a 70,46%**, coerente con il **70,6%** misurato sul
+  tree pubblicato. **Non e' una regressione**: e' la fine di una sovrastima.
 - **Limite dichiarato e non risolto**: una kill brutale al cap dei 350 minuti resta non
   intercettabile. La deadline a 300 minuti (`translate-pending-logic.yml:408-411`) lascia 50 minuti
   al cap, quindi il percorso previsto per budget non perde il punto; un SIGKILL si'.
@@ -388,7 +389,7 @@ compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e valori f
 job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura **atterraggi**, non lavoro.
 **L'attribuzione a #8077 / #8078 e' ritirata.**
 
-## Sono atterrati due punti nuovi, e il livello e' crollato — ma NON per merito della #8290
+## E' atterrato il primo punto post-fix, e il livello e' crollato — non per un degrado
 
 Commit **`a86460e96a8`** (2026-09-11T10:16:16Z, «🌐 Auto-translate pending jobs»), scritto dalla run
 **`34565924745`**, ha aggiunto due punti a `data/translation-stats-history.json` del **sito**:
@@ -399,11 +400,18 @@ Commit **`a86460e96a8`** (2026-09-11T10:16:16Z, «🌐 Auto-translate pending jo
 | 2026-09-11T01:26:57Z | 32.602 | 6.571 | 79,8% |
 | **2026-09-11T08:06:57Z** | **32.988** | **9.212** | **72,1%** |
 | **2026-09-11T08:11:45Z** | **32.988** | **9.212** | **72,1%** |
+| 2026-09-11T12:16:31Z | 32.994 | 6.604 | 80,0% |
+| **2026-09-11T17:04:51Z** | **33.190** | **9.804** | **70,46%** |
 
 Il crollo di **7,7 punti** e' quello previsto. **Ma la #8290 non c'entra**: la run `34565924745` e'
 stata creata alle **05:25:50Z**, cioe' **prima** che la #8290 fosse mergiata (06:45:55Z), quindi
 porta codice precedente. Attribuirgliela sarebbe l'errore di §45 — e qui la cronologia lo esclude
 in modo netto.
+
+Il punto delle **17:04:51Z** e' diverso: commit **`ec41c237abe`**, scritto dalla `34581778668`
+dopo la #8290, con **23.386 / 33.190 = 70,46%**. E' il primo punto post-fix misurato sull'albero
+pubblicato; la run contiene #8296 e la Fase 2d, ma non #8305, quindi il suo livello stabilisce la
+nuova base della serie e non misura ancora il fixer delle descrizioni.
 
 Cosa e' davvero: e' **la discontinuita' che la #8290 elimina**, vista dal lato opposto. Il punto
 precedente leggeva **6.571 su 32.602** dal worktree transitorio della sua run; questo legge
@@ -428,19 +436,25 @@ nessun commit pubblicato. Non e' un divario da inseguire — e' l'ultima manifes
 che la #8290 ripara. **Dal primo punto scritto da una run post-#8290 il numero diventa verificabile
 su un commit**, e allora il confronto con una misura diretta e' lecito. Prima, no.
 
-**Per la condizione 1**: la catena dei 7 rialzi riparte da **72,1%**, non da 79,8%. I punti
-precedenti restano non confrontabili.
+**Per la condizione 1**: la catena dei 7 rialzi riparte da **70,46%**, il primo punto scritto
+dopo la #8290. I punti precedenti restano non confrontabili.
 
 ## Cosa guardare alla prossima run — la verifica che chiude il giro
 
-La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' stata
-accodata **prima del merge #8305**. Porta la Fase 2d sui titoli, ma non la Fase 2e sulle descrizioni.
-Verificato sul suo head, non sul merge: `translate-pending.yml:321-324` ha il gate nuovo
-`github.event_name == 'schedule' && github.event.schedule != '0 7 * * *'` e
-`UNTRANSLATED_TITLE_FIX_DEADLINE_MS: "14400000"`; il blocco Phase 2e non e' presente.
+La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' ora
+conclusa con **success**. Era stata accodata **prima del merge #8305**: ha eseguito la Fase 2d sui
+titoli, ma non la Fase 2e sulle descrizioni. Verificato sul suo head, non sul merge: il gate nuovo
+e `UNTRANSLATED_TITLE_FIX_DEADLINE_MS: "14400000"`, mentre il blocco Phase 2e non e' presente.
+
+Il suo log mostra **418** titoli tradotti, **128** fallimenti e **15.314** candidati scartati
+perche' non erano copie della sorgente; il punto `after` pubblicato alle 17:04:51Z e' quindi una
+misura post-#8290/#8296, ma **non** una misura dell'effetto #8305. L'artifact di osservabilita'
+conta 36 transizioni `incomplete_to_complete` e 92 `incomplete_to_flagged`; il preflight v2 ha
+rifiutato la selezione per `capacity_exceeded` (`5.154` pending oltre il limite selezionabile),
+senza chiamate o write di produzione.
 
 La prima run utile per il fixer delle descrizioni e' **`34596819197`** (creata 2026-09-11T12:01:17Z,
-`event=schedule`, head `8b22a8658`), ancora pending al controllo del 2026-09-11T16:22Z. Sul suo
+`event=schedule`, head `8b22a8658`), partita alle **17:11:32Z** e ora `in_progress`. Sul suo
 workflow sono presenti `translate-pending.yml:334-338`, il gate schedulato e
 `UNTRANSLATED_DESCRIPTION_FIX_DEADLINE_MS: "14400000"`. La run manuale **`34606194108`** non e'
 una misura alternativa: essendo `workflow_dispatch`, salta per costruzione i blocchi condizionati a
@@ -452,7 +466,7 @@ quella fascia oraria **non sono** il cron di housekeeping. Verificato su due pre
 cioe' `github.event.schedule != '0 7 * * *'`. Il cron delle 07:00 produce run create molto piu'
 tardi (11:07, 11:30, 11:58, 12:09, 13:16, 14:50) perche' e' quello che accumula ritardo.
 
-Le tre cose da verificare quando atterra la `34596819197`, **in quest'ordine**:
+Le tre cose da verificare quando termina la `34596819197`, **in quest'ordine**:
 
 1. **`Phase 2d` e `Phase 2e` non sono `skipped`.** Sono i due fixer a budget condiviso. Se uno e'
    ancora `skipped`, il gate non basta e va riletto `github.event.schedule` nel log.
@@ -467,30 +481,29 @@ Le tre cose da verificare quando atterra la `34596819197`, **in quest'ordine**:
    per le descrizioni va verificato che il predicato normalizzato includa i **2.849** job stimati.
 
 Se il punto 3 non si muove mentre il punto 1 dice che una fase ha girato, allora quella fase gira ma
-non libera job, e la diagnosi va riaperta **li'**, non altrove. La `34581778668`, quando termina,
-puo' dare evidenza solo sulla Phase 2d; non puo' validare #8305.
+non libera job, e la diagnosi va riaperta **li'**, non altrove. La `34581778668` ha gia' dato
+evidenza solo sulla Phase 2d; non valida #8305.
 
 ### La coda e perche' l'attesa e' lunga
 
 La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `queue: max`: le run si
-**serializzano**. Le due run davanti alla `34581778668` hanno portato codice precedente alle fix;
-ora la `34581778668` e' in esecuzione nella Phase 2d, mentre la `34596819197` e la `34606194108`
-restano in coda:
+**serializzano**. La `34581778668` e' atterrata e la `34596819197` e' ora in esecuzione:
 
 | run | creata | codice |
 |---|---|---|
 | `34565924745` | 05:25:50Z | prima di #8290 (06:45Z) e #8296 (08:39Z) |
 | `34568521127` | 06:05:56Z | prima di #8290 e #8296 |
-| **`34581778668`** | **08:57:57Z** | **#8290 + #8296, pre-#8305; Phase 2d** |
-| `34596819197` | 12:01:17Z | **#8305; prima run utile per Phase 2e** |
-| `34606194108` | 13:46:02Z | manuale; Phase 2d/2e saltate dal gate `schedule` |
+| **`34581778668`** | **08:57:57Z** | **success; #8290 + #8296, pre-#8305; Phase 2d** |
+| **`34596819197`** | **12:01:17Z** | **in_progress; #8305; prima run utile per Phase 2e** |
+| `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
+| `34624763248` | 16:55:28Z | pending; schedulata; codice #8305 |
 
-Stato verificato al 2026-09-11T16:22Z: la `34581778668` e' ancora `in_progress`, con la Phase 2d
-avviata alle 14:54:40Z; le fasi successive e il log finale non sono ancora disponibili. Il tetto e'
-**350** minuti: se viene uccisa al cap perde anche il suo punto.
+Stato verificato al 2026-09-11T17:15Z: la `34581778668` e' `success` e la `34596819197` e'
+`in_progress`. La prima ha completato la Phase 2d alle 16:55:08Z e ha scritto il suo punto
+post-fix; il suo tetto di **350** minuti non e' stato raggiunto.
 
-**Conseguenza pratica**: la prima verifica vera di #8305 arriva solo quando la coda raggiunge la
-`34596819197`. Non bisogna usare la `34581778668` o la manuale come prova del fixer normalizzato.
+**Conseguenza pratica**: la prima verifica vera di #8305 arriva quando termina la `34596819197`.
+Non bisogna usare la `34581778668` o la manuale come prova del fixer normalizzato.
 
 **Opzione che NON ho preso**: cancellare le due run stale accorcerebbe l'attesa, ma la prima ha
 ~4 ore di traduzioni Argos non ancora committate e cancellarla le butta via. E' una decisione da
