@@ -13,6 +13,11 @@ duplicata è stata aperta e nessun dato di produzione è stato modificato. La mi
 del tree pubblicato fissato sotto; il prossimo passo operativo è ancora la prima run
 non-housekeeping che esegua davvero Phase 2d/2e.
 
+**Aggiornamento al 2026-09-11 20:11Z:** la run manuale `34606194108` è stata annullata mentre
+era ancora `pending` e senza job avviati. Essendo `workflow_dispatch`, non avrebbe potuto
+validare Phase 2d/2e e precedeva la run schedulata utile nella coda serializzata. La run attiva
+`34596819197` non è stata toccata; `34624763248` resta la candidata da verificare all'avvio.
+
 ---
 
 ## Condizione 1 — la quota di completezza sale
@@ -510,7 +515,7 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34568521127` | 06:05:56Z | prima di #8290 e #8296 |
 | **`34581778668`** | **08:57:57Z** | **success; #8290 + #8296, pre-#8305; Phase 2d** |
 | **`34596819197`** | **12:01:17Z** | **in_progress; housekeeping; #8305 presente ma Phase 2d/2e saltate** |
-| `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
+| `34606194108` | 13:46:02Z | **cancelled; manuale; nessun job avviato; non probante** |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
 Stato verificato al 2026-09-11T19:06:51Z: la `34581778668` e' `success`, la `34596819197` e'
