@@ -2023,3 +2023,33 @@ Il corollario e' sulla forma della domanda. Una scheda che chiede «perche' X no
 deciso che X non accade. Se la premessa cade, l'agente ha speso il suo budget a cercare la causa di
 un fatto inesistente. Metti sempre nella scheda il permesso esplicito di smentire la premessa — e
 aspettati che serva: qui la coda vecchia non solo era raggiunta, era **in cima**.
+
+## §52 — un path nomina una directory, non un repository: dopo un checkout nella radice, il workspace del repo A contiene il repo B
+
+`actions/checkout` **senza `path:`** scrive nella radice di `$GITHUB_WORKSPACE`. Se un workflow del
+repo A fa il checkout del repo B in quel modo, ogni `uses: ./<action>` successivo esegue la copia di
+**B**, mentre ogni variabile che espone il percorso continua a mostrare
+`/home/runner/work/A/A/./<action>`. La directory si chiama come A; il contenuto e' B. Chi legge il
+path per stabilire «quale copia gira» ottiene sempre la risposta sbagliata, e la ottiene con
+l'aria di una prova.
+
+Questo e' il modo piu' efficiente che conosca per far correggere il file sbagliato a un agente: la
+scheda dichiara quale copia gira citando il percorso, l'agente si fida — e' la scheda — e produce
+una PR corretta, verde, mergiata e **inerte**.
+
+Il discriminante non e' il percorso ma il **contenuto**: prendi una stringa che esiste in una sola
+delle due copie e cercala nel log della run. Qui la copia del sito stampava
+`trusted-runtime candidate=%s mode=%s owner=%s` a tre campi e quella del corpus, a quel commit, non
+aveva affatto quella funzione: un solo `grep` sul log decide, e decide prima di scrivere la scheda,
+non dopo aver mergiato.
+
+Il corollario vale per tutte le famiglie di file duplicati fra repo: **«quale copia gira» e' una
+domanda empirica**, e la risposta si prende dall'esecuzione — un log, un `printf` che esiste da una
+parte sola, un numero di versione — mai dalla topologia dei percorsi.
+
+Seconda meta' della lezione, e la piu' scomoda: quando il rapporto dell'agente contraddice la
+scheda, **la scheda e' l'ipotesi piu' debole**. Qui l'agente aveva scritto che la run riuscita
+girava una versione dell'action del sito con un Node scaricato in `RUNNER_TEMP`; io l'ho trattata
+come un'inferenza da verificare e ho tenuto buona la scheda. Era vera. Un agente che ha letto i log
+di quella run ha visto qualcosa che chi ha scritto la scheda non aveva guardato: la contraddizione
+va risolta guardando, non pesando le fonti per autorevolezza.
