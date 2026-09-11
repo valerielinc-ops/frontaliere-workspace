@@ -461,7 +461,7 @@ misura precedente: 979/193).
 | causa | job | quota |
 |---|---:|---:|
 | **`titolo-non-tradotto`** | **174** | **90,2%** |
-| non attribuito | 9 | 4,7% |
+| `desc-troppo-magra` | 9 | 4,7% |
 | `slot-desc-corta` | 5 | 2,6% |
 | `desc-copia-sorgente` | 4 | 2,1% |
 | `slot-titolo-assente` | 1 | 0,5% |
@@ -473,12 +473,13 @@ Per locale: `it` 77, `en` 49, `de` 29, `fr` 19.
 
 | causa | job | quota |
 |---|---:|---:|
-| **`titolo-non-tradotto`** | **4.152** | **64,2%** |
+| **`titolo-non-tradotto`** | **4.122** | **63,8%** |
 | `desc-uguale-normalizzata` | 1.476 | 22,8% |
-| non attribuito | 407 | 6,3% |
 | `desc-copia-sorgente` | 344 | 5,3% |
+| `desc-troppo-magra` | 268 | 4,1% |
+| `desc-lingua-sbagliata` | 171 | 2,6% |
 | `slot-desc-corta` | 46 | 0,7% |
-| `slot-titolo-assente` | 40 | 0,6% |
+| `slot-titolo-assente` | 38 | 0,6% |
 
 ### Cosa ne segue
 
@@ -494,11 +495,20 @@ uguale alla sorgente, normalizzata o letterale. La Fase 2d **non li tocca** — 
 descrizioni, lo dichiara il suo stesso docstring. Serve una corsia per le descrizioni, e oggi
 quella corsia e' la Fase 2b, che rende 26-42 job per run.
 
-**Limite dichiarato della misura**: il **6,3%** non attribuito (407 job oltre i sette giorni, 9
-nella coorte 24-48h) e' incompleto per colpa del mio ricalco dei rami, non del predicato:
-`isIncomplete` li dichiara incomplete e il mio classificatore non trova quale ramo scatta. Il
-conteggio degli `incomplete` resta quello canonico; e' solo l'attribuzione che ha questo buco, e
-va chiuso prima di usare queste quote per dimensionare qualcosa.
+**Attribuzione chiusa al 100%**: nessun job resta non attribuito in nessuna delle due coorti. Il
+buco del 6,3% della prima passata era mio, non del predicato: mancavano **due rami** di
+`isIncomplete`, la rilevazione di lingua sulla descrizione
+(`detectLanguageWithConfidence`, confidenza ≥ 0,65) e il controllo di descrizione **troppo magra**
+rispetto alla sorgente (soglia 0,45 per `it`, 0,50 per `fr`/`de`, 0,55 altrove, solo su sorgenti
+≥ 500 caratteri). Chiuso il buco, 30 job passano da `titolo-non-tradotto` al ramo corretto: la
+quota titoli scende da 64,2% a **63,8%**, cioe' la conclusione non cambia ma il numero ora regge.
+
+**Il blocco descrizioni, dopo la #8296.** Sommando i quattro rami che riguardano la descrizione —
+`desc-uguale-normalizzata` 1.476, `desc-copia-sorgente` 344, `desc-troppo-magra` 268,
+`desc-lingua-sbagliata` 171 — restano **2.259 job, il 34,9%** del residuo oltre i sette giorni.
+Nessuno di questi lo tocca la Fase 2d. Ed e' plausibile che il mop-up Argos li **veda e li salti**:
+il suo write-guard riporta `skip:source-copy 2.232` per run, un ordine di grandezza compatibile con
+questa popolazione. Verificarlo e' la prossima domanda, non una conclusione.
 
 ## Condizione 3 — CHIUSA il 2026-09-11
 
