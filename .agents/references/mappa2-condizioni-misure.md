@@ -546,9 +546,31 @@ quota titoli scende da 64,2% a **63,8%**, cioe' la conclusione non cambia ma il 
 **Il blocco descrizioni, dopo la #8296.** Sommando i quattro rami che riguardano la descrizione —
 `desc-uguale-normalizzata` 1.476, `desc-copia-sorgente` 344, `desc-troppo-magra` 268,
 `desc-lingua-sbagliata` 171 — restano **2.259 job, il 34,9%** del residuo oltre i sette giorni.
-Nessuno di questi lo tocca la Fase 2d. Ed e' plausibile che il mop-up Argos li **veda e li salti**:
-il suo write-guard riporta `skip:source-copy 2.232` per run, un ordine di grandezza compatibile con
-questa popolazione. Verificarlo e' la prossima domanda, non una conclusione.
+Nessuno di questi lo tocca la Fase 2d.
+
+**Hanno una direzione.** Ripartendo per locale bersaglio e lingua sorgente:
+
+| ramo | locale | sorgente | job |
+|---|---|---|---:|
+| `desc-uguale-normalizzata` | it | **de** | **891** |
+| `desc-uguale-normalizzata` | it | en | 353 |
+| `desc-copia-sorgente` | it | **de** | **315** |
+| `desc-uguale-normalizzata` | it | fr | 170 |
+| `desc-lingua-sbagliata` | it → de | **de** | **135** |
+| `desc-troppo-magra` | en | it | 113 |
+
+**La sola direzione `de → it` vale 1.341 job.** Il residuo duro non e' generico: e' una descrizione
+tedesca che non arriva mai in italiano.
+
+**Il meccanismo, accertato sul codice.** `skip:source-copy` (`scripts/local-mt-mopup.mjs:439`)
+scatta quando **l'output di Argos e' identico all'input** —
+`incoming.toLowerCase() === sourceText.toLowerCase()` — non sul valore gia' memorizzato. Non e' un
+guard troppo severo: e' il traduttore che non traduce. E `scripts/local-mt-translate.py:55,80`
+dichiara che Argos ha **solo pacchetti `xx<->en`** per it/en/de/fr, quindi **`de->it` e' un pivot
+`de->en->it`**. I pacchetti ci sono — il log della `34541569329` dice
+`✅ All Argos models already installed (cache hit)` — quindi non e' un'installazione mancante.
+
+Perche' il pivot renda il tedesco invariato e' la domanda della scheda `.scratch/codex-deit.txt`.
 
 ## Condizione 3 — CHIUSA il 2026-09-11
 
