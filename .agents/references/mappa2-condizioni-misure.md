@@ -176,6 +176,73 @@ checkout locale non viene avanzato (`git-commit-data.sh:1715-1727`). **Se la fix
 esistenti non sono confrontabili con i futuri e la condizione 1 riparte da zero.**
 Scheda: `.scratch/codex-afterfix.txt`.
 
+### La causa prima, misurata il 2026-09-11: la coda vecchia **e' servita**, ma dalla corsia sbagliata
+
+Misurato da me sui log di tre run riuscite del corpus (`34416243224`, `34443590913`, `34541569329`)
+e sul codice di `origin/main`. Smentisce la premessa della scheda `codex-c0drain.txt`.
+
+**Il cap non e' 100, e' 900.** `RELOCALIZE_DEFAULT_MAX_JOBS = 900`
+(`scripts/relocalize-pending-jobs.mjs:141`) e il workflow passa `--max-jobs 900`
+(`translate-pending.yml:262`). Il commento alla riga 687 che dice «(default 100)» e' **stale**.
+`effectiveMax = Math.min(MAX_JOBS, pending.length)` sta alla riga 1598.
+
+**Una riserva per i job vecchi esiste gia'**: `RESERVE_FOR_OLDEST = 0.2`
+(`scripts/lib/job-traffic-priority.mjs:62`), pescata oldest-first con passo di uno slot ogni cinque
+(`strideForReserve`, :113). Quindi la risposta alla domanda della scheda e' **si', li raggiunge**:
+la coda che la run ordina ha `oldest 150,6d · p50 24,6d`, e le sue fasce sono
+`7-30d=1323 30-90d=1639 90-180d=273` su 4.350 datati — **il 74,4% della coda ha piu' di sette
+giorni**. Il residuo non e' irraggiungibile: e' in cima.
+
+**La run lo dice gia' da sola**, e nessuno lo stava leggendo:
+
+```
+⚠️  QUEUE AGE ALERT — oldest job in queue 150.6d, oltre il ratchet di 150d.
+    drain is clearing the head and leaving the tail. Raise RESERVE_FOR_OLDEST or the cap.
+```
+
+**Dove si rompe davvero: la resa della Fase 2b.** Timeline degli step, dall'API:
+
+| run | Fase 2a (Argos bulk) | Fase 2b (cascade) | job liberati dalla cascade |
+|---|---|---|---|
+| `34416243224` | 14,8 min | **69,2 min** | **42** |
+| `34443590913` | 11,0 min | **75,4 min** | **26** |
+| `34541569329` | **106,5 min** | **2,0 min** | **0** |
+
+Due modi di fallire, entrambi reali. Quando la cascade **ha** la sua finestra rende **0,34-0,61
+job/min**; il commento che dimensiona il cap a 900 assume **11,1 job/min**
+(`relocalize-pending-jobs.mjs:124`), cioe' **18-32 volte** di piu'. E non e' una regressione: la
+ricerca del 09-07 su dieci run aveva gia' misurato `resa=0,783 job/min`
+(`cascade-short-row-fixed-cost-research.md:57`). La cascade ha **sempre** reso ~19-42 job per run.
+Quando invece la Fase 2a esplode — 106,5 minuti contro gli 11-15 abituali — consuma l'intera
+finestra run-wide e alla cascade restano 2 minuti e **zero** job: `JOBS_CASCADE_DEADLINE_MS` vale
+`5400000` (90 min) ed e' misurato **da `RUN_START_MS`**, non dall'inizio della fase
+(`relocalize-pending-jobs.mjs:254,264,599`).
+
+**Perche' il residuo non si drena, in una riga.** Argos macina 8.928 traduzioni per run ma ne
+scrive **2.396 (26,8%)**: il guard di lingua ne respinge **4.258 (47,7%)** perche' *anche il
+candidato* e' nella lingua sbagliata, e altre 2.232 (25,0%) come `source-copy`. La composizione dei
+respinti dice quale lavoro e':
+
+| motivo | slot |
+|---|---|
+| `binnen-i` | 1.956 |
+| `compound-residue` | 1.018 |
+| `source-function-word` | 494 |
+| `source-overlap` | 346 |
+| `source-orthography` | 238 |
+| `source-copy` | 206 |
+
+Sono forme di genere e composti tedeschi: **esattamente cio' che Argos non sa fare** e che solo la
+cascade HTTP/Haiku puo' fare. Quindi il residuo duro arriva a 4.258 slot per run davanti all'unica
+corsia capace di risolverlo, e quella corsia ne libera **26-42**.
+
+**Conseguenza per le condizioni 1 e 2.** Non e' un difetto da riparare: e' un **rapporto di
+capacita'**. Finche' la cascade rende ~0,8 job/min in una finestra di 90 minuti, il suo tetto
+strutturale e' ~70 job/run, contro una coda dura che si ripresenta a migliaia. Le leve gia'
+studiate — #24 regola di salto, #25 tetto per azienda, #27 costo fisso per invocazione — valgono
+insieme un fattore vicino a 2, non a 30. **La condizione 1 non puo' chiudersi spostando la riserva
+o alzando il cap**: entrambi ridistribuiscono slot di una corsia che non ha throughput.
+
 ### Difetto separato: la corsia Haiku muore in 4 run su 7 dal 10-09
 
 Nelle ultime 100 run di `translate-pending.yml` del corpus le `failure` sono **sei**: due a fine
