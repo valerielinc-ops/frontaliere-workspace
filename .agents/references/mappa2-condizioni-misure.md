@@ -50,12 +50,43 @@ Sulla MA3 ogni anomalia avvelena **tre** punti consecutivi. Con un punto ogni ~2
 un'anomalia ogni ~20 punti, la finestra pulita necessaria (~15 ore) e' appena piu' corta
 dell'intervallo medio fra due anomalie: la condizione e' raggiungibile ma fragile.
 
-**Il produttore dello storico non e' quello che sembra**:
-`.github/workflows/translate-pending.yml` del sito non gira dal **2026-08-25**
-(`gh api repos/valerielinc-ops/frontaliere-si-o-no/actions/workflows/translate-pending.yml/runs`),
-eppure i commit `🌐 Auto-translate pending jobs` continuano ad arrivare su `main` del sito. Delle
-tre copie di `translate-pending` va stabilito quale produce quei commit **prima** di leggere il
-codice. Scheda: `.scratch/codex-c1art.txt`.
+**Il produttore, identificato** — non ricercarlo:
+
+- `.github/workflows/translate-pending.yml` **del sito** e' la copia morta: non gira dal
+  **2026-08-25**.
+- `.github/workflows/translate-pending-logic.yml` **del sito** e' la **sorgente** del workflow
+  generato.
+- Quello che gira e' `.github/workflows/translate-pending.yml` del **repo corpus**, «Translate
+  Pending Jobs (sparse cross-repo execution)». Tutti e cinque i punti anomali sono portati da
+  commit `🌐 Auto-translate pending jobs` prodotti da li'.
+
+**Ipotesi esclusa a costo zero**: `titleLooksUntranslated` (`scripts/lib/job-locale-utils.mjs:661`)
+e' deterministica e puramente lessicale — nessuna rete, nessun modello, `minConfidence` accettata e
+**inerte**. A parita' di dati del job non cambia verdetto. L'anomalia viene dai dati che quella run
+aveva in mano.
+
+**Il correlato che distingue i punti anomali: la contesa sul passo di commit.** Ritardo fra il
+timestamp del punto `after` e il commit che lo porta su `main`, su 52 punti confrontabili:
+
+| gruppo | n | mediana | valori |
+|---|---|---|---|
+| normali | 47 | **0,61 h** | min 0,12 — max 2,56; solo 8 su 47 sopra 1 h |
+| anomali | 5 | **2,20 h** | 1,30 · 1,84 · 2,20 · 2,59 · 2,62 |
+
+Tutti e cinque nella coda lunga. Il ritardo e' posteriore al calcolo, quindi non ne e' la causa:
+e' l'indicatore di quanto la run resta appesa fra calcolo e push. Nel corpus le run di
+`translate-pending.yml` durano **5-13 ore** e si **sovrappongono**: nella finestra del 10-09 la run
+`34360370563` (13:56Z → 02:39Z, ~12,7 h) finisce mentre `34380507868` e `34416243224` sono in corso.
+
+Ipotesi da verificare: una run lunga calcola le statistiche dal proprio albero, vecchio di ore, e
+le scrive dopo che altre run hanno gia' committato traduzioni piu' recenti. La verifica e' diretta:
+**il passo delle statistiche legge i job prima o dopo il rebase del passo di commit?** Da guardare
+nello stesso giro `translate-queue-recovery.yml` e `translate-queue-recovery-watchdog.yml` del
+corpus. Scheda: `.scratch/codex-c1art.txt`.
+
+**Cadenza reale**, contro il «~2,2 ore» scritto prima: mediana **4,21 h** su 101 intervalli,
+**2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3 richiedono almeno nove punti, cioe'
+**21-38 ore** di serie pulita.
 
 **Comando**:
 
