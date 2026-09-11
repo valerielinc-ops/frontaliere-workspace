@@ -243,6 +243,41 @@ studiate — #24 regola di salto, #25 tetto per azienda, #27 costo fisso per inv
 insieme un fattore vicino a 2, non a 30. **La condizione 1 non puo' chiudersi spostando la riserva
 o alzando il cap**: entrambi ridistribuiscono slot di una corsia che non ha throughput.
 
+### La leva trovata il 2026-09-11: la Fase 2d non gira **mai**
+
+Su **45 run riuscite** consecutive di `translate-pending.yml` del corpus, lo step
+`Phase 2d: Fix untranslated titles (free cascade)` ha conclusione **`skipped` in tutte e 45**.
+
+```bash
+ids=$(gh api "repos/nanakokyobashi-rgb/frontaliere-articles/actions/workflows/translate-pending.yml/runs?per_page=60" \
+  -q '.workflow_runs[] | select(.conclusion=="success") | .id')
+for id in ${=ids}; do
+  gh api "repos/nanakokyobashi-rgb/frontaliere-articles/actions/runs/$id/jobs" \
+    -q '[.jobs[].steps[] | select(.name|test("Phase 2d")) | .conclusion] | join(",")'
+done
+```
+
+(`${=ids}`, non `$ids`: il tool Bash gira **zsh**, che non fa word splitting. Con `$ids` il ciclo
+esamina **una** run e sembra confermare qualunque cosa si stia cercando.)
+
+**Il gate.** `if: steps.hk.outputs.run == 'true' && inputs.dry_run != true`, e lo step `hk` mette
+`run=true` **solo** se `github.event.schedule == '0 7 * * *'` (`translate-pending.yml:166-178`).
+Ogni run osservata stampa `⏭️  Housekeeping skipped (not daily cron)` — comprese quelle schedulate
+che atterrano fra le 07:00Z e le 09:59Z. La Fase 2d e' quindi legata a una condizione di
+**housekeeping** che non ha niente a che vedere col riparare titoli.
+
+**Perche' e' la leva.** `scripts/fix-untranslated-titles.mjs` usa **`titleLooksUntranslated`** — lo
+stesso predicato canonico che sta dentro `isIncomplete` — e ripara i titoli con la cascade HTTP
+gratuita (DeepL → MyMemory), **senza AI e senza crawler**. E' l'unica corsia veloce che attacca il
+ramo titolo di `incomplete`, contro una Fase 2b che paga un'invocazione di crawler per azienda e
+rende 0,34-0,61 job/min.
+
+**Il vincolo che governa la fix.** `UNTRANSLATED_TITLE_FIX_DEADLINE_MS` vale `18000000`, cioe' 300
+minuti misurati run-wide, contro un tetto di run di 350. Accenderla a ogni run con quel budget
+spinge la run contro il tetto, e una kill brutale al tetto **non e' intercettabile**: farebbe
+perdere il punto della condizione 1 che la #8290 ha appena finito di riparare. La fix deve
+dichiarare **quando** gira e **con quale budget**. Scheda: `.scratch/codex-p2d.txt`.
+
 ### Difetto separato: la corsia Haiku muore in 4 run su 7 dal 10-09
 
 Nelle ultime 100 run di `translate-pending.yml` del corpus le `failure` sono **sei**: due a fine
