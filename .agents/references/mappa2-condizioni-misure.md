@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 18:27Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 18:54Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,7 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 18:27Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+**Stato al 2026-09-11 18:54Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
 `2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
@@ -505,14 +505,16 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T18:26:53Z: la `34581778668` e' `success`, la `34596819197` e'
-`in_progress` nella Phase 1 e la `34624763248` e' `pending`. La prima ha completato la Phase 2d
-alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
-raggiunto.
+Stato verificato al 2026-09-11T18:53:36Z: la `34581778668` e' `success`, la `34596819197` e'
+`in_progress` dopo aver completato la Phase 1 e la `34624763248` e' `pending`. La prima ha
+completato la Phase 2d alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350**
+minuti non e' stato raggiunto. Sulla `34596819197` i due fixer risultano ancora `pending` e il
+job e' passato allo step `Install Argos Translate`.
 
-La housekeeping corrente e' iniziata alle 17:15:45Z e, alle 18:26:53Z, dura circa 71 minuti. Nelle
-sei run storiche comparabili la stessa Phase 1 e' durata **91-99 minuti**: non e' un blocco e non va
-cancellata per accorciare la coda.
+La housekeeping corrente e' iniziata alle 17:15:45Z e si e' conclusa alle 18:51:01Z: **95m16s**.
+`Commit housekeeping` e' terminato con successo alle 18:52:46Z; il job e' ora in `Install Argos
+Translate`. Nelle sei run storiche comparabili la stessa Phase 1 e' durata **91-99 minuti**: non
+era un blocco e non andava cancellata per accorciare la coda.
 
 **Conseguenza pratica**: la prima verifica vera di #8305 arriva dalla prima run non-housekeeping
 che superera' il gate, probabilmente la `34624763248`; il valore va verificato nel log all'avvio.
