@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 19:01Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 19:07Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,7 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 19:01Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+**Stato al 2026-09-11 19:07Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
 `2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
@@ -505,7 +505,7 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T19:00:42Z: la `34581778668` e' `success`, la `34596819197` e'
+Stato verificato al 2026-09-11T19:06:51Z: la `34581778668` e' `success`, la `34596819197` e'
 `in_progress` dopo aver completato la Phase 1 e la `34624763248` e' `pending`. La prima ha
 completato la Phase 2d alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350**
 minuti non e' stato raggiunto. Sulla `34596819197` i due fixer risultano ancora `pending` e il
@@ -532,10 +532,10 @@ ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 **Misura precedente, al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
 565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
 
-**Misura corrente, al 2026-09-11T19:00:42Z**, su `origin/main`
-`f12ff8fba21f7a6cadcf8c97bafa056588be5ff0`: **170 / 229 = 74,2%**. Il nuovo albero pubblicato
-conta **33.101 job** (tutti risolti da `firstSeenAt`); la coorte obiettivo non cambia rispetto al
-commit precedente, mentre le fasce e il totale riflettono la housekeeping.
+**Misura corrente, al 2026-09-11T19:06:51Z**, su `origin/main`
+`f5165e8f9294203d78fc301a6f2e3051963959a3`: **170 / 229 = 74,2%**. Il nuovo albero pubblicato
+conta **33.101 job** (tutti risolti da `firstSeenAt`); anche se la slice
+`data/jobs/by-crawler/publisher-submitted.json` è cambiata, la coorte obiettivo non cambia.
 
 Rispetto alla lettura precedente `171/240`, il commit `51baf536729` ha rimosso 14 record duplicati
 da tre slice: la variazione del denominatore è quindi ricambio dell'albero, non un recupero dei
