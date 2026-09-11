@@ -601,13 +601,26 @@ boilerplate ripetuto: solo 130 job condividono la descrizione con altri dieci o 
 Le prime due valgono il **52%**. Un residuo cosi' concentrato indica un difetto **per-crawler**,
 non un limite del motore di traduzione.
 
-**Stima grezza della quota non traducibile, dichiarata come euristica**: contando come «chrome» le
-descrizioni con almeno tre parole-menu (`Warenkorb`, `Webcams`, `Suche`, `online buchen`,
-`Impressum`…) o con quasi nessuna punteggiatura, **1.493 su 3.343 (44,7%)** non sono annunci.
-L'euristica e' rozza e va sostituita da un criterio vero prima di deciderci qualcosa — ma se
-l'ordine di grandezza regge, **quasi meta' di questo residuo non e' una coda da tradurre: e' un
-fondo permanente da escludere dal denominatore**, e le condizioni 1 e 2 vanno riformulate di
-conseguenza.
+**RITIRATA la stima «44,7% non traducibile».** Era sbagliata, e il modo in cui e' caduta e' istruttivo.
+
+L'euristica univa due segnali in un `or`: almeno tre parole-menu (`Warenkorb`, `Webcams`, `Suche`,
+`online buchen`, `Impressum`…) **oppure** quasi nessuna punteggiatura. Separandoli:
+
+| segnale | job |
+|---|---:|
+| ≥ 3 parole-menu — **valido** | **36** (1,1%) |
+| quasi nessuna punteggiatura — **invalido** | 1.457 |
+
+Il secondo segnale classifica come «chrome» gli **elenchi puntati**, che sono la forma normale di un
+annuncio di lavoro. Il controllo sulla fetta dominante lo dimostra: i **1.311** job di
+**STA Personal AG** hanno descrizioni tedesche vere e ben formate — `Tätigkeiten … Anforderungen`
+con elenchi, lunghezza p50 **688** caratteri, p90 972 — e quasi nessun punto fermo. Sono
+**perfettamente traducibili**.
+
+**Conclusione corretta: il residuo `de → it` e' una vera lacuna di traduzione, non un fondo
+permanente.** Il caso Air Zermatt esiste ma vale l'**1,1%**, non la meta'. Le condizioni 1 e 2
+**non** vanno riformulate su questa base, e la domanda sul pivot `de->en->it` diventa piu'
+importante, non meno: sono 2.259 job di lavoro reale.
 
 La domanda su perche' il pivot `de->en->it` non traduca l'altra meta' resta aperta. Scheda:
 `.scratch/codex-deit.txt`, **non consumata**: quattro job Codex di fila sono stati uccisi dal

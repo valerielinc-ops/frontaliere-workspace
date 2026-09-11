@@ -2096,3 +2096,24 @@ mai fidarsi dei valori pre-inizializzati.
 
 E' la stessa famiglia di §41 — uno strumento ereditato va aperto prima di citarne il numero — ma
 peggiore, perche' qui lo strumento e' un file di dati e sembra non avere codice dietro.
+
+## §55 — un'euristica a due segnali in `or` va validata **per segnale**, o il piu' rozzo si prende tutto il numero
+
+Una regola del tipo «conta come X se vale A **oppure** B» produce un totale che sembra la somma di
+due evidenze e spesso e' il prodotto di una sola. Qui «descrizione non traducibile se ha parole-menu
+**o** quasi nessuna punteggiatura» rendeva **44,7%**; separati, il segnale buono valeva **1,1%** e
+tutto il resto veniva dal segnale cattivo, che scambiava gli **elenchi puntati** — la forma normale
+di un annuncio di lavoro — per chrome di navigazione.
+
+Il controllo che la smonta costa poco e va fatto **prima** di pubblicare il numero: prendi la
+**fetta dominante** della popolazione (qui una sola azienda, 1.311 job su 3.343, il 39%) e guardala.
+Se la fetta dominante contraddice l'etichetta, l'etichetta e' sbagliata a prescindere da quanto
+sembra ragionevole la regola.
+
+Regola operativa: **una quota prodotta da un'euristica composita non si riporta mai aggregata**. Si
+riporta un segnale per riga, col suo conteggio, e si dichiara quale e' stato validato contro dati
+veri. Un `or` fra un criterio forte e uno debole non e' un'euristica piu' robusta: e' il criterio
+debole travestito da consenso.
+
+Vale in entrambe le direzioni del lavoro con un agente: nelle **schede** non passare mai una quota
+composita come premessa, e nelle **consegne** pretendi la ripartizione per segnale, non il totale.
