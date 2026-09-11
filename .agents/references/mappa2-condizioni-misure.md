@@ -501,26 +501,36 @@ prendere consapevolmente, non un passo di routine.
 **Operativizzazione**: quota di `complete` nella **coorte 24-48h** (job messi in coda fra 24 e 48
 ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 
-**Stato al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
+**Misura precedente, al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
 565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
 
-Rispetto all'81,3% precedente e' **sceso di ~1,0 pp**: la PR **#8080** (ponte near-miss con limite
-superiore d'eta') **non ha mosso questa coorte**.
+**Misura corrente, al 2026-09-11T16:39:09Z**, su `origin/main`
+`ee897ee518d520749ba5f7b7e2e5088c1520013b`: **170 / 240 = 70,8%**. Il denominatore è cambiato
+insieme all’albero pubblicato; questa è la lettura da usare per il controllo corrente, non un
+confronto diretto di trend con la misura precedente.
+
+La misura storica di 80,3%, rispetto all'81,3% precedente, era **scesa di ~1,0 pp**: la PR
+**#8080** (ponte near-miss con limite superiore d'eta') **non aveva mosso questa coorte**.
 
 Campo dell'eta' usato: `queuedAt` da `jobQueuedAtMs` in
 `scripts/lib/job-traffic-priority.mjs:260-268`, catena `firstSeenAt` → `postedDate` → `crawledAt` →
-`datePosted`. In questa lettura **32.988 job su 32.988 risolvono a `firstSeenAt`**: nessun
+`datePosted`. Nella misura precedente **32.988 job su 32.988 risolvevano a `firstSeenAt`**: nessun
 fallback, `crawledAt` mai usato.
+
+Nella misura corrente lo script locale di misura conta **33.190 job**, tutti risolti a
+`firstSeenAt`, ancora senza fallback.
 
 ### Le fasce adiacenti: la completezza **scende** con l'eta'
 
 | fascia | complete / denominatore | quota |
 |---|---|---|
-| sotto 24h | 186 / 1.253 | 14,8% |
-| **24-48h** | **786 / 979** | **80,3%** |
-| 2-7 giorni | 4.073 / 6.062 | **67,2%** |
+| sotto 24h | 891 / 1.857 | 48,0% |
+| **24-48h** | **170 / 240** | **70,8%** |
+| 2-7 giorni | 4.029 / 6.133 | **65,7%** |
+| 7-30 giorni | 8.008 / 11.477 | **69,8%** |
+| >30 giorni | 10.205 / 13.483 | **75,7%** |
 
-La fascia 2-7 giorni sta **13 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
+Nella misura corrente la fascia 2-7 giorni sta **5,1 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
 lavorazione la completezza sarebbe monotona crescente con l'eta'. Due letture, lavori opposti:
 
 1. **La completezza si perde** — job gia' `complete` tornano `incomplete`. Allora il problema e' la
