@@ -23,10 +23,9 @@ riformulazione, non una comodita'.
 **Dove sta il dato**: `data/translation-stats-history.json` nel repo sito, voci con
 `label === "after"`. Ne arriva una ogni ~2,2 ore.
 
-### Il blocco non sono gli artefatti: il residuo e' piatto
+### Il blocco: il residuo e' piatto, e due terzi ha piu' di una settimana
 
 Escludendo dalla serie i sei punti con la firma dell'artefatto, **la catena corrente resta 0**.
-Gli artefatti vanno riparati, ma **non sono cio' che tiene chiusa la condizione**.
 
 | ora | complete | incomplete | totale | quota |
 |---|---|---|---|---|
@@ -35,14 +34,55 @@ Gli artefatti vanno riparati, ma **non sono cio' che tiene chiusa la condizione*
 | 2026-09-10T11:58 | 26.003 | **6.494** | 32.497 | 80,02% |
 | 2026-09-11T01:26 | 26.031 | **6.571** | 32.602 | 79,84% |
 
-In tre giorni `incomplete` non scende. La quota sale di 0,7 pp e viene quasi tutta dal
-denominatore (`complete` +3.217 contro `total` +3.775): **oggi la quota sale per diluizione**, e
-sette rialzi MA3 su una grandezza mossa dall'ingresso sono una scommessa sul rumore.
+In tre giorni `incomplete` non scende. La quota sale di 0,7 pp quasi tutta dal denominatore
+(`complete` +3.217 contro `total` +3.775): **sale per diluizione**.
 
-Incrociando con le fasce della condizione 2: **~3.300 dei 6.571 `incomplete` hanno piu' di sette
-giorni**. Le condizioni 1 e 2 sono due viste della stessa coda ferma. Scheda:
-`.scratch/codex-c0drain.txt` — la domanda e' se quel residuo entri mai nei primi `effectiveMax`
-(default 100) job che una run seleziona.
+**Quadro reale, col predicato canonico** su `origin/main` (`25c93c9a686`, 2026-09-11T05:09Z),
+eta' da `jobQueuedAtMs`:
+
+| fascia | job | incomplete | complete |
+|---|---|---|---|
+| sotto 24h | 1.253 | 1.067 | 14,8% |
+| **24-48h** | 979 | 193 | **80,3%** |
+| 2-7 giorni | 6.062 | 1.989 | 67,2% |
+| 7-30 giorni | 11.237 | 3.441 | 69,4% |
+| oltre 30 giorni | 13.457 | 3.023 | 77,5% |
+| **totale** | **32.988** | **9.713** | **70,6%** |
+
+**La copertura reale e' 70,6%, non 79,8%**: la differenza e' il difetto della misura (il punto
+`after` scritto a meta' run, vedi sotto). E **6.464 job oltre i sette giorni**, non ~3.300 come
+stimato per differenza in una prima lettura: due terzi del backlog.
+
+La curva ha la forma di una coda servita fresca e poi abbandonata: massimo a **24-48h** (80,3%),
+minimo a **2-7 giorni** (67,2%), risalita parziale oltre i 30 giorni.
+
+**«La completezza si perde» e' SMENTITA.** Confronto job per job fra `0019af8e376`
+(2026-09-06T05:08Z) e `25c93c9a686`, con `isIncomplete` importata dal sorgente **di ciascun ref**,
+sui 1.989 incomplete della fascia 2-7 giorni:
+
+| gruppo | conteggio |
+|---|---|
+| gia' `incomplete` nel ref vecchio | 209 / 1.989 (10,5%) |
+| **completi allora, incompleti oggi** | **4 / 1.989 (0,2%)** |
+| non esistenti nel ref vecchio | 1.776 / 1.989 (89,3%) |
+
+Quattro job, non un fenomeno: il lavoro e' **capacita' e ripasso**, non conservazione.
+**Attenzione pero' al 89,3%**: il ref vecchio ha cinque giorni e la fascia ne copre da due a sette,
+quindi i job visti per la prima volta il 07-09 settembre non potevano esistere nel ref del 06. Quel
+numero misura la finestra di confronto, non il backlog.
+
+I quattro casi hanno comunque un nome: `mergeLocaleTextMap`
+(`scripts/lib/dedicated-crawler-common.mjs:6461-6513`) rimuove le traduzioni non-source quando
+rileva drift della sorgente, e `hardenJobLocaleFields` (`:1516-1520`) riempie le slot con la
+sorgente impostando `needsRetranslation`. **I test pinnano di proposito** questo comportamento
+(`tests/dedicated-crawler-common.test.ts:618-692` la rimozione, `:1698-1740` la conservazione): non
+e' un bug da togliere, e distinguere un vero cambio di posting da un aggiornamento della stessa
+vacancy e' il lavoro vero.
+
+Scheda per la domanda che resta: `.scratch/codex-c0drain.txt` — il residuo oltre i sette giorni
+entra mai nei primi `effectiveMax` (default 100) job che una run seleziona? Denominatore **6.464**.
+
+Comando: `.scratch/agebands.mjs` (`SRC=<dir> REF=<ref> node .scratch/agebands.mjs`).
 
 ### I cinque punti anomali: cosa si sa e cosa no
 
