@@ -5,6 +5,14 @@ comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
 
+**Aggiornamento al 2026-09-11 19:47Z:** la scheda `.scratch/codex-p2ewide.txt` è stata auditata
+su una base pulita e **ritirata: era già coperta dalla PR sito #8308**, quindi non va rilanciata.
+Il predicato normalizzato di #8308 seleziona **9.242 slot su 3.175 job** (`840/329` copie esatte
+più `8.402/2.849` normalizzate-only); i **5 test** mirati del contratto passano. Nessuna PR
+duplicata è stata aperta e nessun dato di produzione è stato modificato. La misura resta quella
+del tree pubblicato fissato sotto; il prossimo passo operativo è ancora la prima run
+non-housekeeping che esegua davvero Phase 2d/2e.
+
 ---
 
 ## Condizione 1 — la quota di completezza sale
