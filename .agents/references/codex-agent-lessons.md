@@ -2117,3 +2117,26 @@ debole travestito da consenso.
 
 Vale in entrambe le direzioni del lavoro con un agente: nelle **schede** non passare mai una quota
 composita come premessa, e nelle **consegne** pretendi la ripartizione per segnale, non il totale.
+
+## §56 — la memoria della macchina e' un budget condiviso, e un job ucciso per OOM non e' un job fallito: e' una scheda non consumata
+
+Il runtime Codex e' condiviso fra le sessioni aperte sulla stessa macchina, ma la RAM lo e' di piu':
+la consumano anche i job delle **altre** sessioni, il browser e l'editor. Il risultato non e' un
+errore dentro il job — e' il sistema che lo **uccide**, spesso senza che l'agente abbia scritto il
+messaggio finale. L'output resta sul disco, sembra una consegna parziale, e non lo e'.
+
+Due conseguenze operative.
+
+**Prima di dispacciare, guarda la memoria libera**, non solo quanti job Codex sono vivi. Un
+`vm_stat` costa nulla e distingue «posso lanciare» da «sto per buttare via una scheda». Sotto poche
+migliaia di pagine libere non parte niente di pesante, nemmeno un waiter.
+
+**Scrivi le schede in modo che non chiedano un riscan quando un log basta.** Le schede che
+materializzano tutte le slice del corpus sono quelle che muoiono; quelle che leggono un log gia'
+scaricato o un artifact arrivano in fondo. Quando il riscan e' inevitabile, il vincolo va **in cima
+alla scheda** e in forma imperativa — una slice alla volta, libera la variabile, niente array
+globali — perche' l'agente altrimenti sceglie la strada comoda.
+
+E quando una scheda muore cosi' piu' volte, la risposta giusta non e' rilanciarla una quinta volta:
+e' **restringere la domanda** finche' non entra in cio' che puoi misurare tu, e scrivere nella
+scheda cio' che hai gia' escluso, perche' il prossimo tentativo non lo ripaghi.
