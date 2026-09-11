@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 17:25Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 17:33Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,7 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 17:25Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+**Stato al 2026-09-11 17:33Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
 `2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
@@ -505,7 +505,7 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T17:25Z: la `34581778668` e' `success`, la `34596819197` e'
+Stato verificato al 2026-09-11T17:33Z: la `34581778668` e' `success`, la `34596819197` e'
 `in_progress` nella Phase 1 e la `34624763248` e' `pending`. La prima ha completato la Phase 2d
 alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
 raggiunto.
@@ -526,10 +526,14 @@ ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 **Misura precedente, al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
 565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
 
-**Misura corrente, al 2026-09-11T17:24:57Z**, su `origin/main`
-`797694e01ac9463654569971ee0d5b32247b26c2`: **171 / 240 = 71,3%**. Il denominatore è cambiato
+**Misura corrente, al 2026-09-11T17:32:47Z**, su `origin/main`
+`9ad7b4cb2814cf58d3d9be557f6be26b4faaa768`: **170 / 229 = 74,2%**. Il denominatore è cambiato
 insieme all’albero pubblicato; questa è la lettura da usare per il controllo corrente, non un
 confronto diretto di trend con la misura precedente.
+
+Rispetto alla lettura precedente `171/240`, il commit `51baf536729` ha rimosso 14 record duplicati
+da tre slice: la variazione del denominatore è quindi ricambio dell'albero, non un recupero dei
+fixer.
 
 La misura storica di 80,3%, rispetto all'81,3% precedente, era **scesa di ~1,0 pp**: la PR
 **#8080** (ponte near-miss con limite superiore d'eta') **non aveva mosso questa coorte**.
@@ -539,20 +543,20 @@ Campo dell'eta' usato: `queuedAt` da `jobQueuedAtMs` in
 `datePosted`. Nella misura precedente **32.988 job su 32.988 risolvevano a `firstSeenAt`**: nessun
 fallback, `crawledAt` mai usato.
 
-Nella misura corrente lo script locale di misura conta **33.190 job**, tutti risolti a
+Nella misura corrente lo script locale di misura conta **33.176 job**, tutti risolti a
 `firstSeenAt`, ancora senza fallback.
 
 ### Le fasce adiacenti: la completezza **scende** con l'eta'
 
 | fascia | complete / denominatore | quota |
 |---|---|---|
-| sotto 24h | 899 / 1.857 | 48,4% |
-| **24-48h** | **171 / 240** | **71,3%** |
+| sotto 24h | 899 / 1.855 | 48,5% |
+| **24-48h** | **170 / 229** | **74,2%** |
 | 2-7 giorni | 4.068 / 6.133 | **66,3%** |
 | 7-30 giorni | 8.034 / 11.477 | **70,0%** |
-| >30 giorni | 10.214 / 13.483 | **75,8%** |
+| >30 giorni | 10.214 / 13.482 | **75,8%** |
 
-Nella misura corrente la fascia 2-7 giorni sta **5,0 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
+Nella misura corrente la fascia 2-7 giorni sta **7,9 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
 lavorazione la completezza sarebbe monotona crescente con l'eta'. Due letture, lavori opposti:
 
 1. **La completezza si perde** — job gia' `complete` tornano `incomplete`. Allora il problema e' la
