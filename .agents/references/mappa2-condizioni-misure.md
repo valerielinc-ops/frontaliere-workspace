@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 17:33Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 18:22Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,7 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 17:33Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+**Stato al 2026-09-11 18:22Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
 `2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
@@ -505,12 +505,12 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T17:33Z: la `34581778668` e' `success`, la `34596819197` e'
+Stato verificato al 2026-09-11T18:22:13Z: la `34581778668` e' `success`, la `34596819197` e'
 `in_progress` nella Phase 1 e la `34624763248` e' `pending`. La prima ha completato la Phase 2d
 alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
 raggiunto.
 
-La housekeeping corrente e' iniziata alle 17:15:45Z e, alle 17:41Z, dura circa 26 minuti. Nelle
+La housekeeping corrente e' iniziata alle 17:15:45Z e, alle 18:22:13Z, dura circa 66 minuti. Nelle
 sei run storiche comparabili la stessa Phase 1 e' durata **91-99 minuti**: non e' un blocco e non va
 cancellata per accorciare la coda.
 
@@ -530,10 +530,10 @@ ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 **Misura precedente, al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
 565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
 
-**Misura corrente, al 2026-09-11T17:32:47Z**, su `origin/main`
-`9ad7b4cb2814cf58d3d9be557f6be26b4faaa768`: **170 / 229 = 74,2%**. Il denominatore è cambiato
-insieme all’albero pubblicato; questa è la lettura da usare per il controllo corrente, non un
-confronto diretto di trend con la misura precedente.
+**Misura corrente, al 2026-09-11T18:22:13Z**, su `origin/main`
+`5adfdd252c6eddef5c47c823cc60837078de1c92`: **170 / 229 = 74,2%**. Il ricalcolo sul nuovo
+albero pubblicato conferma i numeri precedenti; questa è la lettura da usare per il controllo
+corrente, non un confronto diretto di trend con la misura storica.
 
 Rispetto alla lettura precedente `171/240`, il commit `51baf536729` ha rimosso 14 record duplicati
 da tre slice: la variazione del denominatore è quindi ricambio dell'albero, non un recupero dei
