@@ -2053,3 +2053,25 @@ girava una versione dell'action del sito con un Node scaricato in `RUNNER_TEMP`;
 come un'inferenza da verificare e ho tenuto buona la scheda. Era vera. Un agente che ha letto i log
 di quella run ha visto qualcosa che chi ha scritto la scheda non aveva guardato: la contraddizione
 va risolta guardando, non pesando le fonti per autorevolezza.
+
+## §53 — filtrare per «riuscito» cancella esattamente i casi in cui il fenomeno accade
+
+Chiedere «quante volte questo passo e' stato saltato?» su un campione di run **riuscite** produce un
+numero vero e una conclusione sbagliata. I casi in cui il passo partiva davvero non sono nel
+campione: erano nelle run **cancellate**, e la cancellazione e' il fenomeno.
+
+Qui la prima misura diceva «`skipped` in 45 run su 45» e sembrava chiudere la questione sul gate.
+La misura senza filtro, su 100 run, ha trovato **sei** run col gate soddisfatto, **tutte
+cancellate**, e in **cinque** il passo risultava `cancelled`, cioe' **in esecuzione** quando la run
+e' stata uccisa. Stessa domanda, stesso strumento, due storie diverse: la prima dice «non parte
+mai», la seconda dice «parte e viene ammazzata», e solo la seconda porta alla causa.
+
+Regola operativa: quando la domanda riguarda **perche' qualcosa non arriva a compimento**, il
+filtro sullo stato finale va **tolto**, non affinato. Lo stato finale e' una variabile del
+fenomeno, non una condizione di igiene del campione. Il filtro si rimette dopo, se serve, e si
+dichiara cosa ha escluso.
+
+Vale anche quando l'agente e' l'autore della misura: nella consegna pretendi **il denominatore
+completo** e la ripartizione per stato finale, non solo il conteggio dei casi conformi. Un agente
+che riporta «N su N» senza dire quante run ha scartato prima di contare ha risposto a una domanda
+piu' piccola di quella posta.
