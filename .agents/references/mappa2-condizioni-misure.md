@@ -441,6 +441,46 @@ verificando che gli import relativi si risolvano) cosi' che la sua `ROOT` non pu
 
 ---
 
+## La corsia che muove la condizione 1 e' una sola, e fa 25-29 job per run
+
+Misurato dall'artifact `translation-observability` di cinque run consecutive. Il report e' prodotto
+da `scripts/lib/translation-observability.mjs:522`, che confronta lo snapshot `before` con quello
+`final` **per `identityHash`** e conta le transizioni di stato vere.
+
+| run | `incomplete` prima → dopo | transizioni reali |
+|---|---|---|
+| `34380507868` | 5.265 → 5.266 | `flagged_to_complete` 12, `complete_to_incomplete` 1 |
+| `34416243224` | 5.266 → 5.223 | **`incomplete_to_complete` 25**, `incomplete_to_flagged` 18 |
+| `34441079032` | 5.222 → 5.191 | **`incomplete_to_complete` 29**, `flagged_to_complete` 18, `incomplete_to_flagged` 2 |
+| `34443590913` | 5.183 → 5.157 | **`incomplete_to_complete` 26**, `flagged_to_complete` 2 |
+| `34541569329` | 5.222 → 5.223 | `flagged_to_complete` 1.779, `complete_to_incomplete` 1 |
+
+In tutte e cinque `added = 0` e `removed = 0`: nessun job entra o esce, quindi ogni movimento del
+conteggio e' lavoro, non ricambio di popolazione.
+
+**Il risultato.** Le uniche transizioni `incomplete → complete` sono **25, 26, 29** nelle tre run in
+cui la Fase 2b ha avuto la sua finestra, e **zero** nelle due in cui non l'ha avuta — fra cui la
+`34541569329`, quella in cui la Fase 2a ha mangiato 106,5 minuti e alla cascade ne sono rimasti 2.
+La corrispondenza con la resa della cascade gia' misurata (26-42 job liberati per run) e' esatta.
+
+**E il mop-up Argos non muove la condizione 1 di un solo job.** Nella `34541569329` ha tradotto
+8.928 campi e prodotto **1.779 `flagged_to_complete`**, con `incomplete_to_complete` **assente**:
+`flagged` e `incomplete` sono due stati diversi, e il flag `needsRetranslation` non e' il predicato
+`isIncomplete`. Tutto quel lavoro e' reale e non compare nella metrica della condizione 1.
+
+**Aritmetica di chiusura.** Backlog **9.713** incomplete. A 25-29 job per run e ~5-10 run al giorno
+la cascade ne libera **125-290 al giorno**, contro un ingresso di **~1.250 job nuovi al giorno**.
+La condizione 1 non puo' salire con questa sola corsia: e' la ragione per cui la serie e' piatta, e
+la ragione per cui riaprire la Fase 2d (#8296) e' la leva e non un'ottimizzazione.
+
+### Trappola di lettura, gia' pagata
+
+Il blocco `delta.transitions` nasce come `{ complete: 0, flagged: 0, incomplete: 0 }`
+(`translation-observability.mjs:525`) e viene poi riempito con chiavi `${old}_to_${new}`. **Quei
+tre zeri sono l'inizializzatore, non una misura.** Leggere `"incomplete": 0` come «zero job usciti
+da incomplete» rende un verdetto falso in tre run su cinque. La transizione vera si chiama
+`incomplete_to_complete`, e quando manca **vale zero perche' la chiave non e' mai stata creata**.
+
 ## Perche' i job restano `incomplete`: attribuzione al ramo, 2026-09-11
 
 Misurato da me su `origin/main` del sito (`6a4441ee59c`) applicando `isIncomplete` **importata** e

@@ -2075,3 +2075,24 @@ Vale anche quando l'agente e' l'autore della misura: nella consegna pretendi **i
 completo** e la ripartizione per stato finale, non solo il conteggio dei casi conformi. Un agente
 che riporta «N su N» senza dire quante run ha scartato prima di contare ha risposto a una domanda
 piu' piccola di quella posta.
+
+## §54 — in un JSON di telemetria, uno zero puo' essere l'inizializzatore e non una misura
+
+Un contatore costruito come `{ a: 0, b: 0, c: 0 }` e poi riempito con chiavi **dinamiche** — qui
+`increment(transitions, `${old}_to_${new}`)` — pubblica un oggetto in cui convivono due specie
+diverse: le chiavi iniziali, che valgono zero **perche' nessuno le ha mai toccate**, e le chiavi
+vere, che esistono solo se il fenomeno e' accaduto. Nel JSON hanno lo stesso aspetto.
+
+La conseguenza e' un errore di lettura che si presenta come una prova: `"incomplete": 0` sembra
+dire «zero job sono usciti da incomplete», e invece non dice niente — la quantita' cercata si
+chiama `incomplete_to_complete` e **la sua assenza e' lo zero**. Qui la lettura sbagliata avrebbe
+prodotto un verdetto falso in tre run su cinque, e un verdetto molto piu' drammatico di quello
+vero.
+
+Regola operativa: prima di citare un campo di un artifact di telemetria, **apri il codice che lo
+scrive** e guarda se la chiave e' letterale o composta. Se e' composta, l'unico modo corretto di
+leggere l'oggetto e' filtrare le chiavi che matchano il pattern e trattare l'assenza come zero —
+mai fidarsi dei valori pre-inizializzati.
+
+E' la stessa famiglia di §41 — uno strumento ereditato va aperto prima di citarne il numero — ma
+peggiore, perche' qui lo strumento e' un file di dati e sembra non avere codice dietro.
