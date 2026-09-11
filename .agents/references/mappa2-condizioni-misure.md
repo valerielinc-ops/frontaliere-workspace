@@ -411,11 +411,22 @@ precedente leggeva **6.571 su 32.602** dal worktree transitorio della sua run; q
 io su `origin/main`. Cioe' la sovrastima non e' stata corretta dalla fix: si e' semplicemente
 consumata da se', perche' la run successiva ha dovuto ripartire dalla realta'.
 
-**Divario non spiegato, dichiarato**: il punto dice **9.212** incomplete, la mia misura diretta con
-`isIncomplete` importata sullo stesso totale di 32.988 ne conta **9.713**. Sono **501** di
-differenza. Il totale combacia al job, il numeratore no. Prima di usare 9.212 come baseline della
-condizione 1 quel divario va chiuso — e' esattamente il tipo di scarto che in questa mappa e' gia'
-costato due ritrattazioni.
+**Il divario di 501, chiuso.** Il punto dice **9.212** incomplete, la mia misura diretta ne conta
+**9.713** sullo stesso totale di 32.988. Non e' il predicato: `classifyJob`
+(`scripts/log-translation-stats.mjs:147-165`) delega `incomplete` a `isIncompleteCanonical` senza
+alcuna esclusione, e `sourceCopyExcused` resta **osservazionale** (`:163`, `&& !incomplete`).
+
+E' **deriva dell'albero piu' la posizione pre-#8290 della misura**. Il punto e' stato scritto alle
+08:06Z misurando il worktree transitorio della run; io ho misurato `origin/main` due-quattro ore
+dopo. Nel frattempo i commit concorrenti di crawler e publisher cambiano il contenuto dei job —
+`c1pred` aveva gia' documentato **19** commit concorrenti durante una sola run, con un effetto di
+**+3.148** incomplete. Un totale che resta uguale mentre il numeratore si muove e' esattamente cio'
+che produce un ricambio bilanciato.
+
+**Conseguenza di metodo**: quel punto **non e' riproducibile**, perche' l'albero che descrive non e'
+nessun commit pubblicato. Non e' un divario da inseguire — e' l'ultima manifestazione del difetto
+che la #8290 ripara. **Dal primo punto scritto da una run post-#8290 il numero diventa verificabile
+su un commit**, e allora il confronto con una misura diretta e' lecito. Prima, no.
 
 **Per la condizione 1**: la catena dei 7 rialzi riparte da **72,1%**, non da 79,8%. I punti
 precedenti restano non confrontabili.
