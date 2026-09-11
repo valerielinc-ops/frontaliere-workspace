@@ -2000,3 +2000,26 @@ Corollario sulla forma della fix: quando la riparazione trasforma un **falliment
 **degrado silenzioso**, la scheda deve pretendere che nello stesso commit entri la diagnostica che
 dice da che parte e' andata. Senza, hai comprato la run verde al prezzo del segnale, e la prossima
 domanda sullo stesso componente non avra' piu' una fonte a cui rispondere.
+
+## §51 — una premessa sbagliata nella scheda non viene corretta dall'agente: viene elaborata
+
+La scheda e' il mondo intero dell'agente. Un numero sbagliato dentro non incontra resistenza: viene
+preso per buono, propagato in ogni passo, e torna indietro vestito da risultato. L'agente non ha
+modo di sapere che quel numero non veniva dal codice — nella scheda ha la stessa autorita' di tutti
+gli altri.
+
+Il caso tipico e' il **commento che nomina un default**. Il commento dice «(default 100)», la
+costante dice `900`, e nessuno dei due e' aggiornato dall'altro. Chi scrive la scheda legge la prosa
+perche' e' li' che la spiegazione e' leggibile, e si porta dietro il numero della prosa. Da quel
+momento la domanda posta all'agente («un cap di 100 puo' mai raggiungere una coda vecchia?») e'
+mal posta, e nessuna quantita' di lavoro corretto la raddrizza.
+
+Regola operativa: **ogni numero che entra in una scheda si prende dalla riga che lo assegna**, non
+dal commento che lo descrive, e si cita con `file:riga` di quell'assegnazione. Se il numero arriva
+da un workflow, si cita la riga del workflow che lo passa, perche' il default del codice e il valore
+in produzione sono due fatti diversi.
+
+Il corollario e' sulla forma della domanda. Una scheda che chiede «perche' X non accade?» ha gia'
+deciso che X non accade. Se la premessa cade, l'agente ha speso il suo budget a cercare la causa di
+un fatto inesistente. Metti sempre nella scheda il permesso esplicito di smentire la premessa — e
+aspettati che serva: qui la coda vecchia non solo era raggiunta, era **in cima**.

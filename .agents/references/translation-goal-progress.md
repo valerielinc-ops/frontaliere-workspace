@@ -1,5 +1,23 @@
 # Translation goal — ledger di avanzamento e handoff
 
+> **SUPERATO dal 2026-09-03.** Il piano T00-T23 non e' piu' la rotta. La mappa
+> corrente e' la issue
+> <https://github.com/valerielinc-ops/frontaliere-workspace/issues/2>, che
+> guida il lavoro dalla metrica di copertura invece che dalla sequenza di
+> costruzione. Le sotto-issue #3-#10 sono chiuse come archivio tecnico.
+>
+> Motivo: fra il 2026-08-14 e il 2026-09-03 gli annunci completi sono scesi da
+> 15.281 a 12.725 e gli incompleti saliti da 11.828 a 15.909, mentre venivano
+> mergiate nove PR di architettura v2 mai collegate alla produzione (il ref
+> `translation-state-v2` non esiste sul remote). La definizione di successo
+> precedente — 14 generazioni naturali dello stesso closure digest — misura la
+> stabilita' del meccanismo, non la copertura.
+>
+> Questo file resta valido come **cronologia tecnica**: misure delle baseline,
+> decisioni architetturali, contratti dei moduli v2, casi storici. Non
+> usarlo come piano. Non seguire la sezione `Protocollo di ripresa`: e'
+> l'ordine del piano superato.
+
 Ultimo aggiornamento: 2026-09-01 09:58 CEST (Europe/Zurich)
 
 Questo file e' la fonte di continuita' del goal traduzioni. Va aggiornato dopo
@@ -76,7 +94,7 @@ Il goal non e' concluso finche' non sono contemporaneamente veri questi punti:
   `typescript-reviewer`. Correggere P0-P2 sulla stessa PR e ripetere le review.
 - PR body con sezioni esatte `## Implementato` e
   `## Non implementato (ancora)`; i deferred devono usare una forma ammessa.
-- Prima degli edit: GitNexus impact quando disponibile; prima del commit:
+- Prima degli edit: mappa dei chiamanti con `grep -rn`; prima del commit:
   `detect_changes`. L'indice e' risultato stale sui nuovi simboli v2, quindi
   integrare sempre con call-site e diff diretti.
 - Repo figli indipendenti. La SSOT dell'engine/workflow e' nel sito; il corpus e'
@@ -147,7 +165,7 @@ Checkpoint diagnostico #6876 alle 07:04 CEST:
   il guard `head_sha`. Anche il sentinel nasce su `e5b77d5a` e viene classificato
   mismatch; poi il job fallisce sul corpus commit divergente.
 - Workflow e dispatcher sono byte-identici tra il run head e il current main
-  ispezionato: issue non stale. GitNexus impact validator LOW, 3 caller diretti,
+  ispezionato: issue non stale. Impact del validator LOW, 3 caller diretti,
   10 simboli, 0 processi. Nessun edit funzionale/PR ancora.
 - Fix richiesto da `/root`, poi corretto sui dati live: binding compatibile con
   entrambe le forme API documentata/osservata (`name` statico **oppure** run-name
@@ -195,8 +213,8 @@ Checkpoint diagnostico #6876 alle 07:04 CEST:
   sovrascrivere con vuoto il PAT caricato da Remote Config in `GITHUB_ENV`.
   Richiesto rimuovere override, ereditare il PAT della wave e aggiungere test;
   push resta bloccato fino al nuovo freeze.
-- Freeze locale finale pre-review 07:36 CEST: P1 corretto e testato; GitNexus
-  `detect_changes` LOW (0 processi affetti). Commit locale
+- Freeze locale finale pre-review 07:36 CEST: P1 corretto e testato; detect changes
+  LOW (0 processi affetti). Commit locale
   `5d2ea384f1c287d14e5952666fe68e259cfded63` (`fix(crawlers): pin generation
   dispatch workflow code`) su base hot-main esatta
   `1c7874179e024647db302e1f5b9dac13e9eaf877`, branch
@@ -253,7 +271,7 @@ Checkpoint diagnostico #6876 alle 07:04 CEST:
   nuove review CLEAN. Nessun push.
 - Chiusura verificata 09:09 CEST: fix finale su exact HEAD
   `060daba589002ee6dd4f128190275f09eefabf9c`, 139/139 test locali, generator
-  `--check`, `node --check`, actionlint e GitNexus verdi; review locali general
+  `--check`, `node --check`, actionlint verdi; review locali general
   e JS/TS CLEAN. La PR site #6924 ha ottenuto CI SUCCESS e review automatica
   exact-HEAD con `## LGTM` (Important 0); l'auto-merge gia' predisposto ha creato
   il merge `4d298d3363ad3af2956630910e1fab78aafc921f` alle 07:04:07Z. Issue #6876
@@ -445,7 +463,7 @@ Sol/high per gli invarianti anti-corruzione).
   (commit feature `b76dd0241741` + merge main). Quattro file nuovi soltanto:
   `translation-derived-{patch,reducer}-v2.mjs` e due suite omonime.
 - Test mirati v2+v1 64/64 verdi; `node --check` e `git diff --check` verdi;
-  GitNexus `detect_changes`: 4 file, risk LOW, 0 processi.
+  Detect changes: 4 file, risk LOW, 0 processi.
 - Nessun push/PR ancora: il primo push e' stato fermato dal sibling gate per 75
   candidati lessicali. Il subagent li sta classificando per-file e usera'
   `--no-verify` solo dopo aver documentato i falsi positivi nel body, come
@@ -470,7 +488,7 @@ Sol/high per gli invarianti anti-corruzione).
   preservati in apply e no-op; confronto source-copy uniforme NFC/CRLF +
   trim/collasso whitespace per slot e candidate.
 - Verifica post-fix: suite v1+v2 66/66 (23 reducer/patch), `node --check` e
-  diff check verdi, GitNexus LOW/0. PR mergeable, CI GitHub in corso; review
+  diff check verdi, impact LOW/0. PR mergeable, CI GitHub in corso; review
   locali completate sulla HEAD `5268858...`; la review remota/CI non puo' ancora
   essere considerata conclusiva. Auto-merge armato, mai merge manuale.
 - Review generale sulla HEAD `5268858...`: warning bloccante di efficienza. Il
@@ -510,7 +528,7 @@ Sol/high per gli invarianti anti-corruzione).
   merge contiene solo gli aggiornamenti crawler gia' presenti su main e non e'
   scope della feature.
 - Risultati dichiarati sul freeze locale: v1+v2 69/69 (26 dedicati),
-  `node --check`, `git diff --check` verdi, GitNexus LOW/0. `typecheck:gate`
+  `node --check`, `git diff --check` verdi, impact LOW/0. `typecheck:gate`
   locale non eseguibile nel worktree sparse per il noto file data non
   materializzato; dovra' essere provato dalla CI completa.
 - Implementazione nel freeze: own-only per chiavi/URL/source/context/mappe,
@@ -535,7 +553,7 @@ Sol/high per gli invarianti anti-corruzione).
   `5eadb27666ffe795c5702df358a481f4ffb1258a`. A-D implementati: indice
   jobKey una volta/batch, densita' senza allocazione da length, batch 1..250 e
   semantica delete/re-add nominata correttamente. Suite exact ora 71/71 (23
-  reducer), node/diff verdi, GitNexus LOW/0. L'ispezione `/root` ha confermato
+  reducer), node/diff verdi, impact LOW/0. L'ispezione `/root` ha confermato
   il cambio ma ha trovato un ultimo own-boundary: la costruzione indice leggeva
   `mutableSlice.jobs` senza verificare che fosse own, quindi una slice malformata
   poteva far scandire un array ereditato da `Object.prototype`. Own-check e
@@ -623,7 +641,7 @@ Passi di chiusura quando il subagent risponde:
    casi delete/re-add espliciti; nessun wiring/runtime/data.
 2. Verificare worktree pulito, diff e numero file; poi test mirati,
    `node --check`, `git diff --check`, PII e
-   GitNexus/detect_changes (o documentare indice stale).
+   detect changes (o documentare indice stale).
 3. Aprire/controllare PR e exact HEAD.
 4. Lanciare `code-reviewer` e `typescript-reviewer` proporzionati; correggere
    P0-P2 sulla stessa PR.
@@ -648,7 +666,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
 
 - Worktree `frontaliere-si-o-no/.claude/worktrees/codex/translation-state-drainer-v2`,
   branch omonima, base iniziale `ea224a1c8605`; pulito e senza edit al design
-  freeze. GitNexus sui nuovi simboli resta stale, direct analysis LOW.
+  freeze. L'indice sui nuovi simboli resta stale, direct analysis LOW.
 - Ownership ora massimo 6 file: nuovi store/drainer + due test e l'estensione
   backward-compatible di `translation-journal-v2.mjs` + test. Nessuna CLI finche'
   non indispensabile, nessun workflow/data/crawler/legacy.
@@ -691,7 +709,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
   staged, nessun commit/push. Suite integrata identity/memory/journal/reducer/
   store/drainer 108/108 verde (drainer 15 test); benchmark bare-remote 20 sample
   p95 fetch->push **599,4 ms**, ampiamente sotto il gate 2s. `node --check` sui 3
-  moduli, diff check e PII scan sui 6 file verdi. GitNexus detect staged vede 6
+  moduli, diff check e PII scan sui 6 file verdi. Il detect staged vede 6
   file ma 0 simboli/processi per indice stale; call-site direct `rg` verificati.
   Review JS ha trovato un solo problema di compatibilita' ES2022 (`toSorted`),
   gia' corretto in `[...samples].sort`; review JS e general sono ripartite sulla
@@ -721,7 +739,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
   unico/pointer). Rerun exact ora 111 test in corso; obbligatorie due nuove review
   CLEAN sul freeze finale. Nessun commit/push.
 - Nuovo freeze PR3 staged (non commit) 08:08 CEST: tutti i fix sopra inclusi;
-  **111/111** test verdi, p95 bare-remote **751,5 ms**, node/diff/PII/GitNexus
+  **111/111** test verdi, p95 bare-remote **751,5 ms**, node/diff/PII
   detect verdi. Base/HEAD resta `de9a876bdecd` ed e' ormai dietro hot main: non
   aprire PR da questo stato. Le due rereview non sono ancora partite solo per i
   due slot occupati dalle review #6876; nessun blocker funzionale comunicato e
@@ -755,7 +773,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
   provano: provenance pubblicata recuperata via unshallow; intent davvero
   unpushed da depth=1 ripubblicato con nuova provenance; errore unshallow
   fail-closed senza ACK. Suite **117/117**, bare-remote p95 **1.192,5 ms**,
-  node/diff/PII e GitNexus LOW verdi. General e JS/TS review exact riavviate;
+  node/diff/PII e impact LOW verdi. General e JS/TS review exact riavviate;
   ancora nessun push/PR.
 - Le review su `63beec08` hanno trovato altri due casi concorrenti reali e hanno
   invalidato il freeze: **P2** recovery intent ordinato per hash, che in un
@@ -804,7 +822,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
 - Freeze puro locale 09:32 CEST: exact clean HEAD
   `855bdac4eba205fe83e70ee2fc94e3c498aee4b6`, base `e7a29d3...`, soltanto i
   due file nuovi, +1.299 righe; 31/31 suite translation-v2 (13 scheduler),
-  `node --check`, tsc mirato, diff check e GitNexus LOW verdi. Root review ha
+  `node --check`, tsc mirato, diff check e impact LOW verdi. Root review ha
   corretto prima delle review formali due mismatch: URL exact-target non viene
   piu' riscritto da `URL.href` (root-vs-slash resta occurrence diversa) e
   `slicePath` usa la stessa allowlist esatta dello store. Commit riclassificato
@@ -821,7 +839,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
   `8a988dd42b8afa4b837d32802723ed3ce1909bf4`, ancora due soli file. Settlement
   include `queueJobsIn`/`queueUnitsIn`; il validator ricalcola completed job/unit
   dagli outcome e prova `out = in - completed`. Quattro artifact rihashati con
-  tampering su input/output vengono respinti. 31/31 test, node/tsc/diff/GitNexus
+  tampering su input/output vengono respinti. 31/31 test, node/tsc/diff
   verdi; rereview JS/TS avviata, general da riavviare dopo il reviewer PR3.
 - JS/TS review di `8a988dd4` e' CLEAN, ma la review general ha riprodotto due
   ulteriori problemi e invalida comunque il freeze. **P1 fairness:** con
@@ -839,7 +857,7 @@ Design pre-edit ricevuto e ratificato alle 07:18 CEST:
   non viene saltato: se non entra, il piano termina conservando credito 4; un
   bundle feasible oltre `maxUnits` fallisce esplicitamente. Settlement validator
   e serializer sono plan-aware e legano planHash/scope/cursor/outcome/queue input
-  al piano originale. 32/32 test (14 scheduler), node/tsc/diff/GitNexus verdi;
+  al piano originale. 32/32 test (14 scheduler), node/tsc/diff verdi;
   doppia rereview exact avviata, nessun push/PR/rebase.
 - Priorita' ai job a cui mancano meno unita' per diventare completi.
 - Aging/fairness per evitare starvation dei job difficili.

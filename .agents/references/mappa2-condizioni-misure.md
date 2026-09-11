@@ -488,7 +488,7 @@ falliscono con `Could not resolve host`.
 | `codex-c1pred.txt` | **consumata** — ha chiuso l'aritmetica del divario 6.571/9.720 |
 | `codex-afterfix.txt` | **viva, implementazione** — sposta la misura sulla tree pubblicata (sito) |
 | `codex-haikufix.txt` | **consumata** — PR corpus #1352 mergiata 11-09 06:46Z; follow-up #1354 aperta |
-| `codex-c0drain.txt` | **viva, non lanciata** — il residuo oltre i 7 giorni entra mai nei primi `effectiveMax`? Denominatore **6.464** |
+| `codex-c0drain.txt` | **ritirata** — premessa smentita: il cap e' 900 non 100, la riserva oldest-first esiste e la coda vecchia e' in cima. Risposta misurata direttamente, vedi «La causa prima» |
 | `codex-m24b.txt` | **viva, non lanciata** — punti dati di #24, non bloccante |
 
 L'ordine, se ne lanci una sola: **`afterfix`**. Finche' la misura e' rotta, ogni altro numero sulla
