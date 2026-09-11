@@ -622,9 +622,23 @@ permanente.** Il caso Air Zermatt esiste ma vale l'**1,1%**, non la meta'. Le co
 **non** vanno riformulate su questa base, e la domanda sul pivot `de->en->it` diventa piu'
 importante, non meno: sono 2.259 job di lavoro reale.
 
-La domanda su perche' il pivot `de->en->it` non traduca l'altra meta' resta aperta. Scheda:
-`.scratch/codex-deit.txt`, **non consumata**: quattro job Codex di fila sono stati uccisi dal
-sistema per memoria esaurita.
+**Cosa e' gia' escluso sul pivot**, verificato sul codice e sui log della `34541569329`, cosi' che
+il prossimo tentativo non lo ripaghi:
+
+- **Lo slot viene accodato**: `scripts/local-mt-mopup.mjs:199-202` mette in coda la descrizione
+  quando `desc.toLowerCase() === sourceDescLc`, che per questa popolazione e' vero. La richiesta si
+  fa **a ogni run**.
+- **La direzione viene richiesta**: `from: srcLang, to: locale` (`:627`), e il log dice
+  `🐍 Argos: 8935 requests · 15591 unique units · **12 directions** · 4 workers` — tutte e dodici le
+  coppie ordinate fra quattro lingue, quindi `de->it` c'e'.
+- **Argos non fallisce**: `🏁 Argos translate: 8928 ok, 7 failed`. Non e' un errore, e' un successo
+  che restituisce l'input.
+- **I modelli ci sono**: `✅ All Argos models already installed (cache hit)`.
+
+Quindi la richiesta parte, la coppia e' giusta, il motore risponde «ok», e cio' che torna e'
+identico a cio' che e' partito. **Perche'** richiede di eseguire Argos, che qui non e' installato:
+resta la domanda della scheda `.scratch/codex-deit.txt`, **non consumata** — quattro job Codex di
+fila uccisi dal sistema per memoria esaurita.
 
 ## Condizione 3 — CHIUSA il 2026-09-11
 
