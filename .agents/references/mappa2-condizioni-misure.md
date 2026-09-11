@@ -85,9 +85,36 @@ visibile nei dati, la prima cosa da guardare e' se il punto e' stato scritto.
 **Operativizzazione**: quota di `complete` nella **coorte 24-48h** (job messi in coda fra 24 e 48
 ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 
-**Stato**: ultima misura nota **81,3%**, bersaglio ~100%. Una rilettura col nuovo ordinamento
-della PR **#8080** e' stata dispacciata ma **non e' rientrata**: il numero 81,3% e' precedente a
-quel cambiamento.
+**Stato al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
+565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
+
+Rispetto all'81,3% precedente e' **sceso di ~1,0 pp**: la PR **#8080** (ponte near-miss con limite
+superiore d'eta') **non ha mosso questa coorte**.
+
+Campo dell'eta' usato: `queuedAt` da `jobQueuedAtMs` in
+`scripts/lib/job-traffic-priority.mjs:260-268`, catena `firstSeenAt` → `postedDate` → `crawledAt` →
+`datePosted`. In questa lettura **32.988 job su 32.988 risolvono a `firstSeenAt`**: nessun
+fallback, `crawledAt` mai usato.
+
+### Le fasce adiacenti: la completezza **scende** con l'eta'
+
+| fascia | complete / denominatore | quota |
+|---|---|---|
+| sotto 24h | 186 / 1.253 | 14,8% |
+| **24-48h** | **786 / 979** | **80,3%** |
+| 2-7 giorni | 4.073 / 6.062 | **67,2%** |
+
+La fascia 2-7 giorni sta **13 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
+lavorazione la completezza sarebbe monotona crescente con l'eta'. Due letture, lavori opposti:
+
+1. **La completezza si perde** — job gia' `complete` tornano `incomplete`. Allora il problema e' la
+   **conservazione** e nessun aumento di capacita' chiude le condizioni 1 e 2.
+2. **Effetto coorte** — le coorti fresche hanno priorita' per costruzione e le vecchie non vengono
+   piu' ripassate. Allora il residuo e' debito fermo e le condizioni si chiudono lasciandolo li'.
+
+I cinque punti anomali della condizione 1 hanno **la firma della lettura 1**, ma transitoria.
+Discriminante e scheda: `.scratch/codex-c0loss.txt`. **Questa misura sta sotto tutte e tre le
+condizioni.**
 
 **Predicato**: `isIncomplete` **importata** da `scripts/relocalize-pending-jobs.mjs` di
 `origin/main`. Non reimplementarla: una versione riscritta a mano con soglie di lunghezza ha reso
