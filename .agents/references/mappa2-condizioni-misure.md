@@ -17,22 +17,45 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato**: catena **4 di 7**. 98 punti MA3 disponibili.
-
-Ultimi sei punti della media mobile:
-
-| # | MA3 |
-|---|---|
-| -6 | 74,34% |
-| -5 | 73,69% |
-| -4 | 78,32% |
-| -3 | 79,15% |
-| -2 | 79,33% |
-| -1 | 79,49% |
+**Stato al 2026-09-11 04:52Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3. Il 4 di 7 del
+09-09 e' stato azzerato dal punto anomalo del 2026-09-10T00:16Z.
 
 **Dove sta il dato**: `data/translation-stats-history.json` nel repo sito, voci con
-`label === "after"`. Ne arriva una ogni ~2,2 ore. Servono 3 rialzi ancora, cioe' ~7 ore se
-tengono.
+`label === "after"`. Ne arriva una ogni ~2,2 ore.
+
+### Cio' che tiene aperta la condizione non e' la traduzione: e' un punto di storico sbagliato
+
+Cinque punti su 102 sono avvallamenti da 6 a 15 pp che si riprendono del tutto al punto dopo. In
+**5 casi su 5** la voce `before` della stessa run e' identica alla `after` in `complete`,
+`incomplete` e `total`: **quella run non ha tradotto nulla**, quindi il numero non e' uno stato
+intermedio ma una sola lettura, e i due vicini la smentiscono.
+
+| punto `after` | complete/incomplete | quota | prima | dopo |
+|---|---|---|---|---|
+| 2026-09-04T17:01:06Z | 15.863/13.115 | 54,74% | 60,58% | 62,32% |
+| 2026-09-07T03:25:29Z | 17.321/11.243 | 60,64% | 69,02% | 68,39% |
+| 2026-09-07T21:57:04Z | 17.590/11.118 | 61,27% | 69,83% | 67,94% |
+| 2026-09-08T22:09:27Z | 20.998/11.156 | 65,30% | 80,88% | 76,85% |
+| 2026-09-10T00:16:10Z | 22.954/9.554 | 70,61% | 79,66% | 79,68% |
+
+Due ipotesi **gia' escluse**, per non ripagarle:
+
+- **Non e' un checkout stale**: nessuno dei cinque valori compare prima nello storico; lo stato
+  storico piu' vicino dista fra 223 e 3.558 job.
+- **Non e' una slice mancante**: sul punto del 10-09 il `total` e' 32.508 contro i 32.499 dei
+  vicini — nove job **in piu'**, non migliaia in meno. Il denominatore c'e' tutto; a cambiare e'
+  la **classificazione** di circa 2.942 job.
+
+Sulla MA3 ogni anomalia avvelena **tre** punti consecutivi. Con un punto ogni ~2,2 ore e
+un'anomalia ogni ~20 punti, la finestra pulita necessaria (~15 ore) e' appena piu' corta
+dell'intervallo medio fra due anomalie: la condizione e' raggiungibile ma fragile.
+
+**Il produttore dello storico non e' quello che sembra**:
+`.github/workflows/translate-pending.yml` del sito non gira dal **2026-08-25**
+(`gh api repos/valerielinc-ops/frontaliere-si-o-no/actions/workflows/translate-pending.yml/runs`),
+eppure i commit `🌐 Auto-translate pending jobs` continuano ad arrivare su `main` del sito. Delle
+tre copie di `translate-pending` va stabilito quale produce quei commit **prima** di leggere il
+codice. Scheda: `.scratch/codex-c1art.txt`.
 
 **Comando**:
 
@@ -98,11 +121,33 @@ quanti hanno **almeno una traduzione non tedesca** (it/en/fr) che la porta ancor
 
 Denominatore piatto (+0,4%), numeratore **+109%** in ~17 ore. Non e' crescita del corpus.
 
-**Strumento**: `cond3b.mjs` nello scratchpad, con `extracted-functions.mjs` accanto. La variante
-`cond3c.mjs` ha il ref parametrizzato (`REF=<commit> node cond3c.mjs`) ed e' quella da usare:
-una condizione «su due misure consecutive» va verificata **rieseguendo lo script sul commit
-precedente**, mai confrontando con un numero citato. E' quel controllo che qui ha separato una
-regressione vera da una crescita di popolazione.
+**Strumento — ROTTO, verificato il 2026-09-11.** `cond3b.mjs` e `cond3c.mjs` importano i predicati
+da `.scratch/extracted-functions.mjs`, e li' `isIncomplete` e' **la versione riscritta a mano con
+le sole soglie di lunghezza** (`minTitleChars = 3`, `minDescChars = 120`): esattamente il predicato
+che in questo lavoro ha gia' reso 99,5% dove la verita' era 81,3%.
+
+La `isIncomplete` vera e' `scripts/relocalize-pending-jobs.mjs:637` e ha **due controlli che lo
+stub non ha**: la guardia sulla locale sorgente (`normSrc.length / normBase.length < 0.55`) e
+`titleLooksUntranslated` **per slot**. Quindi il `complete` dello stub e' un **soprainsieme** di
+quello vero, e i job in eccesso sono in buona parte quelli **col titolo ancora in tedesco** —
+cioe' proprio quelli che finiscono nel numeratore. Lo strumento ammetteva nel denominatore i job
+che poi trovava nel numeratore.
+
+`masculineGermanTitle` invece e' **fedele al byte** a `scripts/local-mt-mopup.mjs:228`: il
+predicato del numeratore non e' in discussione.
+
+Conseguenza: **il livello non regge** — ne' 6,19% ne' 12,89% sono la quota della condizione 3 come
+la mappa la definisce. **Il raddoppio regge come segnale**, perche' le due misure usano lo stesso
+filtro sbagliato, ma acquista una causa alternativa precisa: se in quella finestra sono cresciuti i
+job con titolo non tradotto, lo stub li ha promossi a `complete` e li ha trovati nel numeratore
+senza che nessun percorso di scrittura abbia prodotto una traduzione nuova sbagliata.
+
+Rimisura con il predicato importato: scheda `.scratch/codex-c3pred.txt`, su tre ref
+(`3790bb5399a`, `4262cc889ee`, `origin/main` di oggi).
+
+**La regola che resta valida**: il ref va parametrizzato (`REF=<commit> node ...`). Una condizione
+«su due misure consecutive» va verificata **rieseguendo lo strumento sul commit precedente**, mai
+confrontando con un numero citato.
 
 **Strumento sbagliato, gia' pagato**: `genderFormOffence` legge **solo il titolo sorgente**, che
 non cambia mai, quindi il numero non puo' scendere. Ha reso 42,72% e non e' una misura di

@@ -1773,3 +1773,94 @@ usata permette a chi ha perso un job di riconoscerlo invece di inseguire un guas
 Corollario: prima di qualunque comando che agisce su processi selezionati per **pattern** —
 `pkill`, `killall`, un `kill` su output di `ps | grep` — chiediti se il pattern può descrivere
 anche il lavoro di qualcun altro. In un workspace a più sessioni, quasi sempre può.
+
+## §41 — uno strumento di misura ereditato si apre prima di citarne il numero
+
+Quando riprendi un lavoro, i numeri che trovi scritti hanno dietro uno script. Quello script
+contiene i **predicati**, e i predicati sono la misura: citarne il risultato senza averli letti
+equivale a citare una fonte che non hai aperto.
+
+Qui la condizione 3 della mappa era documentata con due letture prese «dallo stesso script, stessi
+predicati, due commit» — una formula che suona come una garanzia di rigore. Lo script importava i
+predicati da un file di appoggio nello scratchpad, e dentro quel file `isIncomplete` era **la
+versione riscritta a mano con le sole soglie di lunghezza**: esattamente il predicato che lo stesso
+riferimento, due sezioni più sopra, dichiarava già pagato per aver reso 99,5% dove la verità era
+81,3%. La trappola era documentata e lo strumento ci era caduto dentro lo stesso.
+
+La lettura costa trenta secondi: `cat` del file dei predicati, `git show <ref>:<file>` della
+funzione vera, confronto. Nel caso in cui coincidono hai speso trenta secondi; nel caso in cui non
+coincidono hai evitato di dispacciare un agente a cercare la causa di un difetto che non esiste.
+
+Regola operativa: **prima di far ripartire una diagnosi, verifica il predicato che ha stabilito
+l'esistenza del difetto.** L'ordine è «il difetto esiste?» e solo dopo «perché?». Quando lo
+strumento che risponde alla prima domanda non è stato verificato, dispacciare la seconda è lavoro
+che può essere interamente sprecato.
+
+Corollario sulla direzione dell'errore, che di solito è deducibile senza rimisurare: un predicato
+riscritto **più lasco** di quello vero non sposta il numero a caso. Se `complete` dello stub è un
+soprainsieme di `complete` vero, i job in eccesso hanno una proprietà precisa — qui, il titolo
+ancora nella lingua sorgente — e quella proprietà era anche il criterio del numeratore. Lo
+strumento ammetteva nel denominatore i job che poi trovava nel numeratore. Chiediti sempre **se i
+job che il predicato sbagliato lascia entrare sono correlati con ciò che stai contando**: se lo
+sono, il numero non è rumoroso, è sistematicamente gonfiato.
+
+## §42 — un punto di serie storica si convalida contro la run che lo ha scritto
+
+Una serie storica scritta da un job periodico non è un dato osservativo: è l'output di un processo
+che può sbagliare. Prima di leggere un andamento, chiediti quali punti **quel processo** non era in
+condizione di produrre correttamente.
+
+Il segnale più economico, quando il job scrive sia un `before` sia un `after`: **se i due
+coincidono, la run non ha lavorato**. Allora il punto non è uno stato intermedio fra due
+misurazioni, è **una sola lettura** — e una sola lettura che contraddice entrambi i vicini è un
+artefatto, non uno stato. Qui cinque punti su 102 avevano quella firma, tutti e cinque avvallamenti
+da 6 a 15 punti percentuali che si riprendevano interamente al punto successivo.
+
+Due controlli che restringono il campo in due comandi, e che vanno fatti **prima** di aprire il
+codice:
+
+- **È una rilettura di uno stato più vecchio?** Cerca il valore anomalo fra i punti precedenti
+  della serie stessa. Se non compare, l'ipotesi «checkout stale» cade senza leggere una riga.
+- **È un dato troncato?** Confronta il **totale**, non solo la quota. Un totale invariato — o
+  addirittura più grande — esclude la slice mancante e sposta il sospetto dal caricamento alla
+  **classificazione**.
+
+Il costo di non farlo è asimmetrico quando la condizione di chiusura è su una media mobile: un
+punto anomalo ne avvelena tanti quanti la finestra, e azzera una catena costruita in ore. Una
+condizione che si misura su una media mobile va accompagnata da una difesa contro il punto
+sbagliato, altrimenti il criterio misura l'affidabilità dello scrittore invece della grandezza.
+
+Corollario: distingui sempre i due rimedi e dichiara quale stai proponendo. **Non scrivere** il
+punto quando la run non ha lavorato nasconde il sintomo e sblocca la condizione; **riparare la
+lettura** toglie la causa. Il primo è legittimo solo se dichiarato come tale.
+
+## §43 — il produttore di un commit non è il workflow che ne porta il nome
+
+Prima di leggere il codice che genera un artefatto periodico, **stabilisci quale run lo produce**,
+con la prova. Il nome del workflow, il nome del file e il messaggio di commit possono concordare
+perfettamente e descrivere comunque un percorso spento.
+
+Qui i commit arrivavano ogni poche ore con il messaggio del workflow di traduzione del sito, mentre
+quel workflow non girava **da diciassette giorni** — verificabile in una chiamata
+(`gh api repos/<owner>/<repo>/actions/workflows/<file>/runs`). Della stessa logica esistevano tre
+copie: una disabilitata, una sorgente e un artefatto generato che gira in un altro repo. Leggere la
+copia sbagliata produce una diagnosi impeccabile di codice che non viene eseguito.
+
+Regola operativa: quando esistono più copie di una logica — un mirror, un template e il suo
+generato — la domanda «quale gira?» precede sempre la domanda «cosa fa?». E la prova è l'elenco
+delle run, non la presenza del file.
+
+## §44 — un job Codex può terminare con exit 0 senza aver consegnato nulla
+
+Il codice di uscita del companion non dice se il task ha prodotto una risposta. Un job può
+chiudersi con `exit 0` dopo venti comandi e **nessun messaggio finale**: il turno si interrompe e
+l'output resta un elenco di comandi eseguiti.
+
+Quindi il criterio di completamento non è la notifica di fine processo, è la **presenza della
+consegna** nel file di output. Prima di leggere un risultato, verifica che ci sia un messaggio
+finale dell'assistente; un log che finisce su `Command completed` è un job morto, non un job
+laconico.
+
+Corollario operativo: il rilancio è la risposta corretta, ma **prima** controlla che il job non
+abbia già consegnato — e se nel frattempo hai imparato qualcosa che cambia la premessa della
+scheda, rilanciare la scheda vecchia è il modo più caro di scoprire che era sbagliata.
