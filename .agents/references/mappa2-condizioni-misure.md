@@ -409,8 +409,41 @@ riproduce il **37,6%**, che e' il numero sbagliato. Sulla run `34207161385`, 197
 erano aziende mai servite; escluderle porta a **17,1%**. Lo stesso insieme di run, due verdetti
 che differiscono del doppio.
 
-Il conteggio aggiornato dei punti dati e' stato dispacciato ma **non e' rientrato**. Scheda:
-`.scratch/codex-m24b.txt`.
+### Misurato il 2026-09-11: #24 e' **non chiudibile**, e non e' la leva
+
+Scheda `.scratch/codex-m24b.txt`, rientrata. **7 punti validi** sui 10 che servono: `34291200957`,
+`34315383960`, `34317459305`, `34332308235`, `34416243224`, `34441079032`, `34443590913`.
+
+| run | righe | servite | servite e sterili | sterile / servita (min) | % |
+|---|---:|---:|---:|---:|---:|
+| `34291200957` | 200 | 8 | 4 | 26,9 / 48,4 | 55,5% |
+| `34315383960` | 202 | 6 | 2 | 16,3 / 52,9 | 30,8% |
+| `34317459305` | 201 | 5 | 0 | 0,0 / 48,6 | 0,0% |
+| `34332308235` | 205 | 5 | 1 | 8,7 / 49,6 | 17,4% |
+| `34416243224` | 201 | 7 | 0 | 0,0 / 48,2 | 0,0% |
+| `34441079032` | 202 | 5 | 2 | 7,6 / 47,4 | 16,1% |
+| `34443590913` | 205 | 8 | 5 | 42,8 / 55,4 | 77,2% |
+
+Mediana **17,45%**, range **0,00-77,23%**, SD **26,75 pp**, IQR di Tukey **0,00-55,48%**. Con n=7 e
+una dispersione cosi' la mediana non e' un numero su cui decidere: e' un ordine di grandezza.
+
+**Ma la colonna che conta non e' quella che la issue chiedeva.** Delle ~200 righe per run —
+una per azienda del lotto — le aziende **effettivamente servite** sono **5-8**, e consumano
+47-55 minuti. Tutto il resto della finestra della cascade non e' sterile: e' **mai arrivato**.
+Combacia con il `252 companies remaining (deferred to next run)` stampato dalle run.
+
+**Aritmetica della leva.** La finestra sterile mediana vale ~17,45% di ~50 minuti serviti, cioe'
+~8,7 minuti per run. A `0,783 job/min` (`cascade-short-row-fixed-cost-research.md:57`) recuperarla
+per intero vale **~7 job per run**, contro i 26-42 che la cascade gia' libera e contro un residuo
+duro di **6.464** job oltre i sette giorni.
+
+**Verdetto**: #24 va fatto — e' tempo gia' pagato che torna gratis — ma **non chiude ne' la
+condizione 1 ne' la 2**. Chiamarlo «l'unico work item aperto» era corretto come inventario e
+fuorviante come piano.
+
+**Nota sullo strumento**: le ultime cinque run completate **non hanno aggiunto punti**. Prima di
+aspettare i tre mancanti va verificato che l'artifact venga ancora prodotto, altrimenti
+l'attesa e' indefinita.
 
 ---
 
