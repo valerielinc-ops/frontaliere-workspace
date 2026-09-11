@@ -433,11 +433,18 @@ precedenti restano non confrontabili.
 
 ## Cosa guardare alla prossima run — la verifica che chiude il giro
 
-La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' la
-prima a portare **entrambe** le fix. Verificato sul suo head, non sul merge:
-`translate-pending.yml:321-324` ha il gate nuovo
+La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' stata
+accodata **prima del merge #8305**. Porta la Fase 2d sui titoli, ma non la Fase 2e sulle descrizioni.
+Verificato sul suo head, non sul merge: `translate-pending.yml:321-324` ha il gate nuovo
 `github.event_name == 'schedule' && github.event.schedule != '0 7 * * *'` e
-`UNTRANSLATED_TITLE_FIX_DEADLINE_MS: "14400000"`.
+`UNTRANSLATED_TITLE_FIX_DEADLINE_MS: "14400000"`; il blocco Phase 2e non e' presente.
+
+La prima run utile per il fixer delle descrizioni e' **`34596819197`** (creata 2026-09-11T12:01:17Z,
+`event=schedule`, head `8b22a8658`), ancora pending al controllo del 2026-09-11T16:22Z. Sul suo
+workflow sono presenti `translate-pending.yml:334-338`, il gate schedulato e
+`UNTRANSLATED_DESCRIPTION_FIX_DEADLINE_MS: "14400000"`. La run manuale **`34606194108`** non e'
+una misura alternativa: essendo `workflow_dispatch`, salta per costruzione i blocchi condizionati a
+`event_name == 'schedule'`.
 
 **Girera' la Fase 2d?** Quasi certamente si', e non per congettura: le run schedulate create in
 quella fascia oraria **non sono** il cron di housekeeping. Verificato su due precedenti —
@@ -445,42 +452,45 @@ quella fascia oraria **non sono** il cron di housekeeping. Verificato su due pre
 cioe' `github.event.schedule != '0 7 * * *'`. Il cron delle 07:00 produce run create molto piu'
 tardi (11:07, 11:30, 11:58, 12:09, 13:16, 14:50) perche' e' quello che accumula ritardo.
 
-Le tre cose da verificare quando atterra, **in quest'ordine**:
+Le tre cose da verificare quando atterra la `34596819197`, **in quest'ordine**:
 
-1. **`Phase 2d` non e' `skipped`.** E' la prima esecuzione in undici giorni. Se e' ancora
-   `skipped`, il gate non basta e va riletto `github.event.schedule` nel log.
+1. **`Phase 2d` e `Phase 2e` non sono `skipped`.** Sono i due fixer a budget condiviso. Se uno e'
+   ancora `skipped`, il gate non basta e va riletto `github.event.schedule` nel log.
 2. **Il punto dello storico e' scritto sull'albero pubblicato.** Dopo la #8290 lo step
    `Log translation stats (after)` sta **dopo** `Commit translations`: il livello deve scendere
    verso il **70,6%**, non restare al 79,8%. **Non e' una regressione** — e' la fine di una
    sovrastima, e chi legge la serie senza saperlo vedra' un crollo.
-3. **Le transizioni `incomplete_to_complete`** nell'artifact `translation-observability`. Le
-   cinque run precedenti danno **0, 25, 26, 29, 0**. Se la Fase 2d funziona, questo numero deve
-   salire di un ordine di grandezza: il suo bersaglio sono i **4.122** job `titolo-non-tradotto`
-   oltre i sette giorni, piu' i **174** della coorte 24-48h.
+3. **Le transizioni `incomplete_to_complete`** e il riepilogo della Phase 2e nell'artifact
+   `translation-observability`. Le cinque run precedenti danno **0, 25, 26, 29, 0**. Se i fixer
+   funzionano, le transizioni devono salire di un ordine di grandezza: il bersaglio titoli sono i
+   **4.122** job `titolo-non-tradotto` oltre i sette giorni, piu' i **174** della coorte 24-48h;
+   per le descrizioni va verificato che il predicato normalizzato includa i **2.849** job stimati.
 
-Se il punto 3 non si muove mentre il punto 1 dice che la fase ha girato, allora la Fase 2d gira ma
-non libera job, e la diagnosi va riaperta **li'**, non altrove.
+Se il punto 3 non si muove mentre il punto 1 dice che una fase ha girato, allora quella fase gira ma
+non libera job, e la diagnosi va riaperta **li'**, non altrove. La `34581778668`, quando termina,
+puo' dare evidenza solo sulla Phase 2d; non puo' validare #8305.
 
-### La coda davanti, e perche' l'attesa e' lunga
+### La coda e perche' l'attesa e' lunga
 
 La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `queue: max`: le run si
-**serializzano**. Davanti alla `34581778668` ce ne sono due, ed **entrambe portano codice
-precedente alle fix** perche' sono state create prima dei merge:
+**serializzano**. Le due run davanti alla `34581778668` hanno portato codice precedente alle fix;
+ora la `34581778668` e' in esecuzione nella Phase 2d, mentre la `34596819197` e la `34606194108`
+restano in coda:
 
 | run | creata | codice |
 |---|---|---|
 | `34565924745` | 05:25:50Z | prima di #8290 (06:45Z) e #8296 (08:39Z) |
 | `34568521127` | 06:05:56Z | prima di #8290 e #8296 |
-| **`34581778668`** | **08:57:57Z** | **entrambe** |
+| **`34581778668`** | **08:57:57Z** | **#8290 + #8296, pre-#8305; Phase 2d** |
+| `34596819197` | 12:01:17Z | **#8305; prima run utile per Phase 2e** |
+| `34606194108` | 13:46:02Z | manuale; Phase 2d/2e saltate dal gate `schedule` |
 
-Stato della prima al 2026-09-11T09:32Z: step **30** `Phase 2c mop-up`, avviato alle 08:11:51Z,
-quindi ~80 minuti dentro quel solo passo, con **247 minuti** di run gia' spesi e sette step ancora
-da fare. Il tetto e' **350**: e' plausibile che venga uccisa al cap come la run di housekeeping, e
-in quel caso perde anche il suo punto.
+Stato verificato al 2026-09-11T16:22Z: la `34581778668` e' ancora `in_progress`, con la Phase 2d
+avviata alle 14:54:40Z; le fasi successive e il log finale non sono ancora disponibili. Il tetto e'
+**350** minuti: se viene uccisa al cap perde anche il suo punto.
 
-**Conseguenza pratica**: la prima verifica vera delle due fix non arriva prima di meta' pomeriggio
-UTC. Chi riprende il lavoro non deve aspettarsi segnali dalle due run in testa — non hanno il
-codice.
+**Conseguenza pratica**: la prima verifica vera di #8305 arriva solo quando la coda raggiunge la
+`34596819197`. Non bisogna usare la `34581778668` o la manuale come prova del fixer normalizzato.
 
 **Opzione che NON ho preso**: cancellare le due run stale accorcerebbe l'attesa, ma la prima ha
 ~4 ore di traduzioni Argos non ancora committate e cancellarla le butta via. E' una decisione da
