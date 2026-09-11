@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-09 22:00Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 06:00Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -23,75 +23,10 @@ riformulazione, non una comodita'.
 **Dove sta il dato**: `data/translation-stats-history.json` nel repo sito, voci con
 `label === "after"`. Ne arriva una ogni ~2,2 ore.
 
-### Cio' che tiene aperta la condizione non e' la traduzione: e' un punto di storico sbagliato
+### Il blocco non sono gli artefatti: il residuo e' piatto
 
-Cinque punti su 102 sono avvallamenti da 6 a 15 pp che si riprendono del tutto al punto dopo. In
-**5 casi su 5** la voce `before` della stessa run e' identica alla `after` in `complete`,
-`incomplete` e `total`: **quella run non ha tradotto nulla**, quindi il numero non e' uno stato
-intermedio ma una sola lettura, e i due vicini la smentiscono.
-
-| punto `after` | complete/incomplete | quota | prima | dopo |
-|---|---|---|---|---|
-| 2026-09-04T17:01:06Z | 15.863/13.115 | 54,74% | 60,58% | 62,32% |
-| 2026-09-07T03:25:29Z | 17.321/11.243 | 60,64% | 69,02% | 68,39% |
-| 2026-09-07T21:57:04Z | 17.590/11.118 | 61,27% | 69,83% | 67,94% |
-| 2026-09-08T22:09:27Z | 20.998/11.156 | 65,30% | 80,88% | 76,85% |
-| 2026-09-10T00:16:10Z | 22.954/9.554 | 70,61% | 79,66% | 79,68% |
-
-Due ipotesi **gia' escluse**, per non ripagarle:
-
-- **Non e' un checkout stale**: nessuno dei cinque valori compare prima nello storico; lo stato
-  storico piu' vicino dista fra 223 e 3.558 job.
-- **Non e' una slice mancante**: sul punto del 10-09 il `total` e' 32.508 contro i 32.499 dei
-  vicini — nove job **in piu'**, non migliaia in meno. Il denominatore c'e' tutto; a cambiare e'
-  la **classificazione** di circa 2.942 job.
-
-Sulla MA3 ogni anomalia avvelena **tre** punti consecutivi. Con un punto ogni ~2,2 ore e
-un'anomalia ogni ~20 punti, la finestra pulita necessaria (~15 ore) e' appena piu' corta
-dell'intervallo medio fra due anomalie: la condizione e' raggiungibile ma fragile.
-
-**Il produttore, identificato** — non ricercarlo:
-
-- `.github/workflows/translate-pending.yml` **del sito** e' la copia morta: non gira dal
-  **2026-08-25**.
-- `.github/workflows/translate-pending-logic.yml` **del sito** e' la **sorgente** del workflow
-  generato.
-- Quello che gira e' `.github/workflows/translate-pending.yml` del **repo corpus**, «Translate
-  Pending Jobs (sparse cross-repo execution)». Tutti e cinque i punti anomali sono portati da
-  commit `🌐 Auto-translate pending jobs` prodotti da li'.
-
-**Ipotesi esclusa a costo zero**: `titleLooksUntranslated` (`scripts/lib/job-locale-utils.mjs:661`)
-e' deterministica e puramente lessicale — nessuna rete, nessun modello, `minConfidence` accettata e
-**inerte**. A parita' di dati del job non cambia verdetto. L'anomalia viene dai dati che quella run
-aveva in mano.
-
-**Il correlato che distingue i punti anomali: la contesa sul passo di commit.** Ritardo fra il
-timestamp del punto `after` e il commit che lo porta su `main`, su 52 punti confrontabili:
-
-| gruppo | n | mediana | valori |
-|---|---|---|---|
-| normali | 47 | **0,61 h** | min 0,12 — max 2,56; solo 8 su 47 sopra 1 h |
-| anomali | 5 | **2,20 h** | 1,30 · 1,84 · 2,20 · 2,59 · 2,62 |
-
-Tutti e cinque nella coda lunga. Il ritardo e' posteriore al calcolo, quindi non ne e' la causa:
-e' l'indicatore di quanto la run resta appesa fra calcolo e push. Nel corpus le run di
-`translate-pending.yml` durano **5-13 ore** e si **sovrappongono**: nella finestra del 10-09 la run
-`34360370563` (13:56Z → 02:39Z, ~12,7 h) finisce mentre `34380507868` e `34416243224` sono in corso.
-
-Ipotesi da verificare: una run lunga calcola le statistiche dal proprio albero, vecchio di ore, e
-le scrive dopo che altre run hanno gia' committato traduzioni piu' recenti. La verifica e' diretta:
-**il passo delle statistiche legge i job prima o dopo il rebase del passo di commit?** Da guardare
-nello stesso giro `translate-queue-recovery.yml` e `translate-queue-recovery-watchdog.yml` del
-corpus. Scheda: `.scratch/codex-c1art.txt`.
-
-**Cadenza reale**, contro il «~2,2 ore» scritto prima: mediana **4,21 h** su 101 intervalli,
-**2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3 richiedono almeno nove punti, cioe'
-**21-38 ore** di serie pulita.
-
-### Ma il blocco non sono gli artefatti: il residuo e' piatto
-
-Escludendo dalla serie i sei punti con la firma dell'artefatto, la catena corrente resta **0**.
-Gli artefatti vanno riparati, ma non sono cio' che tiene chiusa la condizione.
+Escludendo dalla serie i sei punti con la firma dell'artefatto, **la catena corrente resta 0**.
+Gli artefatti vanno riparati, ma **non sono cio' che tiene chiusa la condizione**.
 
 | ora | complete | incomplete | totale | quota |
 |---|---|---|---|---|
@@ -108,6 +43,83 @@ Incrociando con le fasce della condizione 2: **~3.300 dei 6.571 `incomplete` han
 giorni**. Le condizioni 1 e 2 sono due viste della stessa coda ferma. Scheda:
 `.scratch/codex-c0drain.txt` — la domanda e' se quel residuo entri mai nei primi `effectiveMax`
 (default 100) job che una run seleziona.
+
+### I cinque punti anomali: cosa si sa e cosa no
+
+| punto `after` | complete/incomplete | quota | prima | dopo |
+|---|---|---|---|---|
+| 2026-09-04T17:01:06Z | 15.863/13.115 | 54,74% | 60,58% | 62,32% |
+| 2026-09-07T03:25:29Z | 17.321/11.243 | 60,64% | 69,02% | 68,39% |
+| 2026-09-07T21:57:04Z | 17.590/11.118 | 61,27% | 69,83% | 67,94% |
+| 2026-09-08T22:09:27Z | 20.998/11.156 | 65,30% | 80,88% | 76,85% |
+| 2026-09-10T00:16:10Z | 22.954/9.554 | 70,61% | 79,66% | 79,68% |
+
+In **5 casi su 5** la voce `before` della stessa run e' identica alla `after`: quella run **non ha
+tradotto nulla**, quindi il punto e' **una sola lettura**. Attenzione pero': `before == after` da
+solo e' comune — **37 punti su 102** ce l'hanno, e quasi tutti sono innocui. Il discriminante e' la
+congiunzione con il crollo della quota.
+
+**Non e' una slice mancante, e non e' un albero uniformemente vecchio.** In tutti e cinque i casi il
+**totale** al punto anomalo e' maggiore o uguale a quello del precedente:
+
+| punto | totale (prec → punto → succ) | complete (prec → punto → succ) |
+|---|---|---|
+| 2026-09-04T17:01 | 28.787 → 28.978 → 28.971 | 17.439 → 15.863 → 18.056 |
+| 2026-09-07T03:25 | 28.395 → 28.564 → 28.564 | 19.599 → 17.321 → 19.536 |
+| 2026-09-07T21:57 | 28.320 → 28.708 → 28.831 | 19.775 → 17.590 → 19.589 |
+| 2026-09-08T22:09 | 28.614 → 32.154 → 32.277 | 23.143 → 20.998 → 24.804 |
+| 2026-09-10T00:16 | 32.272 → 32.508 → 32.499 | 25.709 → 22.954 → 25.896 |
+
+Un albero indietro nel tempo avrebbe un totale **piu' basso**, non il piu' alto della serie.
+L'insieme dei job e' corrente; a cambiare e' la **classificazione**.
+
+**Argomento da non riusare**: «nessuno dei cinque valori compare prima nello storico, quindi non e'
+un albero vecchio». E' debole — lo storico e' campionato ogni poche ore, quindi uno stato intermedio
+reale non ha motivo di coincidere con un punto campionato. L'argomento che regge e' il **totale**.
+
+**Ipotesi esclusa a costo zero**: `titleLooksUntranslated` (`scripts/lib/job-locale-utils.mjs:661`)
+e' deterministica e puramente lessicale — nessuna rete, nessun modello, `minConfidence` accettata e
+**inerte**. A parita' di dati del job non cambia verdetto.
+
+**Ma i dati non cambiano lo stesso.** Misurato direttamente sui commit del 09-09 (vedi la sezione
+della condizione 3): fra le 15:26Z e le 19:34Z, su 32.346 id in comune, cambiano 1 titolo sorgente,
+0 `sourceLang`, 0 `company`, 2 `location`, 3 titoli italiani; le slot di titolo piene in tutte e
+quattro le locale restano 32.417 → 32.360; le descrizioni sopra i 120 caratteri restano 32.385 →
+32.328; la guardia `normSrc/normBase < 0.55` scatta su **zero** job. **La classificazione cambia
+senza che i dati cambino**, ed e' la contraddizione centrale ancora aperta.
+
+**Il produttore, identificato** — non ricercarlo:
+
+- `.github/workflows/translate-pending.yml` **del sito** e' la copia morta: non gira dal
+  **2026-08-25**.
+- `.github/workflows/translate-pending-logic.yml` **del sito** e' la **sorgente** del workflow
+  generato.
+- Quello che gira e' `.github/workflows/translate-pending.yml` del **repo corpus**, «Translate
+  Pending Jobs (sparse cross-repo execution)».
+
+**Il correlato che distingue i punti anomali: la contesa sul passo di commit.** Ritardo fra il
+timestamp del punto `after` e il commit che lo porta su `main`, su 52 punti confrontabili:
+
+| gruppo | n | mediana | valori |
+|---|---|---|---|
+| normali | 47 | **0,61 h** | min 0,12 — max 2,56; solo 8 su 47 sopra 1 h |
+| anomali | 5 | **2,20 h** | 1,30 · 1,84 · 2,20 · 2,59 · 2,62 |
+
+Tutti e cinque nella coda lunga. Il ritardo e' posteriore al calcolo, quindi non ne e' la causa: e'
+l'indicatore di quanto la run resta appesa fra calcolo e push. Nel corpus le run di
+`translate-pending.yml` durano **5-13 ore** e si **sovrappongono**: nella finestra del 10-09 la run
+`34360370563` (13:56Z → 02:39Z, ~12,7 h) finisce mentre `34380507868` e `34416243224` sono in corso.
+
+Ipotesi da verificare: una run lunga calcola le statistiche dal proprio albero e le scrive dopo che
+altre run hanno gia' committato. Verifica diretta: **il passo delle statistiche legge i job prima o
+dopo il rebase del passo di commit?** Nello stesso giro guardare `translate-queue-recovery.yml` e
+`translate-queue-recovery-watchdog.yml` del corpus. Scheda: `.scratch/codex-c1art.txt`.
+
+Sulla MA3 ogni anomalia avvelena **tre** punti consecutivi.
+
+**Cadenza reale**, contro il «~2,2 ore» scritto prima: mediana **4,21 h** su 101 intervalli,
+**2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3 richiedono almeno nove punti, cioe'
+**21-38 ore** di serie pulita.
 
 **Trappola di metodo pagata su questo stesso dato** (§45): la produttivita' oraria calcolata per
 giorno civile dava «279 → 80 → 9 job/ora» e sembrava un crollo causato dalle cinque PR del 09-09.
@@ -192,71 +204,70 @@ verificando che gli import relativi si risolvano) cosi' che la sua `ROOT` non pu
 
 ---
 
-## Condizione 3 — meno del 10% dei `complete` mal tradotti, su due misure consecutive
+## Condizione 3 — CHIUSA il 2026-09-11
 
-**Predicato**: fra i job `complete` il cui titolo sorgente tedesco porta una forma di genere,
-quanti hanno **almeno una traduzione non tedesca** (it/en/fr) che la porta ancora. Test:
-`masculineGermanTitle(title) !== title` sul **titolo tradotto**.
+**Formulazione**: fra i job `complete` il cui titolo sorgente tedesco porta una forma di genere,
+quanti hanno almeno una traduzione non tedesca (it/en/fr) che la porta ancora. Predicato del
+numeratore: `masculineGermanTitle(title) !== title` sul **titolo tradotto**. Chiude sotto il **10%**
+su due misure consecutive.
 
-**Stato**: **catena 0**. Regressione misurata.
+**Stato: chiusa.** Con `isIncomplete` importata da `origin/main` e lo **stesso** predicato su tutti
+e tre i ref:
 
-| commit | ora | denominatore | numeratore | quota |
-|---|---|---|---|---|
-| `3790bb5399a` | 2026-09-09 04:09Z | 13.730 | 850 | **6,19%** |
-| `4262cc889ee` | 2026-09-09 21:34Z | 13.788 | 1.777 | **12,89%** |
+| ref | ora | numeratore / denominatore | quota |
+|---|---|---|---|
+| `3790bb5399a` | 2026-09-09 04:09Z | 262 / 10.903 | **2,40%** |
+| `4262cc889ee` | 2026-09-09 19:34Z | 251 / 10.189 | **2,46%** |
+| `origin/main` (`acf31d247f5`) | 2026-09-11 | 252 / 10.265 | **2,45%** |
 
-Denominatore piatto (+0,4%), numeratore **+109%** in ~17 ore. Non e' crescita del corpus.
+Tre letture consecutive a un quarto della soglia. Il numeratore **scende** (262 → 251), non
+raddoppia.
 
-**Strumento — ROTTO, verificato il 2026-09-11.** `cond3b.mjs` e `cond3c.mjs` importano i predicati
-da `.scratch/extracted-functions.mjs`, e li' `isIncomplete` e' **la versione riscritta a mano con
-le sole soglie di lunghezza** (`minTitleChars = 3`, `minDescChars = 120`): esattamente il predicato
-che in questo lavoro ha gia' reso 99,5% dove la verita' era 81,3%.
+**La «regressione» era il filtro rotto, per intero.** I job che lo stub ammetteva nel denominatore e
+la funzione vera esclude contribuivano al numeratore dello stub con **588** job a `3790bb5399a` e
+**1.526** a `4262cc889ee`: **+938**, contro il **+927** che era il salto inspiegato. La scheda
+`m3reg` era costruita su un difetto inesistente ed e' stata **ritirata**.
 
-La `isIncomplete` vera e' `scripts/relocalize-pending-jobs.mjs:637` e ha **due controlli che lo
-stub non ha**: la guardia sulla locale sorgente (`normSrc.length / normBase.length < 0.55`) e
-`titleLooksUntranslated` **per slot**. Quindi il `complete` dello stub e' un **soprainsieme** di
-quello vero, e i job in eccesso sono in buona parte quelli **col titolo ancora in tedesco** —
-cioe' proprio quelli che finiscono nel numeratore. Lo strumento ammetteva nel denominatore i job
-che poi trovava nel numeratore.
+**Righe verificate su `origin/main`** (non sul rapporto dell'agente):
 
-`masculineGermanTitle` invece e' **fedele al byte** a `scripts/local-mt-mopup.mjs:228`: il
-predicato del numeratore non e' in discussione.
+| funzione | posizione |
+|---|---|
+| `isIncomplete` | `scripts/relocalize-pending-jobs.mjs:637` |
+| `titleLooksUntranslated` | `scripts/lib/job-locale-utils.mjs:661` |
+| `normalizeForLengthComparison` | `scripts/lib/dedicated-crawler-common.mjs:5231` |
+| `masculineGermanTitle` | `scripts/local-mt-mopup.mjs:228` |
+| `genderFormOffence` | `scripts/mark-mistranslated-jobs.mjs:175` |
 
-Conseguenza: **il livello non regge** — ne' 6,19% ne' 12,89% sono la quota della condizione 3 come
-la mappa la definisce. **Il raddoppio regge come segnale**, perche' le due misure usano lo stesso
-filtro sbagliato, ma acquista una causa alternativa precisa: se in quella finestra sono cresciuti i
-job con titolo non tradotto, lo stub li ha promossi a `complete` e li ha trovati nel numeratore
-senza che nessun percorso di scrittura abbia prodotto una traduzione nuova sbagliata.
+**Strumento sbagliato, gia' pagato**: `genderFormOffence` legge solo il titolo sorgente, che non
+cambia mai, quindi il numero non puo' scendere. Va bene **solo** come filtro del denominatore, mai
+come numeratore. Ha reso 42,72% e non e' una misura di qualita'.
 
-Rimisura con il predicato importato: scheda `.scratch/codex-c3pred.txt`, su tre ref
-(`3790bb5399a`, `4262cc889ee`, `origin/main` di oggi).
-
-**La regola che resta valida**: il ref va parametrizzato (`REF=<commit> node ...`). Una condizione
-«su due misure consecutive» va verificata **rieseguendo lo strumento sul commit precedente**, mai
-confrontando con un numero citato.
-
-**Strumento sbagliato, gia' pagato**: `genderFormOffence` legge **solo il titolo sorgente**, che
-non cambia mai, quindi il numero non puo' scendere. Ha reso 42,72% e non e' una misura di
-qualita'. Non tornarci.
-
-**Causa da trovare**: `scripts/local-mt-mopup.mjs` normalizza (`masculineGermanTitle` verso la
-riga 228, `normalizeArgosText()` verso 236-240, `buildMopupRequest()` verso 247 invocata verso
-627). Qualche **altro** percorso di scrittura del titolo tradotto evidentemente no. La diagnosi e'
-stata dispacciata ma **non e' rientrata**. Scheda: `.scratch/codex-m3reg.txt`.
-
-Ipotesi da verificare per prima, gia' scritta nella scheda: la PR sito **#8077** ha rimosso
-l'handle one-shot `reflag_gender_forms` e il suo step; va stabilito se quello step facesse
-**anche** normalizzazione, o solo rimarcatura per la ricoda.
-
-Ipotesi alternativa, altrettanto legittima: i 927 job non sono nuovi errori ma job **gia'
-sbagliati diventati `complete`** in quella finestra, entrati nel numeratore da un'altra porta. In
-quel caso e' una regressione di contabilita', non di qualita'. Il conteggio che discrimina e'
-quanti dei 927 esistevano gia' sbagliati e non `complete`.
-
-**Strada gia' scartata**: la riparazione **euristica** dei titoli a valle. Un detector al 33% di
-falsi positivi distruggeva titoli buoni. Non riproporla senza un detector di qualita' diversa.
+**Strada gia' scartata**: la riparazione euristica dei titoli a valle. Un detector al 33% di falsi
+positivi distruggeva titoli buoni.
 
 ---
+
+## La domanda che resta aperta: la classificazione cambia senza che i dati cambino
+
+Non e' della condizione 3, ma e' emersa dalla sua misura ed e' la stessa cosa che si vede sotto le
+condizioni 1 e 2.
+
+Con lo **stesso** predicato, `incomplete` passa da **6.860** (09-09 04:09Z) a **9.959** (09-09
+19:34Z). Ma i dati sono fermi. Misurato direttamente sui commit di quella giornata:
+
+- fra le **15:26Z** e le **19:34Z**, su 32.346 id in comune cambiano **1** titolo sorgente, **0**
+  `sourceLang`, **0** `company`, **2** `location`, **3** titoli italiani;
+- i job con tutte e quattro le slot di **titolo** piene: 32.417 → 32.360 (−57, tutti da potatura);
+- i job con **descrizione** sopra i 120 caratteri in tutte e quattro le locale: 32.385 → 32.328;
+- la guardia sulla locale sorgente (`normSrc/normBase < 0.55`) scatta su **zero** job in tutti i
+  commit controllati.
+
+Resta in piedi solo **`titleLooksUntranslated`** come ramo che flippa, e nessun input osservabile
+che lo giustifichi. E' lo stesso fenomeno dei cinque punti anomali dello storico visto dall'altro
+lato: li' `incomplete` salta a 9.554 e torna a 6.603 senza che nessuna run traduca.
+
+Comandi usati per queste tre contro-misure: `.scratch/slotcount.mjs`, `.scratch/desccount.mjs`,
+`.scratch/cmpfields.mjs` (variabili `REF`, oppure `A` e `B`).
 
 ## L'unico work item aperto: #24
 
