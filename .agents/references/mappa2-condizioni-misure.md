@@ -570,7 +570,48 @@ dichiara che Argos ha **solo pacchetti `xx<->en`** per it/en/de/fr, quindi **`de
 `de->en->it`**. I pacchetti ci sono — il log della `34541569329` dice
 `✅ All Argos models already installed (cache hit)` — quindi non e' un'installazione mancante.
 
-Perche' il pivot renda il tedesco invariato e' la domanda della scheda `.scratch/codex-deit.txt`.
+**Cinque esempi reali dicono che non e' il pivot, o non solo.** Presi dalle slice di `origin/main`:
+
+- **Abbott**, `sourceLang=de`. `descriptionByLocale.it` e' **letteralmente il tedesco**:
+  «JOB DESCRIPTION: Abbott ist ein weltweit fuehrendes Unternehmen im Gesundheitswesen…». Prosa
+  perfettamente traducibile, mai tradotta. Il titolo italiano e' **mezzo tradotto**: «Clinical
+  **Specialista** Orbitale Atherektomie & Imaging» — una parola italiana infilata fra le tedesche.
+- **Abraxas Informatik AG**, idem: «Im Team Customer Solutions BUND unterstuetzen wir unsere
+  Kundinnen…», identica in `it`. Titolo: «Linux **Ingegnere** con AWS- e Kubernetes-**Erfahrung**».
+- **Air Zermatt**: la descrizione **non e' un annuncio**. E'
+  «Air_Zermatt_Logo_RGB Flug online buchen Goenner werden Deutsch English Francais Japanisch Suche
+  Webcams Warenkorb Shop…» — il **menu di navigazione del sito**, catturato dal crawler al posto
+  del testo. Tradurlo non ha senso: e' un difetto di crawling, non di traduzione.
+
+**La popolazione, contata.** Job con `sourceLang=de` la cui `descriptionByLocale.it` e' il testo
+tedesco, **tutte le eta'** (denominatore diverso dai 1.341 della fascia oltre i sette giorni, che
+sono attribuiti al primo ramo): **3.343**, su **2.869 descrizioni distinte** — quindi non e'
+boilerplate ripetuto: solo 130 job condividono la descrizione con altri dieci o piu'.
+
+**E' concentrata su pochissime aziende**:
+
+| azienda | job |
+|---|---:|
+| STA Personal AG | **1.311** |
+| fachkraft.ch GmbH | 427 |
+| Stadt Zuerich | 273 |
+| Die Schweizerische Post | 191 |
+| VOLG | 181 |
+
+Le prime due valgono il **52%**. Un residuo cosi' concentrato indica un difetto **per-crawler**,
+non un limite del motore di traduzione.
+
+**Stima grezza della quota non traducibile, dichiarata come euristica**: contando come «chrome» le
+descrizioni con almeno tre parole-menu (`Warenkorb`, `Webcams`, `Suche`, `online buchen`,
+`Impressum`…) o con quasi nessuna punteggiatura, **1.493 su 3.343 (44,7%)** non sono annunci.
+L'euristica e' rozza e va sostituita da un criterio vero prima di deciderci qualcosa — ma se
+l'ordine di grandezza regge, **quasi meta' di questo residuo non e' una coda da tradurre: e' un
+fondo permanente da escludere dal denominatore**, e le condizioni 1 e 2 vanno riformulate di
+conseguenza.
+
+La domanda su perche' il pivot `de->en->it` non traduca l'altra meta' resta aperta. Scheda:
+`.scratch/codex-deit.txt`, **non consumata**: quattro job Codex di fila sono stati uccisi dal
+sistema per memoria esaurita.
 
 ## Condizione 3 — CHIUSA il 2026-09-11
 
