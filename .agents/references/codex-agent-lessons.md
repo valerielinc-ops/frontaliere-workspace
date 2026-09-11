@@ -2140,3 +2140,28 @@ globali — perche' l'agente altrimenti sceglie la strada comoda.
 E quando una scheda muore cosi' piu' volte, la risposta giusta non e' rilanciarla una quinta volta:
 e' **restringere la domanda** finche' non entra in cio' che puoi misurare tu, e scrivere nella
 scheda cio' che hai gia' escluso, perche' il prossimo tentativo non lo ripaghi.
+
+## §57 — attribuire al PRIMO ramo che scatta nasconde tutto cio' che sta dietro, e inventa una direzione che non esiste
+
+Un predicato scritto per rispondere «si'/no» esce al primo motivo che trova. Usarlo per
+**attribuire una causa** e' legittimo, ma il conteggio che ne esce non e' la distribuzione del
+difetto: e' la distribuzione del **primo motivo in ordine di codice**.
+
+Qui `isIncomplete` itera `LOCALES = ['it','en','de','fr']` e ritorna al primo locale che fallisce.
+Attribuendo cosi', il residuo sembrava concentrato su `de -> it` — e ne avevo tratto che «il difetto
+ha una direzione». Contando invece **tutti** gli slot, le tre direzioni risultano equivalenti:
+`de->en` 2.215, `de->fr` 2.204, `de->it` 2.195. La descrizione tedesca non era tradotta in nessuna
+delle tre lingue; l'italiano era solo il **primo** dell'array.
+
+Due conseguenze pratiche.
+
+**Il difetto era tre volte piu' largo** di come l'avevo descritto, e una fix dimensionata
+sull'attribuzione sarebbe stata dimensionata su un terzo del lavoro.
+
+**La «direzione» era un artefatto puro.** Nessun dato la smentiva, perche' nessun dato la
+riguardava: era l'ordine di un array letto come una proprieta' del mondo.
+
+Regola operativa: quando la domanda e' «di che natura e' il difetto», conta **tutte** le
+occorrenze, non la prima per job. L'attribuzione al primo ramo serve solo a un'altra domanda —
+«quale ramo dichiara questo job incompleto» — e le due non vanno mescolate nella stessa tabella
+senza dire quale delle due si sta misurando.

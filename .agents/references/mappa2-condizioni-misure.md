@@ -617,6 +617,38 @@ job e l'aggancio e' lo stesso lavoro della Fase 2d — ma chi scrive la PR deve 
 vero. Per prendere gli altri 1.476 il predicato va allargato a `normalizeForLengthComparison`, la
 stessa funzione con cui `isIncomplete` li dichiara incompleti.
 
+### Quanto vale allargare il predicato: 329 job contro 2.849
+
+Misurato su `origin/main`, tutti i job e tutte le eta', contando gli **slot** `descriptionByLocale`
+con `locale !== sourceLang` e sorgente ≥ 120 caratteri:
+
+| predicato | slot | job |
+|---|---:|---:|
+| copia **esatta** (quello di oggi, `:94-95`) | **840** | **329** |
+| uguali **solo dopo** `normalizeForLengthComparison` | **8.402** | **2.849** |
+
+Allargare il predicato moltiplica gli slot raggiunti per **dieci**. E' la differenza fra una fix
+che tocca 329 job e una che ne tocca 3.178.
+
+**E qui cade una mia affermazione precedente.** Avevo scritto che il residuo «ha una direzione,
+`de -> it`». Le direzioni dei soli normalizzati dicono altro:
+
+| direzione | slot |
+|---|---:|
+| `de -> en` | 2.215 |
+| `de -> fr` | 2.204 |
+| `de -> it` | 2.195 |
+| `en -> it` | 398 |
+| `en -> fr` | 397 |
+| `en -> de` | 395 |
+
+**`de -> it`, `de -> en` e `de -> fr` sono praticamente uguali.** La descrizione tedesca non e'
+tradotta in **nessuna** delle tre lingue bersaglio. Il «`de -> it`» che avevo riportato era un
+artefatto dell'**ordine di attribuzione**: `isIncomplete` ritorna al **primo** ramo che scatta e
+`LOCALES` comincia con `it`, quindi ogni job tedesco veniva contato come un problema italiano e gli
+altri due slot restavano invisibili. Il difetto e' tre volte piu' largo di come l'avevo descritto,
+e la fix che lo chiude e' la stessa.
+
 ### Perche' Argos non li prende: il pivot senza identity guard
 
 Argos ha **solo pacchetti `xx<->en`** (`scripts/local-mt-translate.py:55,80`), quindi `de->it` e' un
