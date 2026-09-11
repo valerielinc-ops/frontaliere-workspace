@@ -354,11 +354,23 @@ dichiara: «Ubuntu's setup-node toolcache is runner-managed. It is intentionally
 `path_components_trusted()`».
 
 **Conseguenza sulle due PR del corpus.** #1352 (mergiata 06:46:51Z) e #1354 (mergiata 07:52:40Z)
-correggono la copia del corpus, che **questo workflow non esegue**. Non sono dannose — #1354
-raddrizza una maschera davvero sbagliata, `200` decimale al posto di `0200` ottale, che avrebbe
-respinto ogni componente runner-owned anche a `0555` — ma **non erano la causa** e non cambiano il
-comportamento del ciclo di traduzione. Se quella copia serve a un altro workflow va detto quale;
-se non serve a nessuno, le due copie vanno riconciliate o una va rimossa.
+correggono la copia del corpus, che **questo workflow non esegue**. Non erano la causa del guasto
+alla corsia di traduzione.
+
+**Ma quella copia non e' inerte** — misurato, non dedotto. I workflow del corpus che usano
+`uses: ./.github/actions/setup-claude-haiku-fallback` sono **25**:
+
+| workflow | checkout del sito prima dello `uses:` | copia eseguita |
+|---|---|---|
+| `crawler-group-01..23` | si', senza `path:` | **sito** |
+| `translate-pending` | si', senza `path:` | **sito** |
+| `generate-article` | **no** — `actions/checkout` senza `repository:` alla riga 598 | **corpus** |
+
+Quindi #1352 e #1354 proteggono la generazione degli articoli, non la traduzione: il degrado
+invece del fallimento e la maschera ottale valgono per `generate-article.yml`. La domanda aperta
+si chiude cosi': **la copia del corpus serve a un workflow solo**, e le due copie restano
+disallineate senza vincolo di mirror (`bin/where-to-fix`: `mode: assente`). Chi tocca una delle due
+deve decidere esplicitamente se l'altra la segue.
 
 **Ritirata la mia riserva.** Avevo scritto che l'affermazione dell'agente — «la riuscita usa una
 versione dell'action del sito che scarica Node in `RUNNER_TEMP`, quindi non dimostra un runtime
@@ -521,9 +533,15 @@ duro di **6.464** job oltre i sette giorni.
 condizione 1 ne' la 2**. Chiamarlo «l'unico work item aperto» era corretto come inventario e
 fuorviante come piano.
 
-**Nota sullo strumento**: le ultime cinque run completate **non hanno aggiunto punti**. Prima di
-aspettare i tre mancanti va verificato che l'artifact venga ancora prodotto, altrimenti
-l'attesa e' indefinita.
+**Nota sullo strumento, verificata**: l'artifact `translation-thinking-ab` **viene ancora
+prodotto** — l'ultimo e' della run `34541569329` (2026-09-11T01:51Z), e ce ne sono per
+`34443590913`, `34441079032`, `34380507868`, `34360370563`. I punti «mancanti» non sono un guasto
+della strumentazione: sono run in cui le **aziende servite sono zero**, e quindi il denominatore
+della misura e' nullo. La run `34541569329` ne e' l'esempio: `0 jobs translated so far; 252
+companies remaining`, perche' la Fase 2a aveva gia' consumato la finestra.
+
+Cioe': i tre punti che mancano a #24 mancano **per lo stesso motivo per cui #24 non basta**. Non e'
+un'attesa che si risolve aspettando — si risolve alzando la resa della Fase 2b.
 
 ---
 
