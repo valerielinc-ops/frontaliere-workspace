@@ -84,112 +84,113 @@ entra mai nei primi `effectiveMax` (default 100) job che una run seleziona? Deno
 
 Comando: `.scratch/agebands.mjs` (`SRC=<dir> REF=<ref> node .scratch/agebands.mjs`).
 
-### I cinque punti anomali: cosa si sa e cosa no
+### La causa, chiusa: il punto misura il worktree transitorio, non l'albero pubblicato
 
-| punto `after` | complete/incomplete | quota | prima | dopo |
-|---|---|---|---|---|
-| 2026-09-04T17:01:06Z | 15.863/13.115 | 54,74% | 60,58% | 62,32% |
-| 2026-09-07T03:25:29Z | 17.321/11.243 | 60,64% | 69,02% | 68,39% |
-| 2026-09-07T21:57:04Z | 17.590/11.118 | 61,27% | 69,83% | 67,94% |
-| 2026-09-08T22:09:27Z | 20.998/11.156 | 65,30% | 80,88% | 76,85% |
-| 2026-09-10T00:16:10Z | 22.954/9.554 | 70,61% | 79,66% | 79,68% |
+In `.github/workflows/translate-pending-logic.yml` l'ordine degli step e':
 
-In **5 casi su 5** la voce `before` della stessa run e' identica alla `after`: quella run **non ha
-tradotto nulla**, quindi il punto e' **una sola lettura**. Attenzione pero': `before == after` da
-solo e' comune — **37 punti su 102** ce l'hanno, e quasi tutti sono innocui. Il discriminante e' la
-congiunzione con il crollo della quota.
+| # | step |
+|---|---|
+| 1 | **`Log translation stats (after)`** |
+| 2 | `Scatter changes back to per-crawler slices` |
+| 3 | `Phase 2c mop-up: local MT (Argos)` |
+| 4 | `Re-assemble dataset after Phase 2c mop-up` |
+| 5 | `Commit translations` |
+| 6 | `Phase 2d: Fix untranslated titles (free cascade)` |
 
-**Non e' una slice mancante, e non e' un albero uniformemente vecchio.** In tutti e cinque i casi il
-**totale** al punto anomalo e' maggiore o uguale a quello del precedente:
+Il punto chiamato `after` e' scritto **prima** di scatter, mop-up, re-assemble, commit e Fase 2d.
+E' una misura di **meta' run**. In piu' `scripts/lib/git-commit-data.sh` aggiorna il riferimento
+remoto solo dopo (fetch verso 1512-1521, merge 3-way verso 1657-1686, push verso 1715-1727) **senza
+avanzare il checkout locale**.
 
-| punto | totale (prec → punto → succ) | complete (prec → punto → succ) |
+Ricostruzione aritmetica sul punto `2026-09-11T01:26:57.017Z`:
+
+| albero | total | incomplete |
 |---|---|---|
-| 2026-09-04T17:01 | 28.787 → 28.978 → 28.971 | 17.439 → 15.863 → 18.056 |
-| 2026-09-07T03:25 | 28.395 → 28.564 → 28.564 | 19.599 → 17.321 → 19.536 |
-| 2026-09-07T21:57 | 28.320 → 28.708 → 28.831 | 19.775 → 17.590 → 19.589 |
-| 2026-09-08T22:09 | 28.614 → 32.154 → 32.277 | 23.143 → 20.998 → 24.804 |
-| 2026-09-10T00:16 | 32.272 → 32.508 → 32.499 | 25.709 → 22.954 → 25.896 |
+| base della run (`e6a743d`) | 32.602 | 7.424 |
+| **worktree misurato dalla run** | 32.602 | **6.571** |
+| parent del commit finale (`9fc88ab`) | 33.000 | 10.572 |
+| **`c5286d0f01e` pubblicato** | 33.000 | **9.720** |
 
-Un albero indietro nel tempo avrebbe un totale **piu' basso**, non il piu' alto della serie.
-L'insieme dei job e' corrente; a cambiare e' la **classificazione**.
+`e6a743d → 9fc88ab`: +398 elementi e +3.148 incomplete da **19 commit concorrenti** di crawler e
+publisher durante la run. `9fc88ab → c5286d0f01e`: −852, il lavoro della run applicato dal merge
+3-way. E torna: **9.720 − 6.571 = 3.148 − 852 + 853 = 3.149**.
+
+**Non e' `isIncomplete` a divergere: e' lo snapshot.** Escluso con prova anche il sospetto di una
+copia degli script: il corpus **non contiene copie**, e gli hash di `log-translation-stats.mjs` e
+`relocalize-pending-jobs.mjs` coincidono fra `c5286d0f01e` e `origin/main`.
+
+I **398 job** sono reali: 593 slice valide, **0 `id` duplicati**, 177 elementi senza `id`, 0 senza
+`url`; +1.032 URL entrati e −634 usciti su **148 slice cambiate su 593**.
+
+**Conseguenza**: l'errore della serie non e' costante — dipende da quanti commit concorrenti
+atterrano durante ogni run, e le run durano 5-13 ore. **Una catena di rialzi su quella serie non
+prova convergenza.**
+
+**Il numero corretto**: 9.720 su 33.000 sul tree pubblicato; 9.713 su 32.988 su `origin/main` di
+adesso. Il 6.571 vale **solo** per il worktree transitorio della run.
+
+### Le cinque letture «anomale» non erano artefatti
+
+Hanno la firma `before == after` — 37 punti su 102 ce l'hanno, quindi da sola non discrimina — ma
+quella firma **non significa «run inerte»**: significa che entrambe le letture vengono dalla stessa
+snapshot. La run `34360370563` ha `before == after` e registra **1.229** transizioni
+`incomplete → complete`; il bulk ha girato `8.735.193/9.000.000 ms`, il mop-up
+`7.081.500/7.329.929 ms`, ed e' la **cascade** a essere rimasta a `0/228` con `starved = true` e
+stop reason `cascade deadline`.
+
+La scomposizione del punto del 10-09: `9.554/32.508` incomplete, di cui **9.354** con **tutte le
+slot presenti** (falliscono i rami semantici) e solo **200** con una slot corta o assente. Non e'
+una locale non caricata.
 
 **Argomento da non riusare**: «nessuno dei cinque valori compare prima nello storico, quindi non e'
-un albero vecchio». E' debole — lo storico e' campionato ogni poche ore, quindi uno stato intermedio
-reale non ha motivo di coincidere con un punto campionato. L'argomento che regge e' il **totale**.
+un albero vecchio». E' debole — la serie e' campionata ogni poche ore. L'argomento che regge e' il
+**totale**, che al punto anomalo e' sempre maggiore o uguale al precedente.
 
-**Ipotesi esclusa a costo zero**: `titleLooksUntranslated` (`scripts/lib/job-locale-utils.mjs:661`)
-e' deterministica e puramente lessicale — nessuna rete, nessun modello, `minConfidence` accettata e
-**inerte**. A parita' di dati del job non cambia verdetto.
+**Ipotesi escluse a costo zero, non ripagarle**: `titleLooksUntranslated`
+(`scripts/lib/job-locale-utils.mjs:661`) e' deterministica e lessicale, `minConfidence` **inerte**;
+`LOCALES` e `MIN_DESC_CHARS` (`relocalize-pending-jobs.mjs:91-92`) sono letterali; `classifyJob`
+(`log-translation-stats.mjs:137`) non applica esenzioni a `incomplete`; `isSliceFile` esclude solo
+`.gitkeep` e `coop-ticino-locale-cache.json`, entrambi con zero job.
 
-**Ma i dati non cambiano lo stesso.** Misurato direttamente sui commit del 09-09 (vedi la sezione
-della condizione 3): fra le 15:26Z e le 19:34Z, su 32.346 id in comune, cambiano 1 titolo sorgente,
-0 `sourceLang`, 0 `company`, 2 `location`, 3 titoli italiani; le slot di titolo piene in tutte e
-quattro le locale restano 32.417 → 32.360; le descrizioni sopra i 120 caratteri restano 32.385 →
-32.328; la guardia `normSrc/normBase < 0.55` scatta su **zero** job. **La classificazione cambia
-senza che i dati cambino**, ed e' la contraddizione centrale ancora aperta.
+**La fix**: spostare la misura sulla stessa tree pubblicata — dopo mop-up e re-assemble, dopo il
+refresh/merge remoto. Lato **SITE** (`bin/where-to-fix`: `mode: assente`); il workflow del corpus e'
+**generato**, non si tocca. Due vincoli: il punto **non deve sparire** quando la run finisce per
+budget (era il regresso riparato da #8075 / issue #42), e non rimuovere l'invariante per cui il
+checkout locale non viene avanzato (`git-commit-data.sh:1715-1727`). **Se la fix passa, i 102 punti
+esistenti non sono confrontabili con i futuri e la condizione 1 riparte da zero.**
+Scheda: `.scratch/codex-afterfix.txt`.
 
-**Il produttore, identificato** — non ricercarlo:
+### Difetto separato: la corsia Haiku muore in 4 run su 7 dal 10-09
 
-- `.github/workflows/translate-pending.yml` **del sito** e' la copia morta: non gira dal
-  **2026-08-25**.
-- `.github/workflows/translate-pending-logic.yml` **del sito** e' la **sorgente** del workflow
-  generato.
-- Quello che gira e' `.github/workflows/translate-pending.yml` del **repo corpus**, «Translate
-  Pending Jobs (sparse cross-repo execution)».
+Nelle ultime 100 run di `translate-pending.yml` del corpus le `failure` sono **sei**: due a fine
+agosto e **quattro tutte il 2026-09-10** (`34458198473` 09:00Z, `34474527640` 12:02Z,
+`34482419809` 13:24Z, `34504919618` 16:54Z). Sette run quel giorno: **43%** di riuscita, contro
+**nessun fallimento** fra il 31-08 e il 09-09.
 
-**Il correlato che distingue i punti anomali: la contesa sul passo di commit.** Ritardo fra il
-timestamp del punto `after` e il commit che lo porta su `main`, su 52 punti confrontabili:
+Tutte e quattro sugli stessi step — `14 Run ./.github/actions/setup-claude-haiku-fallback` e
+`26 Capture translation observability baseline` — con lo stesso errore:
 
-| gruppo | n | mediana | valori |
-|---|---|---|---|
-| normali | 47 | **0,61 h** | min 0,12 — max 2,56; solo 8 su 47 sopra 1 h |
-| anomali | 5 | **2,20 h** | 1,30 · 1,84 · 2,20 · 2,59 · 2,62 |
-
-Tutti e cinque nella coda lunga. Il ritardo e' posteriore al calcolo, quindi non ne e' la causa: e'
-l'indicatore di quanto la run resta appesa fra calcolo e push. Nel corpus le run di
-`translate-pending.yml` durano **5-13 ore** e si **sovrappongono**: nella finestra del 10-09 la run
-`34360370563` (13:56Z → 02:39Z, ~12,7 h) finisce mentre `34380507868` e `34416243224` sono in corso.
-
-Ipotesi da verificare: una run lunga calcola le statistiche dal proprio albero e le scrive dopo che
-altre run hanno gia' committato. Verifica diretta: **il passo delle statistiche legge i job prima o
-dopo il rebase del passo di commit?** Nello stesso giro guardare `translate-queue-recovery.yml` e
-`translate-queue-recovery-watchdog.yml` del corpus. Scheda: `.scratch/codex-c1art.txt`.
-
-Sulla MA3 ogni anomalia avvelena **tre** punti consecutivi.
-
-**Cadenza reale**, contro il «~2,2 ore» scritto prima: mediana **4,21 h** su 101 intervalli,
-**2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3 richiedono almeno nove punti, cioe'
-**21-38 ore** di serie pulita.
-
-**Trappola di metodo pagata su questo stesso dato** (§45): la produttivita' oraria calcolata per
-giorno civile dava «279 → 80 → 9 job/ora» e sembrava un crollo causato dalle cinque PR del 09-09.
-Su finestre mobili di 24 h compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e
-valori fra −0,4 e 215 job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura
-**atterraggi**, non lavoro. **L'attribuzione a #8077 / #8078 e' stata ritirata**; non reinseguirla
-senza una misura che la regga.
-
-**Comando**:
-
-```bash
-cd frontaliere-si-o-no && git fetch origin main -q
-git show origin/main:data/translation-stats-history.json > /tmp/hist.json
-node -e '
-const h=require("/tmp/hist.json");
-const a=(Array.isArray(h)?h:h.entries||[]).filter(e=>e.label==="after");
-const s=a.map(e=>e.complete/(e.complete+e.incomplete));
-const ma=[]; for(let i=2;i<s.length;i++) ma.push((s[i]+s[i-1]+s[i-2])/3);
-let chain=0,best=0; for(let i=1;i<ma.length;i++){ if(ma[i]>ma[i-1]){chain++; if(chain>best)best=chain;} else chain=0; }
-console.log(JSON.stringify({punti:ma.length,catena_corrente:chain,catena_max:best,ultimi6:ma.slice(-6).map(x=>+(x*100).toFixed(2))}));
-'
+```
+##[error]Trusted Node/npm runtime must resolve outside writable runner trees.
 ```
 
-**Trappola**: un punto dati puo' **mancare** invece di essere negativo. Il tetto di 350 minuti
-uccideva una run su sei sempre dopo `Commit translations` e prima di
-`Commit translation observability history`, cioe' cancellava esattamente il punto di questa
-condizione. Riparato dalla PR sito **#8075** (issue #42). Se la catena si spezza senza una ragione
-visibile nei dati, la prima cosa da guardare e' se il punto e' stato scritto.
+L'action del corpus e' cambiata il 2026-09-10 alle **12:44:55Z** (`7f684bba610`), ma la prima run a
+fallire e' quella delle **09:00Z**: il commit non e' il fattore scatenante. Quattro fallimenti
+intermittenti con un controllo d'ambiente puntano a una **variazione del runner**. **Non spiega lo
+stallo del residuo**, che comincia l'08-09. Le due copie dell'action differiscono (sito
+`ae2dcc04b8bb`, corpus `a4e2bdde0347`), nessun vincolo di mirror, e quella che gira e' del
+**corpus**. Scheda: `.scratch/codex-haikufix.txt`.
 
----
+### Cadenza reale
+
+Mediana **4,21 h** su 101 intervalli, **2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3
+richiedono almeno nove punti, cioe' **21-38 ore** di serie pulita.
+
+**Trappola di metodo pagata su questo dato** (§45): la produttivita' oraria per giorno civile dava
+«279 → 80 → 9 job/ora» e sembrava un crollo causato dalle PR del 09-09. Su finestre mobili di 24 h
+compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e valori fra −0,4 e 215
+job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura **atterraggi**, non lavoro.
+**L'attribuzione a #8077 / #8078 e' ritirata.**
 
 ## Condizione 2 — un annuncio nuovo e' tradotto entro 24 ore
 
