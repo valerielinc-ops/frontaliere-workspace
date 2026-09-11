@@ -418,6 +418,31 @@ Le tre cose da verificare quando atterra, **in quest'ordine**:
 Se il punto 3 non si muove mentre il punto 1 dice che la fase ha girato, allora la Fase 2d gira ma
 non libera job, e la diagnosi va riaperta **li'**, non altrove.
 
+### La coda davanti, e perche' l'attesa e' lunga
+
+La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `queue: max`: le run si
+**serializzano**. Davanti alla `34581778668` ce ne sono due, ed **entrambe portano codice
+precedente alle fix** perche' sono state create prima dei merge:
+
+| run | creata | codice |
+|---|---|---|
+| `34565924745` | 05:25:50Z | prima di #8290 (06:45Z) e #8296 (08:39Z) |
+| `34568521127` | 06:05:56Z | prima di #8290 e #8296 |
+| **`34581778668`** | **08:57:57Z** | **entrambe** |
+
+Stato della prima al 2026-09-11T09:32Z: step **30** `Phase 2c mop-up`, avviato alle 08:11:51Z,
+quindi ~80 minuti dentro quel solo passo, con **247 minuti** di run gia' spesi e sette step ancora
+da fare. Il tetto e' **350**: e' plausibile che venga uccisa al cap come la run di housekeeping, e
+in quel caso perde anche il suo punto.
+
+**Conseguenza pratica**: la prima verifica vera delle due fix non arriva prima di meta' pomeriggio
+UTC. Chi riprende il lavoro non deve aspettarsi segnali dalle due run in testa — non hanno il
+codice.
+
+**Opzione che NON ho preso**: cancellare le due run stale accorcerebbe l'attesa, ma la prima ha
+~4 ore di traduzioni Argos non ancora committate e cancellarla le butta via. E' una decisione da
+prendere consapevolmente, non un passo di routine.
+
 ## Condizione 2 — un annuncio nuovo e' tradotto entro 24 ore
 
 **Operativizzazione**: quota di `complete` nella **coorte 24-48h** (job messi in coda fra 24 e 48
