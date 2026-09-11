@@ -1679,7 +1679,71 @@ fosse cambiata. Nello stesso giro `gh run list` ha restituito righe di run di un
 mese prima, non ordinate, che il monitor ha emesso come nuove; solo un
 `sort_by(.createdAt)` esplicito ha smascherato il falso.
 
-## 52. La base di misura va fissata dopo l'ultimo fetch, non dopo il primo (L-G)
+## 52. Un job che diagnostica puo' saturare la macchina piu' del lavoro che diagnostica.
+
+Un job Codex incaricato di rimisurare 122 assert di un file di test ha lanciato
+`git fsck --no-reflogs --unreachable` su un `.git` da 21 GB: otto minuti e mezzo
+al 93% di CPU, per un'informazione che non gli serviva. Il load della macchina e'
+salito 11 -> 16 -> 35 in circa 40 minuti con `github.com` e `api.github.com`
+entrambi in timeout a 8s.
+
+La regola: il costo di un comando diagnostico va valutato contro il repository
+reale, non contro l'idea del comando; su questo clone (completo, non shallow)
+`git fsck`, `git grep` senza pathspec e `git log --all -S` sono operazioni care.
+Corollario sul brief: chiedere «censisci **tutti** i punti che...» senza dare un
+perimetro produce un `git grep` nudo — il costo e' del prompt, non dell'agente.
+
+## 53. Un semaforo che ognuno rispetta contando i propri job non e' un semaforo.
+
+Il runtime Codex di questa macchina e' condiviso fra tutte le sessioni Claude: i
+job girano sotto lo stesso `codex app-server` e si sommano, ma
+`codex-companion.mjs status` mostra **solo i job della propria sessione**.
+Nessuna sessione puo' misurare la saturazione dall'interno del proprio
+strumento. Misurato: 12 job Codex simultanei fra due sessioni, ciascuna delle
+quali ne vedeva rispettivamente 5 e 7.
+
+La regola: il numero vero si legge solo da `uptime` e dalla tabella dei processi,
+che sono condivisi; prima di lanciare, misura il totale, non il proprio.
+
+## 54. Alla domanda «hai lavoro non salvato?» non si risponde con `git status --short` letto di fretta.
+
+Una sessione ha dichiarato «nessun lavoro non committato» in tre worktree
+destinati alla cancellazione. Uno conteneva
+`tests/company-alerts-positive-chain.test.tsx`, 585 righe **non tracciate**,
+scritte dalla sessione stessa poche ore prima. Il file non e' andato perso solo
+perche' chi cancellava ha verificato l'identita' byte a byte con la copia su
+`origin/main` invece di fidarsi della dichiarazione.
+
+La regola: il predicato e' `git status --porcelain` **contato, untracked
+inclusi**, eseguito nel worktree in questione e non ricordato. La classe che
+sfugge e' esattamente quella che il comando mostra per ultima.
+
+## 55. `gh` risolve silenziosamente contro il repository sbagliato quando la working directory scivola.
+
+Due `gh pr view <numero>` di fila hanno risposto `Could not resolve to a
+PullRequest with the number of N`. Non era un guasto di GitHub: la working
+directory era finita dentro una sottocartella del repository **root**, e `gh`
+risolveva contro `frontaliere-workspace` invece che contro il sito. Il messaggio
+d'errore parla della PR, non del repository, quindi indirizza la diagnosi verso
+la PR inesistente.
+
+La regola: in un workspace multi-repo passa **sempre** `--repo <owner>/<name>`
+esplicito, e leggi «risorsa non trovata» come «forse sto guardando nel posto
+sbagliato» prima che come «la risorsa non esiste».
+
+## 56. Una sonda di liveness sbagliata rende il fallimento indistinguibile dal successo.
+
+Un monitor che verificava la vita di quattro job Codex con `pgrep -f "job-id <id>"`
+ha emesso «TUTTI I JOB TERMINATI» mentre tutti e quattro erano `running`
+e tredici worker erano attivi sulla macchina. La conseguenza non e' il rumore:
+e' che l'evento **conclusivo** era falso, e senza una verifica indipendente
+sarebbe stato riportato come esito. La regola: la liveness di un job si legge
+dalla sua fonte autoritativa — il JSON di stato del job — non dalla tabella dei
+processi; e ogni evento terminale emesso da un monitor va verificato prima di
+essere riportato, perche' un monitor che sbaglia non sbaglia in modo rumoroso,
+sbaglia in modo convincente.
+
+## 57. La base di misura va fissata dopo l'ultimo fetch, non dopo il primo (L-G)
 
 **Regola:** in un repository con bot e merge frequenti, il ref «corrente» è una
 affermazione temporale. Fare fetch, creare la worktree e misurare molto dopo può
@@ -1692,7 +1756,7 @@ corse.
 è stata quindi ribasata e la misura definitiva, inclusa la non-regressione, è
 stata eseguita sulla seconda SHA.
 
-## 53. Una worktree sparse può simulare un difetto d'import se manca la foglia (L-H)
+## 58. Una worktree sparse può simulare un difetto d'import se manca la foglia (L-H)
 
 **Regola:** i symlink o gli import locali verso directory escluse dallo sparse
 checkout vanno materializzati per il path minimo necessario prima di classificare
@@ -1704,7 +1768,7 @@ codice e non va mescolato ai rossi dell'oracolo.
 si sono eliminati gli errori di risoluzione, mentre i cinque rossi comportamentali
 sono rimasti identici nelle due corse sulla stessa base.
 
-## 54. Il denominatore di un oracolo dipende anche dai rami che diventano raggiungibili (L-I)
+## 59. Il denominatore di un oracolo dipende anche dai rami che diventano raggiungibili (L-I)
 
 **Regola:** non trattare un totale storico come proprietà statica del file.
 Un assert iniziale che fallisce o un export mancante può impedire di eseguire
@@ -1716,7 +1780,7 @@ il popup fosse raggiungibile; dopo #8105 e il reinserimento dei tre ID C6-bis, l
 misura completa è diventata `122/122`. Il report distingue i cinque ID realmente
 rossi iniziali dai tre C6-bis aggiunti al perimetro dichiarato.
 
-## 55. Query accessibili non univoche possono trasformare un verde DOM in timeout (L-J)
+## 60. Query accessibili non univoche possono trasformare un verde DOM in timeout (L-J)
 
 **Regola:** se un test UI usa fake timers, dopo un click verificare che il
 selettore scelto identifichi un solo nodo. Un `label` e il controllo associato
