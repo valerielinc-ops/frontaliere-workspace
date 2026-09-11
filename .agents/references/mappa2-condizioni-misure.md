@@ -388,6 +388,38 @@ compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e valori f
 job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura **atterraggi**, non lavoro.
 **L'attribuzione a #8077 / #8078 e' ritirata.**
 
+## Sono atterrati due punti nuovi, e il livello e' crollato — ma NON per merito della #8290
+
+Commit **`a86460e96a8`** (2026-09-11T10:16:16Z, «🌐 Auto-translate pending jobs»), scritto dalla run
+**`34565924745`**, ha aggiunto due punti a `data/translation-stats-history.json` del **sito**:
+
+| punto | total | incomplete | complete |
+|---|---:|---:|---:|
+| 2026-09-11T01:21:59Z | 32.602 | 6.571 | 79,8% |
+| 2026-09-11T01:26:57Z | 32.602 | 6.571 | 79,8% |
+| **2026-09-11T08:06:57Z** | **32.988** | **9.212** | **72,1%** |
+| **2026-09-11T08:11:45Z** | **32.988** | **9.212** | **72,1%** |
+
+Il crollo di **7,7 punti** e' quello previsto. **Ma la #8290 non c'entra**: la run `34565924745` e'
+stata creata alle **05:25:50Z**, cioe' **prima** che la #8290 fosse mergiata (06:45:55Z), quindi
+porta codice precedente. Attribuirgliela sarebbe l'errore di §45 — e qui la cronologia lo esclude
+in modo netto.
+
+Cosa e' davvero: e' **la discontinuita' che la #8290 elimina**, vista dal lato opposto. Il punto
+precedente leggeva **6.571 su 32.602** dal worktree transitorio della sua run; questo legge
+**9.212 su 32.988** da un albero il cui totale **coincide esattamente** con quello che ho misurato
+io su `origin/main`. Cioe' la sovrastima non e' stata corretta dalla fix: si e' semplicemente
+consumata da se', perche' la run successiva ha dovuto ripartire dalla realta'.
+
+**Divario non spiegato, dichiarato**: il punto dice **9.212** incomplete, la mia misura diretta con
+`isIncomplete` importata sullo stesso totale di 32.988 ne conta **9.713**. Sono **501** di
+differenza. Il totale combacia al job, il numeratore no. Prima di usare 9.212 come baseline della
+condizione 1 quel divario va chiuso — e' esattamente il tipo di scarto che in questa mappa e' gia'
+costato due ritrattazioni.
+
+**Per la condizione 1**: la catena dei 7 rialzi riparte da **72,1%**, non da 79,8%. I punti
+precedenti restano non confrontabili.
+
 ## Cosa guardare alla prossima run — la verifica che chiude il giro
 
 La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' la
