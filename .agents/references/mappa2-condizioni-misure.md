@@ -197,6 +197,27 @@ stallo del residuo**, che comincia l'08-09. Le due copie dell'action differiscon
 `ae2dcc04b8bb`, corpus `a4e2bdde0347`), nessun vincolo di mirror, e quella che gira e' del
 **corpus**. Scheda: `.scratch/codex-haikufix.txt`.
 
+**Riparato: PR corpus #1352, mergiata il 2026-09-11 alle 06:46:51Z.** Verificato su
+`origin/main` del corpus, non sul rapporto: ogni ramo di rifiuto ora chiama `disable_haiku`, che
+scrive `available=false`, azzera `HAIKU_FALLBACK_GATE` e **esce 0**; lo step successivo e' gated su
+`steps.trusted_toolchain.outputs.available == 'true'`; anche il fallimento del sottoshell degrada
+con un `::warning::`. L'hardening non e' stato aggirato — nessun `|| true` — e `runner_home` e'
+stato **aggiunto** alle radici vietate, quindi il controllo e' piu' stretto di prima. La
+conseguenza che conta per la mappa: `Capture translation observability baseline`, cioe' il passo che
+scrive il punto della condizione 1, non muore piu' per indisponibilita' di un **fallback**.
+La PR **#1354** (aperta) e' un follow-up di hardening sui componenti scrivibili.
+
+**Cio' che non e' ancora provato.** Il rapporto dell'agente afferma che dopo la fix resta respinto
+`/opt/hostedtoolcache/node/22.23.2/x64/bin/node` con modalita' `0777` — che e' il runtime reale del
+runner: se fosse vero, la corsia Haiku sarebbe spenta **sempre**, e in silenzio. Ma il log della run
+riuscita `34541569329` (10-09 23:18Z) mostra lo stesso candidato `mode=777 owner=1001` con lo step
+`trusted_toolchain` chiuso `outcome=success` e lo step seguente che consuma `TRUSTED_NODE`: li' era
+stato **accettato**. L'affermazione del rapporto e' una lettura del predicato, non una misura
+dell'ambiente (vedi `codex-agent-lessons.md` §50). La #1352 aggiunge a `report_runtime_candidates`
+il `PATH` e l'esito `trusted_prefix` / `path_components_trusted` per ogni candidato: **la prima run
+dopo il merge risponde da sola**. Se stampa `available=false`, il fallback e' spento e va deciso se
+e' accettabile; se stampa `available=true`, la questione e' chiusa.
+
 ### Cadenza reale
 
 Mediana **4,21 h** su 101 intervalli, **2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3
