@@ -1864,3 +1864,36 @@ laconico.
 Corollario operativo: il rilancio è la risposta corretta, ma **prima** controlla che il job non
 abbia già consegnato — e se nel frattempo hai imparato qualcosa che cambia la premessa della
 scheda, rilanciare la scheda vecchia è il modo più caro di scoprire che era sbagliata.
+
+## §45 — una serie scritta al commit misura atterraggi, non lavoro: le stime su finestra breve non reggono
+
+Quando la grandezza che leggi viene scritta da un job periodico al momento del commit, la serie non
+registra il lavoro mentre avviene: registra **quando il lavoro atterra**. Se il job dura ore e piu'
+job si sovrappongono, il lavoro arriva a blocchi, e ogni stima di velocita' su una finestra
+paragonabile alla durata del job e' dominata dal caso.
+
+Qui le run duravano 5-13 ore. Il conteggio per **giorno civile** dava una sequenza «279 → 80 → 9
+job/ora» che si leggeva come un crollo di trenta volte subito dopo cinque merge, con due colpevoli
+plausibili e un diff da aprire. Rifatta la stessa misura su **finestre mobili di 24 ore ancorate
+all'ultimo punto**, compariva una finestra morta di 28 ore **prima** di quei merge, e un intervallo
+di valori da −0,4 a 215 job/ora. La causa attribuita cadeva; la sequenza era un campione di una
+grandezza che oscilla, non una tendenza.
+
+Regola operativa: **la finestra di misura dev'essere molto piu' lunga della durata del produttore.**
+Se il produttore dura ore, una misura giornaliera e' rumore e una misura su piu' giorni e' un dato.
+Il bucket per giorno civile e' particolarmente insidioso perche' sembra neutrale: e' un taglio
+arbitrario allineato alla mezzanotte, non al fenomeno.
+
+Il controllo che smaschera il problema costa una riesecuzione: **rifai lo stesso conteggio su
+finestre mobili ancorate all'ultimo punto invece che sui giorni civili.** Se le due letture
+raccontano storie diverse, la storia vera e' quella che non dipende dal punto in cui hai tagliato.
+
+Corollario, che e' la parte piu' cara da imparare: quando una misura rumorosa **coincide nel tempo**
+con un cambiamento che hai appena fatto, la coincidenza e' l'ipotesi piu' attraente e la meno
+verificata. Prima di aprire il diff, guarda se il fenomeno esisteva **anche prima**. Se esisteva,
+l'attribuzione va ritirata subito e per intero: tenerla «come sospetto» costa a chi legge dopo di
+te un'indagine su una pista morta.
+
+Cio' che sopravvive alla critica e' solo cio' che e' misurato su un orizzonte piu' lungo del
+produttore. Qui: il residuo piatto per tre giorni, e la sua composizione per eta'. Quelli si
+possono usare.

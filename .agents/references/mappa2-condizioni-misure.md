@@ -88,6 +88,34 @@ corpus. Scheda: `.scratch/codex-c1art.txt`.
 **2,31 h** sugli ultimi 20, massimo 9,19 h. Sette rialzi MA3 richiedono almeno nove punti, cioe'
 **21-38 ore** di serie pulita.
 
+### Ma il blocco non sono gli artefatti: il residuo e' piatto
+
+Escludendo dalla serie i sei punti con la firma dell'artefatto, la catena corrente resta **0**.
+Gli artefatti vanno riparati, ma non sono cio' che tiene chiusa la condizione.
+
+| ora | complete | incomplete | totale | quota |
+|---|---|---|---|---|
+| 2026-09-08T10:51 | 22.814 | **6.013** | 28.827 | 79,14% |
+| 2026-09-09T10:39 | 25.601 | **6.671** | 32.272 | 79,33% |
+| 2026-09-10T11:58 | 26.003 | **6.494** | 32.497 | 80,02% |
+| 2026-09-11T01:26 | 26.031 | **6.571** | 32.602 | 79,84% |
+
+In tre giorni `incomplete` non scende. La quota sale di 0,7 pp e viene quasi tutta dal
+denominatore (`complete` +3.217 contro `total` +3.775): **oggi la quota sale per diluizione**, e
+sette rialzi MA3 su una grandezza mossa dall'ingresso sono una scommessa sul rumore.
+
+Incrociando con le fasce della condizione 2: **~3.300 dei 6.571 `incomplete` hanno piu' di sette
+giorni**. Le condizioni 1 e 2 sono due viste della stessa coda ferma. Scheda:
+`.scratch/codex-c0drain.txt` — la domanda e' se quel residuo entri mai nei primi `effectiveMax`
+(default 100) job che una run seleziona.
+
+**Trappola di metodo pagata su questo stesso dato** (§45): la produttivita' oraria calcolata per
+giorno civile dava «279 → 80 → 9 job/ora» e sembrava un crollo causato dalle cinque PR del 09-09.
+Su finestre mobili di 24 h compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e
+valori fra −0,4 e 215 job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura
+**atterraggi**, non lavoro. **L'attribuzione a #8077 / #8078 e' stata ritirata**; non reinseguirla
+senza una misura che la regga.
+
 **Comando**:
 
 ```bash
