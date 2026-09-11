@@ -441,6 +441,65 @@ verificando che gli import relativi si risolvano) cosi' che la sua `ROOT` non pu
 
 ---
 
+## Perche' i job restano `incomplete`: attribuzione al ramo, 2026-09-11
+
+Misurato da me su `origin/main` del sito (`6a4441ee59c`) applicando `isIncomplete` **importata** e
+poi ricalcando i suoi rami **nell'ordine del sorgente** per attribuire ogni job al **primo** che
+scatta. Strumento: `.scratch/why2448.mjs`.
+
+```bash
+W=<dir>; git archive origin/main scripts | tar -x -C $W
+for f in $(git ls-tree -r origin/main --name-only | grep -E '^data/[^/]+\.json$'); do
+  git show origin/main:$f > $W/$f; done      # le lib caricano dati a import-time
+SRC=$W REF=origin/main RELOCALIZE_ALLOW_NO_TRAFFIC=1 \
+  BAND_LO_H=24 BAND_HI_H=48 node .scratch/why2448.mjs
+```
+
+**Coorte 24-48h — la condizione 2.** 978 job, **193 incomplete**, 80,3% complete (riproduce la
+misura precedente: 979/193).
+
+| causa | job | quota |
+|---|---:|---:|
+| **`titolo-non-tradotto`** | **174** | **90,2%** |
+| non attribuito | 9 | 4,7% |
+| `slot-desc-corta` | 5 | 2,6% |
+| `desc-copia-sorgente` | 4 | 2,1% |
+| `slot-titolo-assente` | 1 | 0,5% |
+
+Per locale: `it` 77, `en` 49, `de` 29, `fr` 19.
+
+**Residuo oltre i sette giorni — la condizione 1.** 24.694 job, **6.465 incomplete** (conferma i
+6.464 misurati prima), 73,8% complete.
+
+| causa | job | quota |
+|---|---:|---:|
+| **`titolo-non-tradotto`** | **4.152** | **64,2%** |
+| `desc-uguale-normalizzata` | 1.476 | 22,8% |
+| non attribuito | 407 | 6,3% |
+| `desc-copia-sorgente` | 344 | 5,3% |
+| `slot-desc-corta` | 46 | 0,7% |
+| `slot-titolo-assente` | 40 | 0,6% |
+
+### Cosa ne segue
+
+`titolo-non-tradotto` e' il ramo `titleLooksUntranslated` di `isIncomplete`, ed e'
+**esattamente** il predicato che `scripts/fix-untranslated-titles.mjs` usa per selezionare cosa
+riparare. Quindi la Fase 2d — quella che non gira mai — attacca:
+
+- il **90,2%** del divario della **condizione 2**;
+- il **64,2%** del residuo della **condizione 1**.
+
+Il resto della condizione 1 e' un problema **diverso**: 1.820 job (28,1%) hanno la descrizione
+uguale alla sorgente, normalizzata o letterale. La Fase 2d **non li tocca** — non modifica le
+descrizioni, lo dichiara il suo stesso docstring. Serve una corsia per le descrizioni, e oggi
+quella corsia e' la Fase 2b, che rende 26-42 job per run.
+
+**Limite dichiarato della misura**: il **6,3%** non attribuito (407 job oltre i sette giorni, 9
+nella coorte 24-48h) e' incompleto per colpa del mio ricalco dei rami, non del predicato:
+`isIncomplete` li dichiara incomplete e il mio classificatore non trova quale ramo scatta. Il
+conteggio degli `incomplete` resta quello canonico; e' solo l'attribuzione che ha questo buco, e
+va chiuso prima di usare queste quote per dimensionare qualcosa.
+
 ## Condizione 3 — CHIUSA il 2026-09-11
 
 **Formulazione**: fra i job `complete` il cui titolo sorgente tedesco porta una forma di genere,
