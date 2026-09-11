@@ -871,10 +871,14 @@ falliscono con `Could not resolve host`.
 | `codex-c1art.txt` | **consumata** — ha trovato l'ordine degli step |
 | `codex-c0loss.txt` | **consumata** — ha smentito «la completezza si perde» (4 job su 1.989) |
 | `codex-c1pred.txt` | **consumata** — ha chiuso l'aritmetica del divario 6.571/9.720 |
-| `codex-afterfix.txt` | **viva, implementazione** — sposta la misura sulla tree pubblicata (sito) |
-| `codex-haikufix.txt` | **consumata** — PR corpus #1352 mergiata 11-09 06:46Z; follow-up #1354 aperta |
+| `codex-afterfix.txt` | **consumata** — PR sito #8290, mergiata 11-09 06:45:55Z |
+| `codex-haikufix.txt` | **consumata** — PR corpus #1352 (06:46:51Z) e #1354 (07:52:40Z), entrambe mergiate. **Correggono pero' la copia che `generate-article.yml` esegue, non quella del ciclo di traduzione** |
 | `codex-c0drain.txt` | **ritirata** — premessa smentita: il cap e' 900 non 100, la riserva oldest-first esiste e la coda vecchia e' in cima. Risposta misurata direttamente, vedi «La causa prima» |
-| `codex-m24b.txt` | **viva, non lanciata** — punti dati di #24, non bloccante |
+| `codex-m24b.txt` | **consumata** — 7 punti validi su 10; mediana 17,45%; #24 vale ~7 job/run e non e' la leva |
+| `codex-1354fix.txt` | **consumata** — maschera ottale `0200`, PR corpus #1354 mergiata |
+| `codex-p2d.txt` | **consumata** — PR sito #8296, mergiata 11-09 08:39:12Z, gia' propagata nel corpus (#1366) |
+| `codex-descr.txt` | **superata** — sostituita da `codex-deit.txt`, piu' stretta |
+| `codex-deit.txt` | **NON consumata** — perche' il pivot `de->en->it` renda l'input invariato. Quattro job Codex di fila uccisi per memoria esaurita; la scheda contiene gia' l'elenco di cio' che e' stato escluso |
 
 L'ordine, se ne lanci una sola: **`afterfix`**. Finche' la misura e' rotta, ogni altro numero sulla
 condizione 1 e' una lettura di un albero di passaggio.
