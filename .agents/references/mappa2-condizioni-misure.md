@@ -17,11 +17,16 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 04:52Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3. Il 4 di 7 del
-09-09 e' stato azzerato dal punto anomalo del 2026-09-10T00:16Z.
+**Stato al 2026-09-11 06:30Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3.
+
+**Ma la catena non e' il problema.** La serie su cui si misura questa condizione registra il
+**worktree transitorio** di ogni run, non l'albero pubblicato (vedi «La causa, chiusa» sotto): il
+suo errore varia con quanti commit concorrenti atterrano durante la run. **Una catena di rialzi su
+quella serie non prova convergenza.** La fix e' dispacciata; se passa, i 102 punti esistenti non
+sono confrontabili con i futuri e la condizione riparte da zero.
 
 **Dove sta il dato**: `data/translation-stats-history.json` nel repo sito, voci con
-`label === "after"`. Ne arriva una ogni ~2,2 ore.
+`label === "after"`.
 
 ### Il blocco: il residuo e' piatto, e due terzi ha piu' di una settimana
 
@@ -241,7 +246,7 @@ condizione.
 (worktree sparse via `frontaliere-si-o-no/scripts/dev/fast-worktree.sh`, oppure sotto `.scratch/`
 verificando che gli import relativi si risolvano) cosi' che la sua `ROOT` non punti al repo vero.
 
-**Scheda pronta**: `.scratch/codex-m2b.txt`.
+**Scheda gia' consumata**: `.scratch/codex-m2b.txt` — rientrata il 2026-09-11, il numero sopra e' il suo.
 
 ---
 
@@ -287,28 +292,6 @@ come numeratore. Ha reso 42,72% e non e' una misura di qualita'.
 positivi distruggeva titoli buoni.
 
 ---
-
-## La domanda che resta aperta: la classificazione cambia senza che i dati cambino
-
-Non e' della condizione 3, ma e' emersa dalla sua misura ed e' la stessa cosa che si vede sotto le
-condizioni 1 e 2.
-
-Con lo **stesso** predicato, `incomplete` passa da **6.860** (09-09 04:09Z) a **9.959** (09-09
-19:34Z). Ma i dati sono fermi. Misurato direttamente sui commit di quella giornata:
-
-- fra le **15:26Z** e le **19:34Z**, su 32.346 id in comune cambiano **1** titolo sorgente, **0**
-  `sourceLang`, **0** `company`, **2** `location`, **3** titoli italiani;
-- i job con tutte e quattro le slot di **titolo** piene: 32.417 → 32.360 (−57, tutti da potatura);
-- i job con **descrizione** sopra i 120 caratteri in tutte e quattro le locale: 32.385 → 32.328;
-- la guardia sulla locale sorgente (`normSrc/normBase < 0.55`) scatta su **zero** job in tutti i
-  commit controllati.
-
-Resta in piedi solo **`titleLooksUntranslated`** come ramo che flippa, e nessun input osservabile
-che lo giustifichi. E' lo stesso fenomeno dei cinque punti anomali dello storico visto dall'altro
-lato: li' `incomplete` salta a 9.554 e torna a 6.603 senza che nessuna run traduca.
-
-Comandi usati per queste tre contro-misure: `.scratch/slotcount.mjs`, `.scratch/desccount.mjs`,
-`.scratch/cmpfields.mjs` (variabili `REF`, oppure `A` e `B`).
 
 ## L'unico work item aperto: #24
 
@@ -394,18 +377,23 @@ Sempre in background, sempre con output su file. `CODEX_COMPANION_SANDBOX=danger
 e' opzionale: senza, il companion ricade su `workspace-write`, la rete e' chiusa e i comandi
 falliscono con `Could not resolve host`.
 
-I tre `<nome>` da usare: `m3reg`, `m2b`, `m24b`.
+### Le schede: quali sono vive, al 2026-09-11 06:30Z
 
-### L'ordine, e perche' e' questo
+| scheda | stato |
+|---|---|
+| `codex-m3reg.txt` | **RITIRATA** — cercava la causa di una regressione che non esiste (vedi condizione 3) |
+| `codex-m2b.txt` | **consumata** — ha reso 786/979 = 80,3% sulla coorte 24-48h |
+| `codex-c3pred.txt` | **consumata** — ha chiuso la condizione 3 |
+| `codex-c1art.txt` | **consumata** — ha trovato l'ordine degli step |
+| `codex-c0loss.txt` | **consumata** — ha smentito «la completezza si perde» (4 job su 1.989) |
+| `codex-c1pred.txt` | **consumata** — ha chiuso l'aritmetica del divario 6.571/9.720 |
+| `codex-afterfix.txt` | **viva, implementazione** — sposta la misura sulla tree pubblicata (sito) |
+| `codex-haikufix.txt` | **viva, implementazione** — ripara il controllo Trusted Node/npm (corpus) |
+| `codex-c0drain.txt` | **viva, non lanciata** — il residuo oltre i 7 giorni entra mai nei primi `effectiveMax`? Denominatore **6.464** |
+| `codex-m24b.txt` | **viva, non lanciata** — punti dati di #24, non bloccante |
 
-1. **`m3reg`** — la causa della regressione della condizione 3. Va per prima perche' e' l'unica
-   che va nella direzione sbagliata: finche' la causa e' aperta, le due misure consecutive non
-   possono nemmeno partire.
-2. **`m2b`** — coorte 24-48h. E' una lettura sola e dice se la PR #8080 ha funzionato.
-3. **`m24b`** — punti dati di #24. Non e' bloccante: la issue si chiude da se' quando i punti
-   arrivano a 10.
-
-Se ne lanci una sola, lancia `m3reg`.
+L'ordine, se ne lanci una sola: **`afterfix`**. Finche' la misura e' rotta, ogni altro numero sulla
+condizione 1 e' una lettura di un albero di passaggio.
 
 ### Terminarle: **per ID, mai per firma**
 
