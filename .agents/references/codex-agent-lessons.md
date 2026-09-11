@@ -1976,3 +1976,27 @@ artefatto, non riportata accanto alle altre due.
 Cio' che resta valido nel confronto stretto sono i gruppi che **non** dipendono dalla finestra: qui
 i 209 job gia' incompleti allora e ancora incompleti oggi, e i 4 che hanno perso la completezza.
 Sono quelli che rispondono alla domanda.
+
+## §50 — nel rapporto finale, «cosa resta rifiutato dopo la fix» e' una previsione, non una misura
+
+Una scheda di implementazione che chiede «cosa continua a essere respinto dopo la fix, con un
+esempio» riceve quasi sempre una risposta scritta **leggendo il predicato**, non eseguendolo. E' la
+forma piu' insidiosa di rapporto sbagliato, perche' e' letteralmente vera come lettura del codice e
+falsa come descrizione di cio' che accadra'.
+
+Il discriminante da applicare a ogni riga del rapporto e': **l'agente poteva raggiungere l'ambiente
+in cui quella riga sarebbe vera?** Un predicato che decide in base a permessi, proprietario, `PATH`
+o immagine di un runner non e' verificabile da un checkout locale: qualunque affermazione su come si
+comportera' li' e' un'inferenza. Se il rapporto non la marca come tale, la marchi tu prima di
+riportarla nella mappa.
+
+La prova, quando esiste, e' un log gia' prodotto da quell'ambiente. Qui bastava il log di **una run
+riuscita** per vedere che il candidato dichiarato «respinto» era stato in realta' **accettato**: lo
+step si era chiuso `outcome=success` e lo step successivo aveva consumato il valore che il
+predicato avrebbe dovuto negare. Un rapporto e il log della stessa run sono due fonti, e quando
+divergono vince il log.
+
+Corollario sulla forma della fix: quando la riparazione trasforma un **fallimento rumoroso** in un
+**degrado silenzioso**, la scheda deve pretendere che nello stesso commit entri la diagnostica che
+dice da che parte e' andata. Senza, hai comprato la run verde al prezzo del segnale, e la prossima
+domanda sullo stesso componente non avra' piu' una fonte a cui rispondere.
