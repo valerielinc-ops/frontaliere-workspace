@@ -1936,3 +1936,43 @@ Nel lancio di un job lungo il danno e' sproporzionato: il redirect crea (o non c
 output altrove, e ti accorgi del problema solo quando vai a leggere il risultato. **Nella riga che
 lancia un agente, scrivi sempre il path assoluto della scheda e quello del file di output**, senza
 dipendere dalla directory corrente.
+
+## §48 — un numero derivato per differenza non e' una misura, e sbaglia di quanto vuole
+
+Quando hai tre fasce misurate e un totale, la quarta fascia sembra gratis: la ottieni per
+sottrazione e la scrivi accanto alle altre come se avesse lo stesso statuto. Non ce l'ha. La
+sottrazione eredita **tutti** gli scarti delle grandezze che la compongono, e quegli scarti non si
+vedono perche' il numero esce pulito.
+
+Qui la stima per differenza dava «~3.300 job oltre i sette giorni». La misura diretta, con lo stesso
+predicato e lo stesso albero, ne dava **6.464**: il doppio. Nel frattempo quel 3.300 era gia' stato
+pubblicato, aveva gia' dimensionato una scheda, e sarebbe diventato il denominatore di un lavoro.
+
+Il costo della misura vera era una fascia in piu' nello stesso script che gia' calcolava le altre
+tre: una riga. **Se stai gia' iterando su tutta la popolazione, misura tutte le fasce, non solo
+quelle della domanda di oggi.** La fascia che non ti serve adesso e' quella che ti servira' fra
+mezz'ora, e allora sarai tentato di derivarla.
+
+Regola operativa: **marca esplicitamente ogni numero derivato**, nel commento, nella tabella e nel
+commento alla issue. Un lettore — incluso te fra un'ora — non distingue una stima da una misura se
+non gliela distingui tu, e le userà con lo stesso peso.
+
+## §49 — la finestra di confronto va scelta piu' larga della coorte, o il risultato la misura
+
+Un confronto «oggi contro N giorni fa» su una popolazione definita **per eta'** ha una trappola che
+sembra un risultato: gli elementi piu' giovani della coorte non possono esistere nel ref vecchio,
+e appaiono come «nuovi» in una quota che sembra dire qualcosa sul fenomeno.
+
+Qui la fascia era «2-7 giorni» e il ref di confronto ne aveva **cinque**. Il conteggio rendeva
+«89,3% non esistenti nel ref vecchio», un numero che invitava a concludere che il backlog fosse
+quasi tutto nuovo. Ma i job visti per la prima volta tre, quattro o cinque giorni fa **non
+potevano** esserci: quel 89,3% misurava la finestra scelta, non il backlog.
+
+Regola operativa: **il ref di confronto dev'essere piu' vecchio dell'estremo superiore della
+coorte**, con margine. Per una fascia «2-7 giorni» il confronto parte da almeno otto giorni fa. Se
+non puoi allargarlo, allora la quota «non esistenti» **non e' un risultato** e va dichiarata come
+artefatto, non riportata accanto alle altre due.
+
+Cio' che resta valido nel confronto stretto sono i gruppi che **non** dipendono dalla finestra: qui
+i 209 job gia' incompleti allora e ancora incompleti oggi, e i 4 che hanno perso la completezza.
+Sono quelli che rispondono alla domanda.
