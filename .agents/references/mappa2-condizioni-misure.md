@@ -510,6 +510,10 @@ Stato verificato al 2026-09-11T17:33Z: la `34581778668` e' `success`, la `345968
 alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
 raggiunto.
 
+La housekeeping corrente e' iniziata alle 17:15:45Z e, alle 17:41Z, dura circa 26 minuti. Nelle
+sei run storiche comparabili la stessa Phase 1 e' durata **91-99 minuti**: non e' un blocco e non va
+cancellata per accorciare la coda.
+
 **Conseguenza pratica**: la prima verifica vera di #8305 arriva dalla prima run non-housekeeping
 che superera' il gate, probabilmente la `34624763248`; il valore va verificato nel log all'avvio.
 Non bisogna usare la `34581778668`, la `34596819197` o la manuale come prova del fixer normalizzato.
