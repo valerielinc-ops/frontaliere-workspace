@@ -1897,3 +1897,42 @@ te un'indagine su una pista morta.
 Cio' che sopravvive alla critica e' solo cio' che e' misurato su un orizzonte piu' lungo del
 produttore. Qui: il residuo piatto per tre giorni, e la sua composizione per eta'. Quelli si
 possono usare.
+
+## §46 — una serie prodotta da un processo va verificata applicando il predicato all'albero che quel punto descrive
+
+Un punto di serie storica porta un nome di campo — `incomplete`, `errors`, `pending` — e quel nome
+invita a credere di sapere quale predicato l'ha prodotto. La verifica costa un comando e quasi
+nessuno la fa: **prendi il commit che ha scritto quel punto, applica il predicato che credi sia il
+suo all'albero di quel commit, e confronta.**
+
+Qui il punto diceva `6.571 incomplete su 32.602`. Applicando `isIncomplete` importata dal sorgente
+allo **stesso commit** venivano `9.720 su 33.000`: 3.149 job, 9,3 punti percentuali. Il nome del
+campo era giusto, la funzione citata nel codice era giusta — `classifyJob` delega davvero al
+predicato canonico — e i due numeri erano lo stesso diversi.
+
+Il valore del controllo non e' trovare il colpevole: e' **sapere se stai inseguendo la grandezza
+giusta prima di spendere giornate sulla sua causa**. Una condizione di chiusura costruita sulla
+serie insegue quello che la serie misura, non quello che il suo nome promette.
+
+Il modo di non ripagarlo, quando scopri due numeri: **escludi per comando, non per ragionamento**, e
+scrivi ogni esclusione con la riga che la regge. Qui sono cadute sei ipotesi prima di arrivare alla
+domanda vera — la formula della quota, le esenzioni, le costanti d'ambiente, una PR sospettata,
+l'insieme dei file letti, la sparse-checkout — e ognuna sarebbe stata una diagnosi plausibile da
+consegnare a un agente. Le sei esclusioni sono costate meno di una diagnosi sbagliata.
+
+Corollario sul confronto fra misure: **due numeri che si somigliano non sono per questo la stessa
+grandezza.** Qui la condizione 1 stava al 79,84% sulla serie e la condizione 2 all'80,3% misurata
+col predicato canonico. La somiglianza li ha fatti leggere come coerenti fra loro, e non lo erano.
+Prima di confrontare due metriche, chiedi da quale **produttore** viene ognuna, non solo con quale
+formula e' calcolata.
+
+## §47 — il `cwd` del tool Bash deriva: nel comando di lancio usa path assoluti
+
+Un `cd` dentro un comando precedente puo' lasciare la sessione in un'altra directory, e il comando
+dopo — scritto con path relativi perche' i primi lanci funzionavano — fallisce con
+`No such file or directory` su un file che esiste.
+
+Nel lancio di un job lungo il danno e' sproporzionato: il redirect crea (o non crea) il file di
+output altrove, e ti accorgi del problema solo quando vai a leggere il risultato. **Nella riga che
+lancia un agente, scrivi sempre il path assoluto della scheda e quello del file di output**, senza
+dipendere dalla directory corrente.
