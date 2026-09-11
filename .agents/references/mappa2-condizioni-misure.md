@@ -1,6 +1,6 @@
 # Mappa wayfinder #2 — le tre condizioni di chiusura, con lo strumento che le misura
 
-Stato al **2026-09-11 17:15Z**. Questo file esiste perche' i numeri della mappa scadono e i
+Stato al **2026-09-11 17:25Z**. Questo file esiste perche' i numeri della mappa scadono e i
 comandi che li producono si perdono fra le sessioni. Chi riprende parte da qui.
 
 Mappa: https://github.com/valerielinc-ops/frontaliere-workspace/issues/2
@@ -17,7 +17,7 @@ transizioni storiche la catena massima mai raggiunta era **5**. Su media mobile 
 storico e' **22**, quindi la condizione riformulata e' raggiungibile. Questo e' il motivo della
 riformulazione, non una comodita'.
 
-**Stato al 2026-09-11 17:15Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
+**Stato al 2026-09-11 17:25Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3; il punto
 `2026-09-11T17:04:51Z` e' il primo punto confrontabile dopo la #8290.
 
 **La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
@@ -505,7 +505,7 @@ La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `que
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
 | **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T17:16Z: la `34581778668` e' `success`, la `34596819197` e'
+Stato verificato al 2026-09-11T17:25Z: la `34581778668` e' `success`, la `34596819197` e'
 `in_progress` nella Phase 1 e la `34624763248` e' `pending`. La prima ha completato la Phase 2d
 alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
 raggiunto.
@@ -526,8 +526,8 @@ ore fa). Sotto le 24h il ritardo e' legittimo, quindi la fascia parte da 24.
 **Misura precedente, al 2026-09-11T05:06:37Z**, su `origin/main` `acf31d247f5b0af182a52b0a84800cc759c716fc`,
 565 slice non vuote e 30 vuote: **786 / 979 = 80,3%**. Bersaglio ~100%.
 
-**Misura corrente, al 2026-09-11T16:39:09Z**, su `origin/main`
-`ee897ee518d520749ba5f7b7e2e5088c1520013b`: **170 / 240 = 70,8%**. Il denominatore è cambiato
+**Misura corrente, al 2026-09-11T17:24:57Z**, su `origin/main`
+`797694e01ac9463654569971ee0d5b32247b26c2`: **171 / 240 = 71,3%**. Il denominatore è cambiato
 insieme all’albero pubblicato; questa è la lettura da usare per il controllo corrente, non un
 confronto diretto di trend con la misura precedente.
 
@@ -546,13 +546,13 @@ Nella misura corrente lo script locale di misura conta **33.190 job**, tutti ris
 
 | fascia | complete / denominatore | quota |
 |---|---|---|
-| sotto 24h | 891 / 1.857 | 48,0% |
-| **24-48h** | **170 / 240** | **70,8%** |
-| 2-7 giorni | 4.029 / 6.133 | **65,7%** |
-| 7-30 giorni | 8.008 / 11.477 | **69,8%** |
-| >30 giorni | 10.205 / 13.483 | **75,7%** |
+| sotto 24h | 899 / 1.857 | 48,4% |
+| **24-48h** | **171 / 240** | **71,3%** |
+| 2-7 giorni | 4.068 / 6.133 | **66,3%** |
+| 7-30 giorni | 8.034 / 11.477 | **70,0%** |
+| >30 giorni | 10.214 / 13.483 | **75,8%** |
 
-Nella misura corrente la fascia 2-7 giorni sta **5,1 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
+Nella misura corrente la fascia 2-7 giorni sta **5,0 punti sotto** la 24-48h. Se l'unico fenomeno fosse il ritardo di
 lavorazione la completezza sarebbe monotona crescente con l'eta'. Due letture, lavori opposti:
 
 1. **La completezza si perde** — job gia' `complete` tornano `incomplete`. Allora il problema e' la
