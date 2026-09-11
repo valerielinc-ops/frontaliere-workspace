@@ -453,12 +453,17 @@ conta 36 transizioni `incomplete_to_complete` e 92 `incomplete_to_flagged`; il p
 rifiutato la selezione per `capacity_exceeded` (`5.154` pending oltre il limite selezionabile),
 senza chiamate o write di produzione.
 
-La prima run utile per il fixer delle descrizioni e' **`34596819197`** (creata 2026-09-11T12:01:17Z,
-`event=schedule`, head `8b22a8658`), partita alle **17:11:32Z** e ora `in_progress`. Sul suo
-workflow sono presenti `translate-pending.yml:334-338`, il gate schedulato e
-`UNTRANSLATED_DESCRIPTION_FIX_DEADLINE_MS: "14400000"`. La run manuale **`34606194108`** non e'
-una misura alternativa: essendo `workflow_dispatch`, salta per costruzione i blocchi condizionati a
-`event_name == 'schedule'`.
+La run **`34596819197`** (creata 2026-09-11T12:01:17Z, `event=schedule`, head `8b22a8658`) sembrava
+la prima utile per il fixer delle descrizioni, ma il log live ha chiuso il dubbio: ha avviato
+**Phase 1: Housekeeping** alle **17:15:45Z**. Quindi il suo evento e' il cron `0 7 * * *` e, per
+costruzione del gate, Phase 2d e Phase 2e saranno `skipped`. #8305 e' presente nell'head, ma questa
+run non puo' validarlo. Il workflow contiene comunque `translate-pending.yml:334-338`, il gate
+schedulato e `UNTRANSLATED_DESCRIPTION_FIX_DEADLINE_MS: "14400000"`.
+
+La prossima candidata in coda e' **`34624763248`** (creata 2026-09-11T16:55:28Z, head
+`f79ba0b6b`); il suo valore `github.event.schedule` va verificato all'avvio prima di considerarla
+la prima run utile. La run manuale **`34606194108`** non e' una misura alternativa: essendo
+`workflow_dispatch`, salta per costruzione i blocchi condizionati a `event_name == 'schedule'`.
 
 **Girera' la Fase 2d?** Quasi certamente si', e non per congettura: le run schedulate create in
 quella fascia oraria **non sono** il cron di housekeeping. Verificato su due precedenti —
@@ -466,7 +471,8 @@ quella fascia oraria **non sono** il cron di housekeeping. Verificato su due pre
 cioe' `github.event.schedule != '0 7 * * *'`. Il cron delle 07:00 produce run create molto piu'
 tardi (11:07, 11:30, 11:58, 12:09, 13:16, 14:50) perche' e' quello che accumula ritardo.
 
-Le tre cose da verificare quando termina la `34596819197`, **in quest'ordine**:
+Le tre cose da verificare quando parte una run non-housekeeping (prima candidata: `34624763248`),
+**in quest'ordine**:
 
 1. **`Phase 2d` e `Phase 2e` non sono `skipped`.** Sono i due fixer a budget condiviso. Se uno e'
    ancora `skipped`, il gate non basta e va riletto `github.event.schedule` nel log.
@@ -482,28 +488,31 @@ Le tre cose da verificare quando termina la `34596819197`, **in quest'ordine**:
 
 Se il punto 3 non si muove mentre il punto 1 dice che una fase ha girato, allora quella fase gira ma
 non libera job, e la diagnosi va riaperta **li'**, non altrove. La `34581778668` ha gia' dato
-evidenza solo sulla Phase 2d; non valida #8305.
+evidenza solo sulla Phase 2d; la `34596819197` non potra' validare #8305 perche' e' housekeeping.
 
 ### La coda e perche' l'attesa e' lunga
 
 La concorrenza e' `group: jobs-data-pipeline`, `cancel-in-progress: false`, `queue: max`: le run si
-**serializzano**. La `34581778668` e' atterrata e la `34596819197` e' ora in esecuzione:
+**serializzano**. La `34581778668` e' atterrata; la `34596819197` e' ora nella housekeeping e la
+`34624763248` attende:
 
 | run | creata | codice |
 |---|---|---|
 | `34565924745` | 05:25:50Z | prima di #8290 (06:45Z) e #8296 (08:39Z) |
 | `34568521127` | 06:05:56Z | prima di #8290 e #8296 |
 | **`34581778668`** | **08:57:57Z** | **success; #8290 + #8296, pre-#8305; Phase 2d** |
-| **`34596819197`** | **12:01:17Z** | **in_progress; #8305; prima run utile per Phase 2e** |
+| **`34596819197`** | **12:01:17Z** | **in_progress; housekeeping; #8305 presente ma Phase 2d/2e saltate** |
 | `34606194108` | 13:46:02Z | pending; manuale; Phase 2d/2e saltate dal gate `schedule` |
-| `34624763248` | 16:55:28Z | pending; schedulata; codice #8305 |
+| **`34624763248`** | **16:55:28Z** | **pending; schedulata; prossima candidata con codice #8305** |
 
-Stato verificato al 2026-09-11T17:15Z: la `34581778668` e' `success` e la `34596819197` e'
-`in_progress`. La prima ha completato la Phase 2d alle 16:55:08Z e ha scritto il suo punto
-post-fix; il suo tetto di **350** minuti non e' stato raggiunto.
+Stato verificato al 2026-09-11T17:16Z: la `34581778668` e' `success`, la `34596819197` e'
+`in_progress` nella Phase 1 e la `34624763248` e' `pending`. La prima ha completato la Phase 2d
+alle 16:55:08Z e ha scritto il suo punto post-fix; il suo tetto di **350** minuti non e' stato
+raggiunto.
 
-**Conseguenza pratica**: la prima verifica vera di #8305 arriva quando termina la `34596819197`.
-Non bisogna usare la `34581778668` o la manuale come prova del fixer normalizzato.
+**Conseguenza pratica**: la prima verifica vera di #8305 arriva dalla prima run non-housekeeping
+che superera' il gate, probabilmente la `34624763248`; il valore va verificato nel log all'avvio.
+Non bisogna usare la `34581778668`, la `34596819197` o la manuale come prova del fixer normalizzato.
 
 **Opzione che NON ho preso**: cancellare le due run stale accorcerebbe l'attesa, ma la prima ha
 ~4 ore di traduzioni Argos non ancora committate e cancellarla le butta via. E' una decisione da
