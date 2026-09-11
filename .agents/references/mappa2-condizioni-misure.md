@@ -388,6 +388,36 @@ compare una finestra morta di 28 ore **gia' fra il 06-09 e l'08-09**, e valori f
 job/ora. Le run durano 5-13 ore e si sovrappongono: la serie misura **atterraggi**, non lavoro.
 **L'attribuzione a #8077 / #8078 e' ritirata.**
 
+## Cosa guardare alla prossima run — la verifica che chiude il giro
+
+La run **`34581778668`** (creata 2026-09-11T08:57:57Z, `event=schedule`, head `10b5837a7`) e' la
+prima a portare **entrambe** le fix. Verificato sul suo head, non sul merge:
+`translate-pending.yml:321-324` ha il gate nuovo
+`github.event_name == 'schedule' && github.event.schedule != '0 7 * * *'` e
+`UNTRANSLATED_TITLE_FIX_DEADLINE_MS: "14400000"`.
+
+**Girera' la Fase 2d?** Quasi certamente si', e non per congettura: le run schedulate create in
+quella fascia oraria **non sono** il cron di housekeeping. Verificato su due precedenti —
+`34207161385` (08:55Z) e `34332308235` (09:00Z) — entrambe con `Phase 1: Housekeeping = skipped`,
+cioe' `github.event.schedule != '0 7 * * *'`. Il cron delle 07:00 produce run create molto piu'
+tardi (11:07, 11:30, 11:58, 12:09, 13:16, 14:50) perche' e' quello che accumula ritardo.
+
+Le tre cose da verificare quando atterra, **in quest'ordine**:
+
+1. **`Phase 2d` non e' `skipped`.** E' la prima esecuzione in undici giorni. Se e' ancora
+   `skipped`, il gate non basta e va riletto `github.event.schedule` nel log.
+2. **Il punto dello storico e' scritto sull'albero pubblicato.** Dopo la #8290 lo step
+   `Log translation stats (after)` sta **dopo** `Commit translations`: il livello deve scendere
+   verso il **70,6%**, non restare al 79,8%. **Non e' una regressione** — e' la fine di una
+   sovrastima, e chi legge la serie senza saperlo vedra' un crollo.
+3. **Le transizioni `incomplete_to_complete`** nell'artifact `translation-observability`. Le
+   cinque run precedenti danno **0, 25, 26, 29, 0**. Se la Fase 2d funziona, questo numero deve
+   salire di un ordine di grandezza: il suo bersaglio sono i **4.122** job `titolo-non-tradotto`
+   oltre i sette giorni, piu' i **174** della coorte 24-48h.
+
+Se il punto 3 non si muove mentre il punto 1 dice che la fase ha girato, allora la Fase 2d gira ma
+non libera job, e la diagnosi va riaperta **li'**, non altrove.
+
 ## Condizione 2 — un annuncio nuovo e' tradotto entro 24 ore
 
 **Operativizzazione**: quota di `complete` nella **coorte 24-48h** (job messi in coda fra 24 e 48
