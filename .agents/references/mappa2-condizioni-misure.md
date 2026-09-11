@@ -19,11 +19,22 @@ riformulazione, non una comodita'.
 
 **Stato al 2026-09-11 06:30Z**: catena **0 di 7**. 102 punti `after`, 100 punti MA3.
 
-**Ma la catena non e' il problema.** La serie su cui si misura questa condizione registra il
-**worktree transitorio** di ogni run, non l'albero pubblicato (vedi «La causa, chiusa» sotto): il
-suo errore varia con quanti commit concorrenti atterrano durante la run. **Una catena di rialzi su
-quella serie non prova convergenza.** La fix e' dispacciata; se passa, i 102 punti esistenti non
-sono confrontabili con i futuri e la condizione riparte da zero.
+**La misura e' stata riparata il 2026-09-11 alle 06:45:55Z** dalla PR sito **#8290**
+(`6ee26149d9d`): lo step `Log translation stats (after)` sta ora alla riga **434** di
+`translate-pending-logic.yml`, dopo `Commit translations` (395) e dopo la Fase 2d (405), e misura il
+**candidate tree** via `scripts/lib/git-commit-data.sh:1483-1524` e `:1750-1755`, senza avanzare il
+checkout (`:1777-1783`).
+
+**Conseguenze da tenere presenti leggendo la serie:**
+
+- **I 102 punti precedenti non sono confrontabili con i futuri**, e nessuno e' stato retrocorretto.
+  La condizione 1 **riparte da zero**: servono almeno nove punti nuovi, cioe' **21-38 ore** alla
+  cadenza reale.
+- **Il livello scendera' di circa nove punti percentuali**, verso il **70,6%** invece del 79,8%.
+  **Non e' una regressione**: e' la fine di una sovrastima.
+- **Limite dichiarato e non risolto**: una kill brutale al cap dei 350 minuti resta non
+  intercettabile. La deadline a 300 minuti (`translate-pending-logic.yml:408-411`) lascia 50 minuti
+  al cap, quindi il percorso previsto per budget non perde il punto; un SIGKILL si'.
 
 **Dove sta il dato**: `data/translation-stats-history.json` nel repo sito, voci con
 `label === "after"`.
