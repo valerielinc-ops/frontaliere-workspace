@@ -536,6 +536,61 @@ tre zeri sono l'inizializzatore, non una misura.** Leggere `"incomplete": 0` com
 da incomplete» rende un verdetto falso in tre run su cinque. La transizione vera si chiama
 `incomplete_to_complete`, e quando manca **vale zero perche' la chiave non e' mai stata creata**.
 
+## Il fixer delle descrizioni esiste gia' e non lo invoca nessuno — ma copre meno di un quinto
+
+`scripts/fix-untranslated-descriptions.mjs` (160 righe) e' il gemello esatto di
+`fix-untranslated-titles.mjs`: traduce con la **cascade HTTP gratuita** (DeepL → SimplyTranslate),
+senza AI e senza crawler, e accetta `--dry-run`, `--max N`, `--slice`.
+
+```
+$ git grep -ln "fix-untranslated-descriptions" origin/main -- .github/ scripts/ package.json
+origin/main:scripts/fix-untranslated-descriptions.mjs
+```
+
+**Solo il file stesso.** Stessa situazione della Fase 2d prima della #8296: uno strumento gia'
+scritto che nessun workflow esegue. E DeepL traduce `de->it` **direttamente**, quindi non ha il
+problema del pivot.
+
+**Ma il suo predicato e' piu' stretto di quanto serve** (`:94-95`):
+
+```js
+// Only fix exact source copies
+if (existing.toLowerCase() !== sourceDesc.toLowerCase()) continue;
+```
+
+Copia esatta, trim e lowercase, **senza** `normalizeForLengthComparison`. Corrisponde al ramo
+`desc-copia-sorgente`, non a `desc-uguale-normalizzata`:
+
+| ramo | job oltre i 7 giorni | lo script lo prende? |
+|---|---:|---|
+| `desc-copia-sorgente` | **344** | **si'** |
+| `desc-uguale-normalizzata` | **1.476** | **no** |
+
+Una scansione diretta su tutte le slice, tutte le eta', rende **531** copie letterali — stesso
+ordine, denominatore diverso.
+
+**Agganciarlo com'e' copre meno del 20% del blocco descrizioni.** Vale comunque la pena — sono 344
+job e l'aggancio e' lo stesso lavoro della Fase 2d — ma chi scrive la PR deve dichiarare il numero
+vero. Per prendere gli altri 1.476 il predicato va allargato a `normalizeForLengthComparison`, la
+stessa funzione con cui `isIncomplete` li dichiara incompleti.
+
+### Perche' Argos non li prende: il pivot senza identity guard
+
+Argos ha **solo pacchetti `xx<->en`** (`scripts/local-mt-translate.py:55,80`), quindi `de->it` e' un
+pivot `de->en->it`, e il wrapper Python **non controlla l'identita' sul salto intermedio**: un
+risultato non vuoto conta come `ok` anche se e' uguale all'input (`:272-278`). Il write-guard Node
+lo scarta dopo come `skip:source-copy` (`local-mt-mopup.mjs:437-439`), **2.232 per run**.
+
+Il repo **conosce gia' questo failure mode**: `scripts/lib/local-opus-mt.mjs` ha un identity guard
+esplicito sul salto intermedio, col commento che lo nomina — «an echoed src→en chunk fed into
+en→tgt produces output in the source language» — e la riga che lo applica
+(`if (identityGuard && normalizeSpace(piece).toLowerCase() === normalizeSpace(chunk).toLowerCase()) return '';`).
+
+**Limite dichiarato**: nessuno ha **osservato** l'echo, perche' gli artifact non registrano il
+testo intermedio `de->en`. Le misure eliminano le altre tre ipotesi — richiesta accodata, coppia
+richiesta, popolazione traducibile — e questa e' l'unica compatibile con un failure mode gia'
+riconosciuto altrove nel repo. Va letta cosi', non come osservazione diretta.
+
 ## Perche' i job restano `incomplete`: attribuzione al ramo, 2026-09-11
 
 Misurato da me su `origin/main` del sito (`6a4441ee59c`) applicando `isIncomplete` **importata** e
