@@ -272,11 +272,42 @@ gratuita (DeepL → MyMemory), **senza AI e senza crawler**. E' l'unica corsia v
 ramo titolo di `incomplete`, contro una Fase 2b che paga un'invocazione di crawler per azienda e
 rende 0,34-0,61 job/min.
 
+**Il meccanismo completo, misurato su 100 run.** Il gate non e' solo mal puntato: punta sull'unica
+run che **non sopravvive mai**.
+
+| run | creata | durata del job | esito | housekeeping / Fase 2d |
+|---|---|---|---|---|
+| `34349391734` | 09-09 12:09Z | 5h55m | cancelled | success / skipped |
+| `34223496560` | 09-08 11:58Z | 5h55m | cancelled | success / **cancelled** |
+| `34126519779` | 09-07 13:16Z | 5h55m | cancelled | success / **cancelled** |
+| `34030460785` | 09-06 11:30Z | 5h55m | cancelled | success / **cancelled** |
+| `33962494837` | 09-05 11:07Z | 5h55m | cancelled | success / **cancelled** |
+| `33404957452` | 08-31 14:50Z | 5h55m | cancelled | success / **cancelled** |
+
+Su **100 run** esaminate, quelle col gate di housekeeping soddisfatto sono **sei**, e sono
+**cancellate tutte e sei**. Il job dura ogni volta **5h55m**, cioe' il `timeout-minutes: 350`
+(`translate-pending.yml:52`) piu' il grace della cancellazione. In cinque casi su sei la Fase 2d
+risulta `cancelled`, non `skipped`: era **in esecuzione** quando e' caduta la scure.
+
+La catena e' quindi doppia e si chiude da sola: la Fase 2d gira solo sulla run giornaliera di
+housekeeping; quella run e' la piu' lunga di tutte perche' passa 593 slice di pulizia in piu'; e
+per questo e' l'unica che arriva al tetto dei 350 minuti e viene uccisa proprio nel tratto finale
+dove la Fase 2d vive. **Zero esecuzioni complete in undici giorni.**
+
+E' anche, esattamente, il limite dichiarato dalla #8290 — «una kill brutale al cap dei 350 minuti
+resta non intercettabile» — che quindi **si verifica ogni giorno**, non in teoria: la run di
+housekeeping perde anche il punto della condizione 1.
+
 **Il vincolo che governa la fix.** `UNTRANSLATED_TITLE_FIX_DEADLINE_MS` vale `18000000`, cioe' 300
-minuti misurati run-wide, contro un tetto di run di 350. Accenderla a ogni run con quel budget
-spinge la run contro il tetto, e una kill brutale al tetto **non e' intercettabile**: farebbe
-perdere il punto della condizione 1 che la #8290 ha appena finito di riparare. La fix deve
-dichiarare **quando** gira e **con quale budget**. Scheda: `.scratch/codex-p2d.txt`.
+minuti run-wide, contro un tetto di 350. La fix deve dichiarare **quando** gira e **con quale
+budget**.
+
+**PR sito #8296 aperta** (`phase-2d-reopen`): sposta il gate a
+`github.event_name == 'schedule' && github.event.schedule != '0 7 * * *'` — cioe' su ogni run
+schedulata **tranne** quella di housekeeping — e abbassa il budget a `14400000`, 240 minuti. Le run
+non-housekeeping chiudono oggi fra ~125 e ~155 minuti, quindi il margine al tetto resta ampio.
+Tocca sorgente (`translate-pending-logic.yml`), artefatto generato e `contract.json`. Scheda:
+`.scratch/codex-p2d.txt`.
 
 ### Difetto separato: la corsia Haiku muore in 4 run su 7 dal 10-09
 
