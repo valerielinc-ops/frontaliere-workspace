@@ -30,7 +30,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'"
+            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/.codex/repo-pr-gate-dispatch.mjs\" ] || exit 0; node \"$d/.codex/repo-pr-gate-dispatch.mjs\"'"
           },
           {
             "type": "command",
