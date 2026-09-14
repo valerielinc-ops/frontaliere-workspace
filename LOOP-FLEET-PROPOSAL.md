@@ -17,6 +17,8 @@ La persistenza su `origin/main` è verificabile con 460 record in ciascuno di `l
 
 Le remediation tecniche #8627, #8629, #8634, #8635, #8639, #8640, #8641, #8642, #8644, #8648, #8649, #8650, #8521 e #8647 sono canoniche dopo test, review e auto-merge nativo. [PR #8633](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8633) è stata chiusa come superseded: il fix equivalente e più forte è già in `main` tramite #8632. L’unico incremento fleet rilevante ancora aperto in questa fotografia è #8659. Nessun bypass è stato usato.
 
+Rettifica live verificata alle 21:28 UTC: `main` remota è `d0dbed4513…`. La [PR #8659](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8659) è sulla head `54a303af…`; gli audit L0–L10 e la validazione dei workflow sono `success`, mentre il supervisore L11 e la suite `tests` sono ancora `in_progress`. Il run di abilitazione nativo [34898883572](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/34898883572) è terminato `success`, ma `autoMergeRequest` è ancora nullo perché la review sulla head corrente non è stata ancora registrata; la PR resta `OPEN/BLOCKED`. La verifica locale della patch finale passa 4 file e 50 test. Nessun merge manuale, bypass o scrittura su main/corpus/pubblicato è stato eseguito.
+
 | Requisito dell’allegato | Stato verificato | Prova o residuo |
 |---|---|---|
 | Implementato vs pianificato | Chiuso a livello documentale | Questa proposta separa lo stato conseguito dalla roadmap a 30 giorni; le righe future restano esplicitamente `Ancora aperto` o vincolate. |
