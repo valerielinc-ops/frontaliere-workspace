@@ -15,15 +15,21 @@ import { createServer } from 'node:net';
 import {
   accessSync,
   chmodSync,
+  closeSync,
   constants as fsConstants,
   mkdirSync,
+  openSync,
+  readFileSync,
   statSync,
   unlinkSync,
+  watch,
+  writeSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   normalizeIdentity,
+  coordinatorOwnerLockPath,
   socketPath,
   stateDirectory,
 } from './github-coordinator-client.mjs';
@@ -66,6 +72,98 @@ const OBSERVED_HEADERS = [
 
 function eventStatePath(identity) {
   return join(stateDirectory(), `github-events-${normalizeIdentity(identity)}.json`);
+}
+
+const WATCHED_SOURCE_NAMES = new Set([
+  'github-coordinator-client.mjs',
+  'github-coordinator.mjs',
+  'github-event-broker.mjs',
+  'github-coordinator-launcher',
+]);
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function readOwnerRecord(lockPath) {
+  try {
+    const parsed = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (!Number.isInteger(parsed?.pid) || parsed.pid <= 0) {
+      throw Object.assign(new Error('coordinator owner lock has no valid pid'), { code: 'coordinator_owner_lock_invalid' });
+    }
+    return parsed;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function claimCoordinatorOwner(identity, socket) {
+  const lockPath = coordinatorOwnerLockPath(identity);
+  const existing = readOwnerRecord(lockPath);
+  if (existing && processIsAlive(existing.pid)) return null;
+  if (existing) unlinkSync(lockPath);
+  try {
+    const fd = openSync(lockPath, 'wx', 0o600);
+    writeSync(fd, `${JSON.stringify({
+      pid: process.pid,
+      identity,
+      socket,
+      startedAt: new Date().toISOString(),
+    })}\n`);
+    return { fd, lockPath, socket };
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const competing = readOwnerRecord(lockPath);
+    if (competing && processIsAlive(competing.pid)) return null;
+    if (competing) unlinkSync(lockPath);
+    return claimCoordinatorOwner(identity, socket);
+  }
+}
+
+function ownsCoordinatorLock(ownerLock) {
+  if (!ownerLock) return false;
+  try {
+    return readOwnerRecord(ownerLock.lockPath)?.pid === process.pid;
+  } catch {
+    return false;
+  }
+}
+
+function releaseCoordinatorOwner(ownerLock, { removeSocket = false } = {}) {
+  if (!ownerLock) return;
+  const ownsLock = ownsCoordinatorLock(ownerLock);
+  if (ownsLock && removeSocket) {
+    try { unlinkSync(ownerLock.socket); } catch { /* already gone */ }
+  }
+  if (ownsLock) {
+    try { unlinkSync(ownerLock.lockPath); } catch { /* already gone */ }
+  }
+  try { closeSync(ownerLock.fd); } catch { /* already closed */ }
+}
+
+function installSourceReloadWatcher(onReload) {
+  let triggered = false;
+  let watcher;
+  try {
+    watcher = watch(THIS_DIR, { persistent: false }, (_eventType, filename) => {
+      const name = String(filename || '');
+      if (triggered || !WATCHED_SOURCE_NAMES.has(name)) return;
+      triggered = true;
+      process.stderr.write('github-coordinator: source changed; restarting under supervisor\n');
+      watcher.close();
+      onReload();
+    });
+  } catch (error) {
+    process.stderr.write(`github-coordinator: source watcher unavailable: ${error.message}\n`);
+  }
+  return () => watcher?.close();
 }
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -525,6 +623,7 @@ export class GitHubCoordinator {
     this.eventBroker = eventBroker;
     this.eventNotifier = null;
     this.eventListenerInspector = null;
+    this.eventListenerCountInspector = null;
     this.queue = [];
     this.active = 0;
     this.activeMutations = 0;
@@ -556,6 +655,10 @@ export class GitHubCoordinator {
       cancellationRequests: 0,
       cancellationConfirmed: 0,
       cancellationExpired: 0,
+      socketConnections: 0,
+      socketErrors: 0,
+      socketDisconnects: 0,
+      sourceReloads: 0,
     };
   }
 
@@ -566,6 +669,7 @@ export class GitHubCoordinator {
       ? {
         enabled: true,
         webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+        activeListeners: this.eventListenerCountInspector?.() ?? null,
         ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
       }
       : { enabled: false };
@@ -680,6 +784,10 @@ export class GitHubCoordinator {
     this.eventListenerInspector = typeof inspector === 'function' ? inspector : null;
   }
 
+  setEventListenerCountInspector(inspector) {
+    this.eventListenerCountInspector = typeof inspector === 'function' ? inspector : null;
+  }
+
   eventSubscription(spec) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     return { ok: true, subscription: this.eventBroker.subscribe(spec) };
@@ -690,6 +798,7 @@ export class GitHubCoordinator {
     return {
       ok: true,
       webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      activeListeners: this.eventListenerCountInspector?.() ?? null,
       ...this.eventBroker.status({ listenerAttached: this.eventListenerInspector }),
     };
   }
@@ -699,7 +808,20 @@ export class GitHubCoordinator {
     return {
       ok: true,
       webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      activeListeners: this.eventListenerCountInspector?.() ?? null,
       ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
+    };
+  }
+
+  eventGarbageCollect(options = {}) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return {
+      ok: true,
+      webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      ...this.eventBroker.garbageCollect({
+        ...options,
+        listenerAttached: this.eventListenerInspector,
+      }),
     };
   }
 
@@ -1358,12 +1480,15 @@ function cliCommandIsMutation(args) {
 }
 
 function readTokenAndStart(identity) {
-  const realGh = resolveRealGh();
-  const token = resolveToken(identity, realGh);
   const socket = socketPath(identity);
   const parent = dirname(socket);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   try { chmodSync(parent, 0o700); } catch { /* best effort */ }
+  const ownerLock = claimCoordinatorOwner(identity, socket);
+  if (!ownerLock) return;
+
+  const realGh = resolveRealGh();
+  const token = resolveToken(identity, realGh);
 
   const eventBroker = new GitHubEventBroker({
     stateFile: eventStatePath(identity),
@@ -1373,20 +1498,25 @@ function readTokenAndStart(identity) {
   let terminate = () => {};
   let expirationTimer = null;
   const eventListeners = new Map();
+  const sharedAcknowledgements = new Set();
 
   const writeMessage = (connection, message) => {
     if (!connection.destroyed) connection.write(`${JSON.stringify(message)}\n`);
   };
 
   const detachEventListener = (listener) => {
-    if (eventListeners.get(listener.subscriptionId) === listener) {
-      eventListeners.delete(listener.subscriptionId);
-    }
+    const listeners = eventListeners.get(listener.subscriptionId);
+    if (!listeners) return;
+    listeners.delete(listener);
+    if (listeners.size === 0) eventListeners.delete(listener.subscriptionId);
   };
-  coordinator.setEventListenerInspector((subscriptionId) => eventListeners.has(String(subscriptionId)));
+  coordinator.setEventListenerInspector((subscriptionId) => (eventListeners.get(String(subscriptionId))?.size || 0) > 0);
+  coordinator.setEventListenerCountInspector(
+    () => [...eventListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
+  );
 
   const deliverEvent = (listener) => {
-    if (!eventListeners.has(listener.subscriptionId) || listener.inFlightEventId) return;
+    if (!eventListeners.get(listener.subscriptionId)?.has(listener) || listener.inFlightEventId) return;
     const pending = coordinator.eventPending(listener.subscriptionId);
     if (!pending.ok) {
       writeMessage(listener.connection, pending);
@@ -1405,30 +1535,34 @@ function readTokenAndStart(identity) {
   };
 
   const notifyEvent = (subscriptionId, metadata = {}) => {
-    const listener = eventListeners.get(String(subscriptionId));
-    if (!listener) return;
+    const listeners = eventListeners.get(String(subscriptionId));
+    if (!listeners?.size) return;
     if (metadata.removed) {
-      writeMessage(listener.connection, {
-        ok: false,
-        error: { code: 'event_subscription_removed', message: 'event subscription was removed' },
-      });
-      detachEventListener(listener);
-      listener.connection.end();
+      for (const listener of [...listeners]) {
+        writeMessage(listener.connection, {
+          ok: false,
+          error: { code: 'event_subscription_removed', message: 'event subscription was removed' },
+        });
+        detachEventListener(listener);
+        listener.connection.end();
+      }
       return;
     }
     if (metadata.expired) {
-      writeMessage(listener.connection, {
-        ok: false,
-        error: {
-          code: 'event_subscription_expired',
-          message: 'event subscription wait deadline reached',
-        },
-      });
-      detachEventListener(listener);
-      listener.connection.end();
+      for (const listener of [...listeners]) {
+        writeMessage(listener.connection, {
+          ok: false,
+          error: {
+            code: 'event_subscription_expired',
+            message: 'event subscription wait deadline reached',
+          },
+        });
+        detachEventListener(listener);
+        listener.connection.end();
+      }
       return;
     }
-    deliverEvent(listener);
+    for (const listener of [...listeners]) deliverEvent(listener);
   };
   coordinator.setEventNotifier(notifyEvent);
 
@@ -1440,7 +1574,8 @@ function readTokenAndStart(identity) {
       connection.end();
       return null;
     }
-    if (eventListeners.has(subscriptionId)) {
+    const listeners = eventListeners.get(subscriptionId);
+    if (listeners?.size && !details.subscription.shared) {
       writeMessage(connection, {
         ok: false,
         error: { code: 'event_listener_already_attached', message: 'event subscription already has a listener' },
@@ -1452,9 +1587,12 @@ function readTokenAndStart(identity) {
       connection,
       subscriptionId,
       once: request.once !== false,
+      shared: details.subscription.shared === true,
+      agentId: request.agentId || 'anonymous-agent',
       inFlightEventId: null,
     };
-    eventListeners.set(subscriptionId, listener);
+    if (!listeners) eventListeners.set(subscriptionId, new Set());
+    eventListeners.get(subscriptionId).add(listener);
     writeMessage(connection, {
       ok: true,
       type: 'listening',
@@ -1475,21 +1613,39 @@ function readTokenAndStart(identity) {
         listener.connection.end();
         return;
       }
+      const eventKey = `${listener.subscriptionId}:${request.eventId}`;
       const acknowledgement = coordinator.acknowledgeEvent(listener.subscriptionId, request.eventId);
-      if (!acknowledgement.ok) {
+      const sharedDuplicateAcknowledgement = listener.shared
+        && !acknowledgement.ok
+        && acknowledgement.error?.code === 'event_not_pending'
+        && sharedAcknowledgements.has(eventKey);
+      if (!acknowledgement.ok && !sharedDuplicateAcknowledgement) {
         writeMessage(listener.connection, acknowledgement);
         detachEventListener(listener);
         listener.connection.end();
         return;
       }
+      if (listener.shared && acknowledgement.ok) {
+        sharedAcknowledgements.add(eventKey);
+        if (sharedAcknowledgements.size > 1_000) {
+          sharedAcknowledgements.delete(sharedAcknowledgements.values().next().value);
+        }
+      }
       listener.inFlightEventId = null;
       writeMessage(listener.connection, { ok: true, type: 'acked', eventId: request.eventId });
       if (listener.once) {
         detachEventListener(listener);
-        coordinator.eventUnsubscribe(listener.subscriptionId);
         listener.connection.end();
+        if (!listener.shared) coordinator.eventUnsubscribe(listener.subscriptionId);
       } else {
         deliverEvent(listener);
+      }
+      const remainingListeners = eventListeners.get(listener.subscriptionId) || new Set();
+      const awaitingSharedAck = [...remainingListeners]
+        .some((candidate) => candidate.inFlightEventId === request.eventId);
+      const persistentSharedListener = [...remainingListeners].some((candidate) => !candidate.once);
+      if (listener.shared && remainingListeners.size === 0 && !awaitingSharedAck && !persistentSharedListener) {
+        coordinator.eventUnsubscribe(listener.subscriptionId);
       }
       return;
     }
@@ -1509,10 +1665,12 @@ function readTokenAndStart(identity) {
   };
 
   const server = createServer((connection) => {
+    coordinator.metrics.socketConnections += 1;
     let buffer = '';
     let handled = false;
     let listener = null;
     connection.on('error', () => {
+      coordinator.metrics.socketErrors += 1;
       // A supervisor disappearing must detach only its listener.  Without an
       // error handler ECONNRESET can terminate the whole coordinator process.
       if (listener) detachEventListener(listener);
@@ -1560,6 +1718,8 @@ function readTokenAndStart(identity) {
             result = Promise.resolve(coordinator.eventSubscriptions());
           } else if (request.type === 'events-summary') {
             result = Promise.resolve(coordinator.eventSubscriptionSummary());
+          } else if (request.type === 'events-gc') {
+            result = Promise.resolve(coordinator.eventGarbageCollect(request.options || {}));
           } else if (request.type === 'events-subscription') {
             result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
           } else if (request.type === 'events-unsubscribe') {
@@ -1581,30 +1741,46 @@ function readTokenAndStart(identity) {
           connection.end();
           if (request.type === 'shutdown') setTimeout(terminate, 10);
         }).catch((error) => {
-          writeMessage(connection, { ok: false, error: { code: error.code || 'coordinator_error', message: error.message } });
+          const errorDetails = {
+            code: error.code || 'coordinator_error',
+            message: error.message,
+          };
+          for (const field of ['requestId', 'existingSubscriptionId', 'existingSubscription', 'targetKey', 'sharedObserverRecommended', 'exitCode']) {
+            if (error[field] !== undefined) errorDetails[field] = error[field];
+          }
+          writeMessage(connection, { ok: false, error: errorDetails });
           connection.end();
         });
       }
     });
     connection.on('close', () => {
+      coordinator.metrics.socketDisconnects += 1;
       if (listener) detachEventListener(listener);
     });
   });
 
   let terminating = false;
+  let stopSourceWatcher = () => {};
   terminate = () => {
     if (terminating) return;
     terminating = true;
     if (expirationTimer) clearInterval(expirationTimer);
+    stopSourceWatcher();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1_000);
   };
 
   const cleanUp = () => {
-    try { unlinkSync(socket); } catch { /* already gone */ }
-    try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
+    if (ownsCoordinatorLock(ownerLock)) {
+      releaseCoordinatorOwner(ownerLock, { removeSocket: true });
+      try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
+    } else {
+      releaseCoordinatorOwner(ownerLock);
+    }
   };
   server.on('error', (error) => {
+    coordinator.metrics.socketErrors += 1;
+    releaseCoordinatorOwner(ownerLock);
     if (error.code !== 'EADDRINUSE') process.stderr.write(`github-coordinator: ${error.message}\n`);
     process.exit(error.code === 'EADDRINUSE' ? 0 : 1);
   });
@@ -1624,6 +1800,11 @@ function readTokenAndStart(identity) {
     }
   }, 1_000);
   expirationTimer.unref?.();
+
+  stopSourceWatcher = installSourceReloadWatcher(() => {
+    coordinator.metrics.sourceReloads += 1;
+    terminate();
+  });
 
   server.listen(socket);
 }

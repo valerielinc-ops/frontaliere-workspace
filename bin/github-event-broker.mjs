@@ -22,6 +22,7 @@ import { dirname } from 'node:path';
 export const EVENT_BROKER_STATE_VERSION = 1;
 export const DEFAULT_SUBSCRIPTION_TTL_MS = 6 * 60 * 60 * 1_000;
 export const MAX_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+export const DEFAULT_ORPHAN_GRACE_MS = 60 * 60 * 1_000;
 
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
@@ -115,6 +116,10 @@ function subscriptionTargetKey(subscription) {
   return `${subscription.repo}|${subscription.resource}|${selectors.join('|')}`;
 }
 
+function subscriptionDedupKey(subscription) {
+  return `${subscriptionTargetKey(subscription)}|wait=${[...subscription.waitFor].sort().join(',')}`;
+}
+
 function latencySampleKey(subscription) {
   return `${subscription.resource}:${[...subscription.waitFor].sort().join(',')}`;
 }
@@ -189,6 +194,8 @@ function normalizeSubscriptionSpec(spec, nowMs) {
     workflow: normalizedString(spec.workflow),
     deploymentId: spec.deploymentId === undefined || spec.deploymentId === null ? null : String(spec.deploymentId),
     waitFor: subscriptionStates(spec),
+    allowDuplicate: spec.allowDuplicate === true || spec.allow_duplicate === true,
+    shared: spec.shared === true || spec.sharedObserver === true,
     once: spec.once !== false,
     createdAt: new Date(nowMs).toISOString(),
     expiresAtMs,
@@ -204,6 +211,7 @@ function subscriptionPublic(
     waitEstimate: estimate = summarizeWaitEstimate([]),
     duplicateTargetCount = 1,
     listenerAttached = null,
+    sharedJoin = false,
   } = {},
 ) {
   const createdAtMs = Date.parse(subscription.createdAt);
@@ -215,6 +223,14 @@ function subscriptionPublic(
   const estimatedDecisionAt = estimate.estimatedWaitP90Ms === null
     ? null
     : new Date(Math.min(subscription.expiresAtMs, nowMs + estimate.estimatedWaitP90Ms)).toISOString();
+  const waitState = subscription.pending.length > 0 ? 'event_pending' : 'waiting_external';
+  const nextAction = waitState === 'event_pending'
+    ? 'ack_event'
+    : subscription.shared
+      ? 'attach_shared_listener'
+      : duplicateTargetCount > 1
+      ? 'reuse_shared_observer'
+      : listenerAttached === true ? 'wait_for_webhook' : 'attach_single_listener';
   return {
     id: subscription.id,
     agentId: subscription.agentId,
@@ -236,7 +252,13 @@ function subscriptionPublic(
     waitBudgetMs,
     deadlineAt: subscription.expiresAt,
     estimatedDecisionAt,
-    waitState: subscription.pending.length > 0 ? 'event_pending' : 'waiting_external',
+    waitState,
+    nextAction,
+    shared: subscription.shared === true,
+    sharedObserverCount: subscription.shared
+      ? Math.max(1, Array.isArray(subscription.sharedAgentIds) ? subscription.sharedAgentIds.length : 1)
+      : 1,
+    sharedJoin,
     targetKey: subscriptionTargetKey(subscription),
     duplicateTargetCount,
     sharedObserverRecommended: duplicateTargetCount > 1,
@@ -286,6 +308,12 @@ function storedSubscription(value) {
     workflow: normalizedString(value.workflow),
     deploymentId: value.deploymentId === null || value.deploymentId === undefined ? null : String(value.deploymentId),
     waitFor,
+    shared: value.shared === true,
+    sharedAgentIds: value.shared === true
+      ? unique((Array.isArray(value.sharedAgentIds) ? value.sharedAgentIds : []).map(String).concat(
+        normalizedString(value.agentId) || 'anonymous-agent',
+      ))
+      : [],
     once: value.once !== false,
     createdAt: normalizedString(value.createdAt) || new Date().toISOString(),
     expiresAtMs,
@@ -587,6 +615,7 @@ export class GitHubEventBroker {
       matchedEvents: 0,
       pendingOverflow: 0,
       latencySamplesRecorded: 0,
+      subscriptionsGarbageCollected: 0,
     };
     this.state = this.loadState();
   }
@@ -774,6 +803,30 @@ export class GitHubEventBroker {
     this.prune();
     const nowMs = this.now();
     const normalized = normalizeSubscriptionSpec(spec, nowMs);
+    const allowDuplicate = normalized.allowDuplicate === true;
+    const shared = normalized.shared === true;
+    const agentId = normalized.agentId;
+    delete normalized.allowDuplicate;
+    const duplicate = this.state.subscriptions
+      .filter((subscription) => subscriptionDedupKey(subscription) === subscriptionDedupKey(normalized))
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
+    if (duplicate && shared && duplicate.shared) {
+      if (!duplicate.sharedAgentIds.includes(agentId)) duplicate.sharedAgentIds.push(agentId);
+      this.persist();
+      return this.publicSubscription(duplicate, { nowMs, sharedJoin: true });
+    }
+    if (duplicate && !allowDuplicate) {
+      const error = brokerError(
+        'event_duplicate_subscription',
+        'an observer for this exact target and wait state already exists; reuse the shared observer',
+      );
+      error.existingSubscriptionId = duplicate.id;
+      error.existingSubscription = this.publicSubscription(duplicate, { nowMs });
+      error.targetKey = subscriptionTargetKey(duplicate);
+      error.sharedObserverRecommended = true;
+      throw error;
+    }
+    if (shared) normalized.sharedAgentIds = [agentId];
     normalized.id = `sub-${randomUUID()}`;
     this.state.subscriptions.push(normalized);
     this.metrics.subscriptionsCreated += 1;
@@ -801,6 +854,50 @@ export class GitHubEventBroker {
     this.state.subscriptions = this.state.subscriptions.filter(({ id }) => id !== String(subscriptionId || ''));
     if (before !== this.state.subscriptions.length) this.persist();
     return { ok: true, subscriptionId: String(subscriptionId || ''), removed: before !== this.state.subscriptions.length };
+  }
+
+  garbageCollect({ listenerAttached = null, olderThanMs = DEFAULT_ORPHAN_GRACE_MS, apply = false, includeUnique = false } = {}) {
+    if (typeof listenerAttached !== 'function' && !(listenerAttached instanceof Set) && !Array.isArray(listenerAttached)) {
+      throw brokerError(
+        'event_gc_listener_inspector_required',
+        'event garbage collection requires the coordinator listener inspector',
+      );
+    }
+    const grace = Number(olderThanMs);
+    if (!Number.isFinite(grace) || grace <= 0) {
+      throw brokerError('event_gc_age_invalid', 'event garbage collection age must be positive');
+    }
+    this.prune();
+    const nowMs = this.now();
+    const duplicateCounts = this.duplicateTargetCounts();
+    const candidates = this.state.subscriptions.filter((subscription) => {
+      const createdAtMs = Date.parse(subscription.createdAt);
+      const oldEnough = Number.isFinite(createdAtMs) && nowMs - createdAtMs >= grace;
+      const noListener = listenerAttachedValue(listenerAttached, subscription.id) === false;
+      const noPending = subscription.pending.length === 0;
+      const duplicate = (duplicateCounts.get(subscriptionTargetKey(subscription)) || 0) > 1;
+      return oldEnough && noListener && noPending && (duplicate || includeUnique);
+    });
+    const candidateIds = candidates.map(({ id }) => id);
+    const removedIds = apply ? candidateIds : [];
+    if (apply && removedIds.length > 0) {
+      const removed = new Set(removedIds);
+      this.state.subscriptions = this.state.subscriptions.filter(({ id }) => !removed.has(id));
+      this.metrics.subscriptionsGarbageCollected += removedIds.length;
+      this.persist();
+    }
+    return {
+      ok: true,
+      dryRun: !apply,
+      olderThanMs: grace,
+      includeUnique,
+      candidateCount: candidates.length,
+      candidates: candidates.map((subscription) => this.publicSubscription(subscription, {
+        nowMs,
+        listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
+      })),
+      removedIds,
+    };
   }
 
   pendingEvent(subscriptionId) {

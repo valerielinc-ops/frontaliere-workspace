@@ -18,6 +18,7 @@ import {
 import {
   ensureCoordinator,
   eventSubscriptions,
+  ingestGitHubWebhook,
   listenForEvent,
   normalizeIdentity,
   sendRequest,
@@ -33,7 +34,7 @@ import {
   normalizeReconciliationEvent,
   verifyWebhookSignature,
 } from '../bin/github-event-broker.mjs';
-import { createGitHubWebhookReceiver } from '../bin/github-webhook-receiver.mjs';
+import { createGitHubWebhookReceiver, webhookErrorStatus } from '../bin/github-webhook-receiver.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 const POLICY = join(ROOT, 'bin', 'github-api-policy.mjs');
@@ -258,12 +259,26 @@ test('espone deadline, ETA storica e duplicati senza richiedere polling', () => 
     assert.equal(subscription.waitState, 'waiting_external');
     assert.equal(subscription.remainingMs, 300_000);
 
+    assert.throws(
+      () => broker.subscribe({
+        repo: 'owner/repo',
+        resource: 'pull_request',
+        number: 104,
+        waitFor: ['merged'],
+        ttlSeconds: 300,
+      }),
+      (error) => error.code === 'event_duplicate_subscription'
+        && error.existingSubscriptionId === subscription.id
+        && error.sharedObserverRecommended === true,
+    );
+
     const duplicate = broker.subscribe({
       repo: 'owner/repo',
       resource: 'pull_request',
       number: 104,
       waitFor: ['merged'],
       ttlSeconds: 300,
+      allowDuplicate: true,
     });
     assert.equal(duplicate.duplicateTargetCount, 2);
     assert.equal(duplicate.sharedObserverRecommended, true);
@@ -294,6 +309,78 @@ test('i comandi help delle subscription non avviano il coordinatore', () => {
   });
   assert.equal(subscribeHelp.status, 0);
   assert.match(subscribeHelp.stdout, /--wait-for/);
+});
+
+test('il garbage collector rimuove solo duplicati orfani dopo una grace period esplicita', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-gc-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'gc-secret', now: () => nowMs });
+
+  try {
+    const primary = broker.subscribe({
+      agentId: 'primary', repo: 'owner/repo', resource: 'workflow_run', runId: '9001',
+      waitFor: ['success'], ttlSeconds: 21_600,
+    });
+    nowMs += 10_000;
+    const duplicate = broker.subscribe({
+      agentId: 'stale', repo: 'owner/repo', resource: 'workflow_run', runId: '9001',
+      waitFor: ['success'], ttlSeconds: 21_600, allowDuplicate: true,
+    });
+    nowMs += 3_600_000;
+
+    const dryRun = broker.garbageCollect({
+      listenerAttached: new Set([primary.id]),
+      olderThanMs: 3_600_000,
+    });
+    assert.equal(dryRun.dryRun, true);
+    assert.deepEqual(dryRun.removedIds, []);
+    assert.deepEqual(dryRun.candidates.map(({ id }) => id), [duplicate.id]);
+
+    const applied = broker.garbageCollect({
+      listenerAttached: new Set([primary.id]),
+      olderThanMs: 3_600_000,
+      apply: true,
+    });
+    assert.deepEqual(applied.removedIds, [duplicate.id]);
+    assert.equal(broker.getSubscription(duplicate.id), null);
+    assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('fan-out shared riusa una subscription canonica', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-shared-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'shared-secret' });
+
+  try {
+    const primary = broker.subscribe({
+      agentId: 'shared-primary', repo: 'owner/repo', resource: 'pull_request', number: 42,
+      waitFor: ['merged'], ttlSeconds: 300, shared: true,
+    });
+    const joined = broker.subscribe({
+      agentId: 'shared-secondary', repo: 'owner/repo', resource: 'pull_request', number: 42,
+      waitFor: ['merged'], ttlSeconds: 300, shared: true,
+    });
+    assert.equal(joined.id, primary.id);
+    assert.equal(joined.sharedJoin, true);
+    assert.equal(joined.sharedObserverCount, 2);
+    assert.equal(broker.status().subscriptions.length, 1);
+    assert.deepEqual(
+      new GitHubEventBroker({ stateFile, webhookSecret: 'shared-secret' }).getSubscription(primary.id).shared,
+      true,
+    );
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('classifica il timeout del coordinatore webhook come errore transitorio 503', () => {
+  assert.equal(webhookErrorStatus({ code: 'GITHUB_COORDINATOR_TIMEOUT' }), 503);
+  assert.equal(webhookErrorStatus({ code: 'event_webhook_signature_invalid' }), 401);
+  assert.equal(webhookErrorStatus({ code: 'event_webhook_payload_invalid' }), 400);
 });
 
 test('collega il fallimento di un workflow alla PR associata senza polling dell agent', () => {
@@ -667,6 +754,101 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
   }
 });
 
+test('fan-out shared consegna lo stesso webhook a due agenti senza duplicare la subscription', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-shared-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = 'event-shared-integration';
+  const secret = 'event-shared-integration-secret';
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = secret;
+
+  try {
+    await ensureCoordinator(identity);
+    const primary = await subscribeToEvents({
+      agentId: 'shared-primary',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 43,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+      shared: true,
+    }, { identity });
+    const joined = await subscribeToEvents({
+      agentId: 'shared-secondary',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 43,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+      shared: true,
+    }, { identity });
+    const subscriptionId = primary.subscription.id;
+    assert.equal(joined.subscription.id, subscriptionId);
+    assert.equal(joined.subscription.sharedJoin, true);
+    assert.equal(joined.subscription.sharedObserverCount, 2);
+
+    const firstEvent = listenForEvent(subscriptionId, {
+      identity,
+      agentId: 'shared-primary',
+      timeoutMs: 5_000,
+    });
+    const secondEvent = listenForEvent(subscriptionId, {
+      identity,
+      agentId: 'shared-secondary',
+      timeoutMs: 5_000,
+    });
+    let listenerCount = 0;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      listenerCount = (await eventSubscriptions({ identity })).activeListeners;
+      if (listenerCount === 2) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    assert.equal(listenerCount, 2);
+
+    const payload = {
+      action: 'closed',
+      repository: { full_name: 'owner/repo' },
+      pull_request: { number: 43, merged: true, head: { sha: 'shared-abc123' } },
+    };
+    const body = JSON.stringify(payload);
+    const webhook = await ingestGitHubWebhook({
+      eventName: 'pull_request',
+      deliveryId: 'shared-delivery-43',
+      signature: signedWebhook(body, secret),
+      rawBody: body,
+    }, { identity });
+    assert.deepEqual(webhook.matchedSubscriptionIds, [subscriptionId]);
+
+    const [first, second] = await Promise.all([firstEvent, secondEvent]);
+    assert.equal(first.state, 'merged');
+    assert.equal(second.state, 'merged');
+    const status = await eventSubscriptions({ identity });
+    assert.equal(status.pendingEvents, 0);
+    assert.equal(status.subscriptions.length, 0);
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // Il daemon puo' non essere partito se il setup fallisce; il cleanup resta sicuro.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('scollega un listener caduto senza terminare il coordinatore e segnala la scadenza', async () => {
   const stateDirectory = mkdtempSync('/tmp/frontaliere-event-resilience-');
   const previousEnvironment = {
@@ -721,7 +903,10 @@ test('scollega un listener caduto senza terminare il coordinatore e segnala la s
     }, { identity })).subscription;
     await assert.rejects(
       listenForEvent(expiring.id, { identity, timeoutMs: 3_000 }),
-      (error) => error.code === 'event_subscription_expired',
+      (error) => error.code === 'event_subscription_expired'
+        && error.waitState === 'timed_out'
+        && error.nextAction === 'reconcile_once_or_escalate'
+        && error.subscriptionId === expiring.id,
     );
     const afterExpiry = await eventSubscriptions({ identity });
     assert.equal(afterExpiry.subscriptions.some(({ id }) => id === expiring.id), false);

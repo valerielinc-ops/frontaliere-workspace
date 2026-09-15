@@ -87,7 +87,7 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   eventi pendenti sopravvivono al riavvio del daemon. La risposta di `subscribe`
   espone `expiresAt`, `remainingMs`, `waitState`, `estimatedWaitMs` e il livello
   di confidenza storico: l'ETA è informativa, la scadenza è il vero limite
-  operativo.
+  operativo. `nextAction` indica l'unica azione ammessa per il supervisor.
 - Il supervisor deve trattare una subscription attiva come `waiting-external`,
   non come goal bloccato: dopo `subscribe` avvia un solo `events listen`, svolge
   altro lavoro e attende il callback. Non ripetere `gh pr view`, `gh run view`,
@@ -101,7 +101,14 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   compatto di default: evita `--full` nei cicli dell'agent. Se
   `sharedObserverRecommended` è
   `true`, non creare un altro osservatore per lo stesso target: il supervisor
-  deve riutilizzare/accorpare l'osservazione già presente.
+  deve riutilizzare/accorpare l'osservazione già presente. Una subscription
+  identica viene rifiutata con `event_duplicate_subscription` e restituisce
+  `existingSubscriptionId`; `--allow-duplicate` è riservato a un osservatore
+  realmente indipendente e va motivato nel contesto dell'agent.
+- Per ripulire residui usa prima `bin/gh-frontaliere events gc` in dry-run. Solo
+  `events gc --apply` rimuove duplicati vecchi senza listener e senza eventi
+  pending; gli orfani unici restano protetti, salvo l'opzione esplicita
+  `--include-unique`.
 - L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
   un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
   `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook
@@ -127,7 +134,15 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   `ch.frontaliere.github-coordinator-nanako`; il launcher carica Remote Config
   anche quando un client deve avviare il daemon automaticamente. Dopo una
   modifica agli script riavvia i due servizi con `launchctl kickstart -k` e
-  verifica `bin/gh-frontaliere status --compact`.
+  verifica `bin/gh-frontaliere status --compact`. Receiver e coordinatore
+  osservano i propri sorgenti e chiedono un reload a launchd quando cambia il
+  client: non lasciare in memoria un processo con il vecchio protocollo.
+- Per una diagnosi sintetica senza auto-avvio usa
+  `bin/gh-frontaliere health --alert-only` (oppure
+  `bin/github-coordinator-health`). Deve risultare un solo processo per
+  identità, socket raggiungibile, protocollo aggiornato e secret configurato;
+  duplicati/orfani sono warning separati. Il controllo è locale e non chiama
+  GitHub.
 - Le cancellazioni di run Actions (`gh run cancel` oppure il POST al relativo
   endpoint) richiedono sempre due passaggi: la prima richiesta viene bloccata e
   produce un `request_id`; l'agent deve fermarsi e chiedere al proprietario una

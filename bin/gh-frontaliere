@@ -7,6 +7,7 @@ import {
   eventSubscription,
   eventSummary,
   eventSubscriptions,
+  garbageCollectEvents,
   getPendingCancellation,
   listenForEvent,
   reconcileEvents,
@@ -42,6 +43,7 @@ function printHelp(topic = '') {
       '  unsubscribe rimuove una subscription',
       '  status     stato compatto (usa --full solo per il dettaglio completo)',
       '  summary    riepilogo compatto di listener, duplicati, pending ed ETA',
+      '  gc         dry-run degli orfani; usa --apply per rimuovere solo candidati sicuri',
       '  reconcile  riconcilia una sola volta tramite il coordinatore',
       '',
       'Regola: dopo subscribe esegui un solo listen sotto il supervisor; non usare polling gh/status.',
@@ -53,7 +55,8 @@ function printHelp(topic = '') {
         : [
           'Uso: bin/gh-frontaliere <comando gh...>',
           '     bin/gh-frontaliere status [--compact|--full]',
-          '     bin/gh-frontaliere events <subscribe|listen|show|unsubscribe|status|summary|reconcile>',
+          '     bin/gh-frontaliere events <subscribe|listen|show|unsubscribe|status|summary|gc|reconcile>',
+          '     bin/gh-frontaliere health [--identity default|nanako] [--alert-only]',
           '     bin/gh-frontaliere confirm-cancel <request-id>',
           '',
           'Le richieste GitHub passano sempre dal coordinatore locale.',
@@ -81,12 +84,13 @@ function optionValues(args, name) {
 }
 
 function assertNoUnknownOptions(args, allowed) {
+  const booleanOptions = new Set(['--once', '--keep', '--apply', '--include-unique', '--allow-duplicate', '--shared']);
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (!value.startsWith('-')) continue;
     const name = value.includes('=') ? value.slice(0, value.indexOf('=')) : value;
     if (!allowed.has(name)) throw new Error(`opzione events non riconosciuta: ${value}`);
-    if (!value.includes('=') && !['--once', '--keep'].includes(name)) index += 1;
+    if (!value.includes('=') && !booleanOptions.has(name)) index += 1;
   }
 }
 
@@ -105,6 +109,7 @@ async function runEventsCommand(args, identity) {
     assertNoUnknownOptions(optionArgs, new Set([
       '--repo', '--resource', '--wait-for', '--state', '--number', '--run-id', '--sha',
       '--environment', '--workflow', '--deployment-id', '--ttl', '--agent-id', '--keep', '--once',
+      '--allow-duplicate', '--shared',
     ]));
     const repo = optionValue(optionArgs, '--repo');
     const resource = optionValue(optionArgs, '--resource');
@@ -128,14 +133,18 @@ async function runEventsCommand(args, identity) {
       deploymentId: optionValue(optionArgs, '--deployment-id'),
       agentId: optionValue(optionArgs, '--agent-id'),
       once: !optionArgs.includes('--keep'),
+      allowDuplicate: optionArgs.includes('--allow-duplicate'),
+      shared: optionArgs.includes('--shared'),
     };
     if (ttlSeconds !== null) spec.ttlSeconds = Number(ttlSeconds);
     printJson(await subscribeToEvents(spec, { identity }));
     return;
   }
   if (subcommand === 'listen') {
-    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events listen <subscription-id>');
-    printJson(await listenForEvent(args[2], { identity }));
+    const optionArgs = args.slice(3);
+    assertNoUnknownOptions(optionArgs, new Set(['--agent-id']));
+    if (!args[2] || optionArgs.length > 2) throw new Error('uso: bin/gh-frontaliere events listen <subscription-id> [--agent-id id]');
+    printJson(await listenForEvent(args[2], { identity, agentId: optionValue(optionArgs, '--agent-id') }));
     return;
   }
   if (subcommand === 'unsubscribe') {
@@ -164,12 +173,27 @@ async function runEventsCommand(args, identity) {
     printJson(await eventSummary({ identity }));
     return;
   }
+  if (subcommand === 'gc') {
+    const optionArgs = args.slice(2);
+    assertNoUnknownOptions(optionArgs, new Set(['--apply', '--older-than', '--include-unique']));
+    const olderThanSeconds = optionValue(optionArgs, '--older-than');
+    const olderThanMs = olderThanSeconds === null ? undefined : Number(olderThanSeconds) * 1_000;
+    if (olderThanSeconds !== null && (!Number.isFinite(olderThanMs) || olderThanMs <= 0)) {
+      throw new Error('uso: bin/gh-frontaliere events gc [--apply] [--older-than secondi] [--include-unique]');
+    }
+    printJson(await garbageCollectEvents({
+      olderThanMs,
+      apply: optionArgs.includes('--apply'),
+      includeUnique: optionArgs.includes('--include-unique'),
+    }, { identity }));
+    return;
+  }
   if (subcommand === 'reconcile') {
     if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events reconcile <subscription-id>');
     printJson(await reconcileEvents(args[2], { identity }));
     return;
   }
-  throw new Error('uso: bin/gh-frontaliere events {subscribe|listen|show|unsubscribe|status|summary|reconcile}');
+  throw new Error('uso: bin/gh-frontaliere events {subscribe|listen|show|unsubscribe|status|summary|gc|reconcile}');
 }
 
 async function confirmCancellationFromOwner(requestId, identity) {
@@ -213,6 +237,15 @@ try {
   const command = args[0];
   if (command === 'help' || command === undefined || (command === 'status' && args.includes('--help'))) {
     printHelp(command === 'help' && args[1] === 'events' ? 'events' : '');
+  } else if (command === 'health') {
+    const allowed = new Set(['--alert-only']);
+    for (const value of args.slice(1)) {
+      if (!allowed.has(value)) throw new Error('uso: bin/gh-frontaliere health [--alert-only]');
+    }
+    const { checkHealth } = await import('./github-coordinator-health.mjs');
+    const result = await checkHealth(identity ? [identity] : undefined);
+    if (!args.includes('--alert-only') || !result.ok) printJson(result);
+    process.exitCode = result.ok ? 0 : 1;
   } else if (command === 'status' || command === 'ping') {
     const response = await sendRequest({
       type: command === 'status' ? 'status' : 'ping',
@@ -239,6 +272,24 @@ try {
     printResponse(response);
   }
 } catch (error) {
-  process.stderr.write(`github-coordinator: ${error.message}\n`);
+  if (error?.waitState || error?.nextAction || error?.subscriptionId
+    || error?.existingSubscriptionId || error?.targetKey || error?.sharedObserverRecommended) {
+    process.stderr.write(`${JSON.stringify({
+      ok: false,
+      error: {
+        code: error.code || 'github_coordinator_error',
+        message: error.message,
+        subscriptionId: error.subscriptionId,
+        waitState: error.waitState,
+        nextAction: error.nextAction,
+        deadlineAt: error.deadlineAt,
+        existingSubscriptionId: error.existingSubscriptionId,
+        targetKey: error.targetKey,
+        sharedObserverRecommended: error.sharedObserverRecommended,
+      },
+    })}\n`);
+  } else {
+    process.stderr.write(`github-coordinator: ${error.message}\n`);
+  }
   process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
 }

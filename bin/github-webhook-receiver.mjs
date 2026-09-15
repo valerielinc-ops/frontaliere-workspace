@@ -8,7 +8,8 @@
  */
 
 import { createServer } from 'node:http';
-import { resolve } from 'node:path';
+import { watch } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ingestGitHubWebhook } from './github-coordinator-client.mjs';
@@ -17,6 +18,52 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const DEFAULT_PATH = '/github/webhook';
+const THIS_DIR = dirname(fileURLToPath(import.meta.url));
+const WATCHED_SOURCE_NAMES = new Set([
+  'github-coordinator-client.mjs',
+  'github-event-broker.mjs',
+  'github-webhook-receiver.mjs',
+  'github-coordinator-launcher',
+]);
+const TRANSIENT_COORDINATOR_ERRORS = new Set([
+  'ENOENT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'GITHUB_COORDINATOR_TIMEOUT',
+  'github_coordinator_timeout',
+  'github_coordinator_unavailable',
+  'github_coordinator_start_timeout',
+]);
+
+export function webhookErrorStatus(error) {
+  if (error?.code === 'event_webhook_signature_invalid') return 401;
+  if (error?.code === 'event_webhook_secret_unconfigured') return 503;
+  if (error?.code === 'webhook_body_too_large') return 413;
+  if (TRANSIENT_COORDINATOR_ERRORS.has(String(error?.code || ''))
+    || /github[_ ]coordinator|coordinator.*(?:timeout|unavailable|socket)/i.test(String(error?.message || ''))) {
+    return 503;
+  }
+  return 400;
+}
+
+function installSourceReloadWatcher(server) {
+  let triggered = false;
+  let watcher;
+  try {
+    watcher = watch(THIS_DIR, { persistent: false }, (_eventType, filename) => {
+      const name = String(filename || '');
+      if (triggered || !WATCHED_SOURCE_NAMES.has(name)) return;
+      triggered = true;
+      watcher.close();
+      process.stderr.write('github-webhook-receiver: source changed; restarting under supervisor\n');
+      server.close(() => process.exit(0));
+    });
+  } catch (error) {
+    process.stderr.write(`github-webhook-receiver: source watcher unavailable: ${error.message}\n`);
+  }
+  return () => watcher?.close();
+}
 
 function header(request, name) {
   const value = request.headers[name];
@@ -58,9 +105,7 @@ export function createGitHubWebhookReceiver({ identity, path = DEFAULT_PATH } = 
       }, { identity });
       jsonResponse(response, 202, result);
     } catch (error) {
-      const status = error.code === 'event_webhook_signature_invalid' ? 401
-        : error.code === 'event_webhook_secret_unconfigured' ? 503
-          : error.code === 'webhook_body_too_large' ? 413 : 400;
+      const status = webhookErrorStatus(error);
       jsonResponse(response, status, { ok: false, error: error.code || error.message });
     }
   });
@@ -80,11 +125,14 @@ function main() {
   const path = optionValue(args, '--path', process.env.FRONTALIERE_WEBHOOK_PATH || DEFAULT_PATH);
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) throw new Error('webhook_port_invalid');
   const server = createGitHubWebhookReceiver({ identity, path });
+  let stopSourceWatcher = () => {};
   server.on('error', (error) => {
+    stopSourceWatcher();
     process.stderr.write(`github-webhook-receiver: ${error.message}\n`);
     process.exitCode = 1;
   });
   server.listen(port, host, () => {
+    stopSourceWatcher = installSourceReloadWatcher(server);
     process.stdout.write(`github-webhook-receiver listening on http://${host}:${port}${path}\n`);
   });
 }

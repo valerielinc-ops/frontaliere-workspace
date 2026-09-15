@@ -47,6 +47,10 @@ export function socketPath(identity = normalizeIdentity()) {
   return join(stateDirectory(), `github-coordinator-${normalizeIdentity(identity)}.sock`);
 }
 
+export function coordinatorOwnerLockPath(identity = normalizeIdentity()) {
+  return `${socketPath(identity)}.owner`;
+}
+
 function startLockPath(identity) {
   return `${socketPath(identity)}.start`;
 }
@@ -62,6 +66,15 @@ function persistentServiceLoaded(identity) {
     `gui/${process.getuid()}/${persistentServiceLabel(identity)}`,
   ], { stdio: 'ignore' });
   return result.status === 0;
+}
+
+async function persistentServiceLoadedEventually(identity) {
+  if (process.platform !== 'darwin') return false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (persistentServiceLoaded(identity)) return true;
+    if (attempt < 3) await sleep(250);
+  }
+  return false;
 }
 
 function sleep(milliseconds) {
@@ -152,13 +165,12 @@ async function startDaemon(identity) {
     } catch {
       // No healthy daemon owns the socket; remove only this stale endpoint.
     }
-    if (persistentServiceLoaded(identity)) {
+    if (await persistentServiceLoadedEventually(identity)) {
       // launchd owns this identity.  Waiting for KeepAlive avoids a second
       // daemon binding the same socket while the service is restarting.
       releaseStartLock(identity);
       return false;
     }
-    try { unlinkSync(socketPath(identity)); } catch { /* no stale socket */ }
     const child = spawn(LAUNCHER, ['serve', '--identity', identity], {
       detached: true,
       stdio: 'ignore',
@@ -212,6 +224,14 @@ export async function waitForCoordinatorStop(identity = normalizeIdentity(), tim
     }
   }
   return false;
+}
+
+export async function probeCoordinator(identity = normalizeIdentity(), timeoutMs = CONNECT_TIMEOUT_MS) {
+  const normalized = normalizeIdentity(identity);
+  return connectOnce(
+    { type: 'status', identity: normalized, compact: true },
+    { identity: normalized, timeoutMs },
+  );
 }
 
 function cancellationPath(pathname) {
@@ -328,6 +348,10 @@ export async function eventSummary({ identity } = {}) {
   return sendRequest({ type: 'events-summary' }, { identity });
 }
 
+export async function garbageCollectEvents(options = {}, { identity } = {}) {
+  return sendRequest({ type: 'events-gc', options }, { identity });
+}
+
 export async function eventSubscription(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-subscription', subscriptionId }, { identity });
 }
@@ -352,7 +376,12 @@ export async function ingestGitHubWebhook({ eventName, deliveryId, signature, ra
   }, { identity });
 }
 
-export async function listenForEvent(subscriptionId, { identity = normalizeIdentity(), once = true, timeoutMs = 0 } = {}) {
+export async function listenForEvent(subscriptionId, {
+  identity = normalizeIdentity(),
+  agentId = process.env.FRONTALIERE_AGENT_ID || null,
+  once = true,
+  timeoutMs = 0,
+} = {}) {
   const normalized = normalizeIdentity(identity);
   if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
     throw new TypeError('event_subscription_id_required');
@@ -378,6 +407,10 @@ export async function listenForEvent(subscriptionId, { identity = normalizeIdent
         ? `event_subscription_expired: ${subscriptionId}`
         : `event_listener_timeout: ${subscriptionId}`);
       error.code = deadlineIsSubscription ? 'event_subscription_expired' : 'event_listener_timeout';
+      error.subscriptionId = subscriptionId;
+      error.waitState = 'timed_out';
+      error.nextAction = 'reconcile_once_or_escalate';
+      if (Number.isFinite(expiresAtMs)) error.deadlineAt = new Date(expiresAtMs).toISOString();
       return error;
     };
 
@@ -439,6 +472,7 @@ export async function listenForEvent(subscriptionId, { identity = normalizeIdent
           identity: normalized,
           subscriptionId,
           once,
+          ...(agentId ? { agentId } : {}),
         })}\n`);
       });
       candidate.on('data', (chunk) => {
