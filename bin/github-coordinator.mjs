@@ -10,6 +10,7 @@
  */
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import {
   accessSync,
@@ -27,6 +28,7 @@ import {
 } from './github-coordinator-client.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
+const COORDINATOR_PROTOCOL_VERSION = 2;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
 const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
 const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
@@ -42,6 +44,7 @@ const MUTATION_GAP_MS = 1_000;
 const CLI_CACHE_TTL_MS = 2_000;
 const ANONYMOUS_BUDGET = 45;
 const ANONYMOUS_WINDOW_MS = 60 * 60 * 1_000;
+const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_CACHE_TTL_MS = 5_000;
 const MAX_CACHE_TTL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -60,6 +63,7 @@ const OBSERVED_HEADERS = [
 ];
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+const OWNER_CONFIRMATION = Symbol('frontaliere-owner-confirmation');
 
 export function classifyBucket(pathname, method = 'GET') {
   const path = String(pathname || '').split('?')[0];
@@ -217,6 +221,108 @@ function requestApiDetails(request) {
     return parsed ? { path: parsed.path, method: parsed.method } : null;
   }
   return null;
+}
+
+function cancellationApiDetails(pathname, method) {
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  if (normalizedMethod !== 'POST') return null;
+  const path = String(pathname || '').split('?')[0];
+  const match = path.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)\/cancel$/);
+  if (!match) return null;
+  return {
+    kind: 'workflow-run-cancellation',
+    repo: `${match[1]}/${match[2]}`,
+    runId: match[3],
+    target: path,
+  };
+}
+
+function repoFromCliArguments(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = String(args[index]);
+    if (value === '--repo' && args[index + 1]) return String(args[index + 1]);
+    if (value.startsWith('--repo=')) return value.slice('--repo='.length);
+  }
+  return null;
+}
+
+function cancellationFromCliApiArguments(args, inheritedRepo = null) {
+  if (args[0] !== 'api') return null;
+  let endpoint = null;
+  let method = 'GET';
+  let repo = inheritedRepo;
+  const optionsWithValue = new Set([
+    '--cache', '--field', '--header', '--hostname', '--input', '--jq', '--method',
+    '--preview', '--raw-field', '--repo', '--template', '-F', '-H', '-f', '-t', '-X',
+  ]);
+  for (let index = 1; index < args.length; index += 1) {
+    const value = String(args[index]);
+    if (value === '--method' || value === '-X') {
+      method = String(args[index + 1] || '');
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--method=')) {
+      method = value.slice('--method='.length);
+      continue;
+    }
+    if (value === '--repo' && args[index + 1]) {
+      repo = String(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--repo=')) {
+      repo = value.slice('--repo='.length);
+      continue;
+    }
+    if (optionsWithValue.has(value)) {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('-')) continue;
+    if (endpoint === null) endpoint = value;
+  }
+  if (!endpoint) return null;
+  let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  if (repo && /^\/actions\/runs\/\d+\/cancel$/.test(path)) path = `/repos/${repo}${path}`;
+  return cancellationApiDetails(path, method);
+}
+
+/**
+ * Identify GitHub Actions run cancellations before they reach the queue.
+ * This covers both the normal CLI command and the equivalent REST mutation
+ * routed through `gh api`/the coordinator protocol.
+ */
+export function cancellationRequestDetails(request) {
+  if (request?.type === 'api') {
+    return cancellationApiDetails(request.path, request.method);
+  }
+  if (request?.type !== 'exec' || !Array.isArray(request.args)) return null;
+
+  const args = request.args.map(String);
+  const runCancelIndex = args.findIndex((value, index) => value === 'run' && args[index + 1] === 'cancel');
+  if (runCancelIndex >= 0) {
+    const runId = args.slice(runCancelIndex + 2).find((value) => /^\d+$/.test(value)) || null;
+    return {
+      kind: 'workflow-run-cancellation',
+      repo: repoFromCliArguments(args),
+      runId,
+      target: runId ? `actions run ${runId}` : 'Actions run selezionata da gh',
+    };
+  }
+
+  const apiIndex = args.indexOf('api');
+  if (apiIndex >= 0) {
+    const apiArgs = args.slice(apiIndex);
+    const parsed = parseGhApiArguments(apiArgs);
+    return (parsed ? cancellationApiDetails(parsed.path, parsed.method) : null)
+      || cancellationFromCliApiArguments(apiArgs, repoFromCliArguments(args));
+  }
+  return null;
+}
+
+function ownerConfirmationPhrase(requestId) {
+  return `CONFERMA ${requestId}`;
 }
 
 function isEmergencyPublicRead(request) {
@@ -420,6 +526,7 @@ export class GitHubCoordinator {
     this.cliCache = new Map();
     this.bucketPausedUntil = new Map();
     this.buckets = new Map();
+    this.pendingCancellations = new Map();
     this.anonymousWindowStartedAt = Date.now();
     this.anonymousUsed = 0;
     this.anonymousPausedUntil = 0;
@@ -437,12 +544,17 @@ export class GitHubCoordinator {
       anonymousFallbacks: 0,
       anonymousRateLimited: 0,
       anonymousBudgetExhausted: 0,
+      cancellationRequests: 0,
+      cancellationConfirmed: 0,
+      cancellationExpired: 0,
     };
   }
 
   status() {
     this.resetAnonymousBudget();
+    this.prunePendingCancellations();
     return {
+      protocolVersion: COORDINATOR_PROTOCOL_VERSION,
       identity: this.identity,
       socket: this.socket,
       queueLength: this.queue.length,
@@ -454,6 +566,8 @@ export class GitHubCoordinator {
       metrics: { ...this.metrics },
       cacheEntries: this.cache.size,
       cliCacheEntries: this.cliCache.size,
+      pendingCancellations: [...this.pendingCancellations.values()]
+        .map((pending) => this.publicCancellationDetails(pending)),
       anonymous: {
         budget: ANONYMOUS_BUDGET,
         used: this.anonymousUsed,
@@ -509,7 +623,118 @@ export class GitHubCoordinator {
     return observed?.remaining === '0' && this.anonymousBudgetAvailable();
   }
 
+  publicCancellationDetails(pending) {
+    return {
+      id: pending.id,
+      kind: pending.details.kind,
+      repo: pending.details.repo,
+      runId: pending.details.runId,
+      target: pending.details.target,
+      source: pending.request.type === 'exec' ? 'gh-cli' : 'coordinator-api',
+      command: pending.command,
+      requestedAt: pending.requestedAt,
+      expiresAt: pending.expiresAt,
+    };
+  }
+
+  prunePendingCancellations() {
+    const now = Date.now();
+    for (const [requestId, pending] of this.pendingCancellations.entries()) {
+      if (pending.expiresAtMs <= now) {
+        this.pendingCancellations.delete(requestId);
+        this.metrics.cancellationExpired += 1;
+      }
+    }
+  }
+
+  ownerConfirmationRequired(request, details) {
+    this.prunePendingCancellations();
+    const id = `cancel-${randomUUID()}`;
+    const requestedAt = new Date().toISOString();
+    const expiresAtMs = Date.now() + CANCELLATION_CONFIRMATION_TTL_MS;
+    const pending = {
+      id,
+      request: { ...request, anonymous: false },
+      details,
+      command: request.type === 'exec'
+        ? ['gh', ...(request.args || []).map(String)]
+        : ['gh', 'api', '-X', 'POST', request.path],
+      requestedAt,
+      expiresAtMs,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    };
+    this.pendingCancellations.set(id, pending);
+    this.metrics.cancellationRequests += 1;
+    const publicDetails = this.publicCancellationDetails(pending);
+    const message = [
+      'owner_confirmation_required: cancellazione GitHub bloccata.',
+      `request_id=${id}`,
+      `target=${publicDetails.target}`,
+      `owner_command=bin/gh-frontaliere confirm-cancel ${id}`,
+      `expires_at=${publicDetails.expiresAt}`,
+    ].join('\n');
+    return {
+      ok: false,
+      exitCode: 2,
+      stdout: '',
+      stderr: `${message}\n`,
+      error: {
+        code: 'owner_confirmation_required',
+        message,
+        requestId: id,
+        cancellation: publicDetails,
+        exitCode: 2,
+      },
+    };
+  }
+
+  getPendingCancellation(requestId) {
+    this.prunePendingCancellations();
+    const pending = this.pendingCancellations.get(String(requestId || ''));
+    if (!pending) {
+      return {
+        ok: false,
+        error: {
+          code: 'cancellation_confirmation_not_found',
+          message: 'richiesta di cancellazione inesistente o scaduta',
+        },
+      };
+    }
+    return { ok: true, cancellation: this.publicCancellationDetails(pending) };
+  }
+
+  async confirmCancellation(requestId, confirmation) {
+    this.prunePendingCancellations();
+    const normalizedId = String(requestId || '');
+    const pending = this.pendingCancellations.get(normalizedId);
+    if (!pending) {
+      return this.getPendingCancellation(normalizedId);
+    }
+    if (String(confirmation || '').trim() !== ownerConfirmationPhrase(normalizedId)) {
+      return {
+        ok: false,
+        error: {
+          code: 'owner_confirmation_invalid',
+          message: 'conferma proprietario non valida; nessuna cancellazione eseguita',
+        },
+      };
+    }
+
+    this.pendingCancellations.delete(normalizedId);
+    this.metrics.cancellationConfirmed += 1;
+    const confirmedRequest = { ...pending.request };
+    confirmedRequest[OWNER_CONFIRMATION] = normalizedId;
+    return this.submit(confirmedRequest);
+  }
+
   submit(request) {
+    const cancellation = cancellationRequestDetails(request);
+    if (cancellation && request[OWNER_CONFIRMATION] !== undefined) {
+      // The symbol is added only by confirmCancellation inside this process;
+      // JSON clients cannot forge it by sending a similarly named property.
+    } else if (cancellation) {
+      return Promise.resolve(this.ownerConfirmationRequired(request, cancellation));
+    }
     const queuedRequest = this.shouldRouteEmergencyAnonymous(request)
       ? { ...request, anonymous: true }
       : request;
@@ -930,6 +1155,7 @@ function classifyCliBucket(args) {
 }
 
 function cliCommandIsMutation(args) {
+  if (cancellationRequestDetails({ type: 'exec', args })) return true;
   if (args[0] === 'api') {
     const parsed = parseGhApiArguments(args);
     return parsed ? !isSafeRead(parsed.method) : args.some((value) => value === '--method' || value === '-X' || value.startsWith('--method='));
@@ -974,6 +1200,10 @@ function readTokenAndStart(identity) {
           result = Promise.resolve({ ok: true, status: coordinator.status() });
         } else if (request.type === 'shutdown') {
           result = Promise.resolve({ ok: true });
+        } else if (request.type === 'cancellation-details') {
+          result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
+        } else if (request.type === 'confirm-cancellation') {
+          result = coordinator.confirmCancellation(request.requestId, request.confirmation);
         } else if (request.type === 'api' || request.type === 'exec') {
           result = coordinator.submit(request);
         } else {

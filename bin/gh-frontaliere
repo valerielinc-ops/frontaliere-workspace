@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 
-import { sendRequest, waitForCoordinatorStop } from './github-coordinator-client.mjs';
+import { createInterface } from 'node:readline/promises';
+
+import {
+  confirmCancellation,
+  getPendingCancellation,
+  sendRequest,
+  waitForCoordinatorStop,
+} from './github-coordinator-client.mjs';
 
 function printStatus(status) {
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
@@ -10,6 +17,36 @@ function printResponse(response) {
   if (response?.stdout) process.stdout.write(response.stdout);
   if (response?.stderr) process.stderr.write(response.stderr);
   process.exitCode = Number.isInteger(response?.exitCode) ? response.exitCode : (response?.ok ? 0 : 1);
+}
+
+async function confirmCancellationFromOwner(requestId, identity) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      'owner_confirmation_requires_interactive_terminal: esegui bin/gh-frontaliere confirm-cancel <request-id> da un terminale del proprietario',
+    );
+  }
+
+  const response = await getPendingCancellation(requestId, { identity });
+  const cancellation = response.cancellation;
+  process.stdout.write([
+    'Richiesta di cancellazione GitHub in attesa di conferma:',
+    `  request_id: ${cancellation.id}`,
+    `  target: ${cancellation.target}`,
+    `  repo: ${cancellation.repo || '(risolto dal comando gh)'}`,
+    `  comando: ${JSON.stringify(cancellation.command)}`,
+    `  scadenza: ${cancellation.expiresAt}`,
+    '',
+  ].join('\n'));
+
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+  let confirmation;
+  try {
+    confirmation = await readline.question(`Digita "CONFERMA ${requestId}" per autorizzare, o una risposta diversa per annullare: `);
+  } finally {
+    readline.close();
+  }
+  const confirmed = await confirmCancellation(requestId, confirmation, { identity });
+  printResponse(confirmed);
 }
 
 const argv = process.argv.slice(2);
@@ -29,6 +66,11 @@ try {
     if (!await waitForCoordinatorStop(identity)) {
       throw new Error('coordinator_shutdown_timeout');
     }
+  } else if (command === 'confirm-cancel') {
+    if (args.length !== 2 || !args[1]) {
+      throw new Error('uso: bin/gh-frontaliere confirm-cancel <request-id>');
+    }
+    await confirmCancellationFromOwner(args[1], identity);
   } else {
     if (args.includes('--watch')) {
       throw new Error('--watch è vietato; usa un solo osservatore condiviso.');
@@ -38,5 +80,5 @@ try {
   }
 } catch (error) {
   process.stderr.write(`github-coordinator: ${error.message}\n`);
-  process.exitCode = 1;
+  process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
 }

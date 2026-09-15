@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(THIS_DIR, 'github-coordinator.mjs');
 const DEFAULT_STATE_DIR = join(homedir(), 'Library', 'Caches', 'frontaliere');
+const CANCELLATION_PROTOCOL_VERSION = 2;
 const CONNECT_TIMEOUT_MS = 1_500;
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
@@ -193,9 +194,52 @@ export async function waitForCoordinatorStop(identity = normalizeIdentity(), tim
   return false;
 }
 
+function cancellationPath(pathname) {
+  return /^\/?repos\/[^/]+\/[^/]+\/actions\/runs\/\d+\/cancel(?:\?.*)?$/.test(String(pathname || ''))
+    || /^\/?actions\/runs\/\d+\/cancel(?:\?.*)?$/.test(String(pathname || ''));
+}
+
+function requestNeedsCancellationConfirmation(request) {
+  if (request?.type === 'api') {
+    return String(request.method || 'GET').toUpperCase() === 'POST'
+      && cancellationPath(String(request.path || '').replace(/^\//, ''));
+  }
+  if (request?.type !== 'exec' || !Array.isArray(request.args)) return false;
+  const args = request.args.map(String);
+  if (args.some((value, index) => value === 'run' && args[index + 1] === 'cancel')) return true;
+  const apiIndex = args.indexOf('api');
+  if (apiIndex < 0) return false;
+  const apiArgs = args.slice(apiIndex);
+  const methodIndex = apiArgs.findIndex((value) => value === '--method' || value === '-X');
+  const methodOption = methodIndex >= 0 ? apiArgs[methodIndex + 1] : apiArgs.find((value) => value.startsWith('--method='))?.slice(9);
+  if (String(methodOption || 'GET').toUpperCase() !== 'POST') return false;
+  const repoIndex = args.findIndex((value) => value === '--repo');
+  const repo = repoIndex >= 0 ? args[repoIndex + 1] : args.find((value) => value.startsWith('--repo='))?.slice(7);
+  return apiArgs.some((value) => cancellationPath(value))
+    || Boolean(repo && apiArgs.some((value) => /^\/?actions\/runs\/\d+\/cancel(?:\?.*)?$/.test(value)));
+}
+
+async function ensureCancellationConfirmationProtocol(identity) {
+  const response = await connectOnce(
+    { type: 'status', identity },
+    { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+  );
+  const version = Number(response?.status?.protocolVersion || 0);
+  if (version >= CANCELLATION_PROTOCOL_VERSION) return;
+  const error = new Error(
+    'cancellazione GitHub bloccata: il coordinatore condiviso deve essere riavviato prima di inoltrare richieste di cancellazione',
+  );
+  error.code = 'cancellation_confirmation_protocol_unavailable';
+  error.exitCode = 2;
+  throw error;
+}
+
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
   const normalized = normalizeIdentity(identity);
   await ensureCoordinator(normalized);
+  if (requestNeedsCancellationConfirmation(request)) {
+    await ensureCancellationConfirmationProtocol(normalized);
+  }
   const response = await connectOnce({ ...request, identity: normalized }, { identity: normalized });
   if (response?.ok === false && response?.error) {
     const error = new Error(response.error.message || response.error.code || 'github_coordinator_error');
@@ -203,6 +247,24 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
     throw error;
   }
   return response;
+}
+
+export async function getPendingCancellation(requestId, { identity } = {}) {
+  if (typeof requestId !== 'string' || requestId.length === 0) {
+    throw new TypeError('cancellation_request_id_required');
+  }
+  return sendRequest({ type: 'cancellation-details', requestId }, { identity });
+}
+
+export async function confirmCancellation(requestId, confirmation, { identity } = {}) {
+  if (typeof requestId !== 'string' || requestId.length === 0) {
+    throw new TypeError('cancellation_request_id_required');
+  }
+  return sendRequest({
+    type: 'confirm-cancellation',
+    requestId,
+    confirmation,
+  }, { identity });
 }
 
 export function headersToObject(headers) {

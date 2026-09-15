@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 
 import {
   classifyBucket,
+  cancellationRequestDetails,
   GitHubCoordinator,
   isSafeRead,
   parseGhApiArguments,
@@ -57,6 +58,71 @@ test('considera sicure solo le letture', () => {
   assert.equal(isSafeRead('HEAD'), true);
   assert.equal(isSafeRead('POST'), false);
   assert.equal(isSafeRead('PATCH'), false);
+});
+
+test('sospende ogni cancellazione Actions fino alla conferma separata del proprietario', async () => {
+  assert.deepEqual(
+    cancellationRequestDetails({
+      type: 'api',
+      method: 'POST',
+      path: '/repos/owner/repo/actions/runs/123/cancel',
+    }),
+    {
+      kind: 'workflow-run-cancellation',
+      repo: 'owner/repo',
+      runId: '123',
+      target: '/repos/owner/repo/actions/runs/123/cancel',
+    },
+  );
+  assert.equal(cancellationRequestDetails({
+    type: 'api', method: 'GET', path: '/repos/owner/repo/actions/runs/123/cancel',
+  }), null);
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['--repo', 'owner/repo', 'run', 'cancel', '123'],
+  }).runId, '123');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec',
+    args: [
+      'api', '--method', 'POST', '--input', 'payload.json',
+      '--repo', 'owner/repo', 'actions/runs/123/cancel',
+    ],
+  }).target, '/repos/owner/repo/actions/runs/123/cancel');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec',
+    args: ['--repo', 'owner/repo', 'api', '--method', 'POST', 'actions/runs/123/cancel'],
+  }).target, '/repos/owner/repo/actions/runs/123/cancel');
+
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+  const blocked = await coordinator.submit({
+    type: 'exec',
+    identity: 'test',
+    args: ['run', 'cancel', '123', '--repo', 'owner/repo'],
+    cwd: '/tmp',
+  });
+
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.exitCode, 2);
+  assert.equal(blocked.error.code, 'owner_confirmation_required');
+  assert.match(blocked.stderr, /owner_command=bin\/gh-frontaliere confirm-cancel cancel-/);
+  assert.equal(coordinator.metrics.cliCommands, 0);
+  assert.equal(coordinator.status().pendingCancellations.length, 1);
+
+  const requestId = blocked.error.requestId;
+  const invalid = await coordinator.confirmCancellation(requestId, 'NO');
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.code, 'owner_confirmation_invalid');
+  assert.equal(coordinator.status().pendingCancellations.length, 1);
+
+  const confirmed = await coordinator.confirmCancellation(requestId, `CONFERMA ${requestId}`);
+  assert.equal(confirmed.ok, true);
+  assert.match(confirmed.stdout, /run cancel 123 --repo owner\/repo/);
+  assert.equal(coordinator.status().pendingCancellations.length, 0);
+  assert.equal(coordinator.metrics.cancellationConfirmed, 1);
 });
 
 test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', () => {

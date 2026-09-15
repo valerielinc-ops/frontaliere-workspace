@@ -85,6 +85,16 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
 - `gh pr checks --watch` e' vietato: un solo osservatore condiviso deve seguire
   una PR. Controlla il daemon con `bin/gh-frontaliere status`.
+- Le cancellazioni di run Actions (`gh run cancel` oppure il POST al relativo
+  endpoint) richiedono sempre due passaggi: la prima richiesta viene bloccata e
+  produce un `request_id`; l'agent deve fermarsi e chiedere al proprietario una
+  seconda conferma, senza invocare autonomamente il comando di conferma. Dopo
+  aver verificato target e comando, il proprietario esegue da un terminale
+  interattivo `bin/gh-frontaliere confirm-cancel <request-id>` e digita la frase
+  esatta mostrata. Le richieste pendenti scadono dopo 5 minuti e non passano da
+  REST o UI GitHub. Il token GitHub non distingue agent e proprietario: il
+  terminale interattivo e la verifica esplicita sono quindi il confine operativo
+  della seconda approvazione.
 - In caso estremo il daemon puo' usare una corsia anonima separata, solo per
   letture REST pubbliche e solo dopo `x-ratelimit-remaining: 0` autenticato.
   Ha un budget locale conservativo di 45 richieste/ora; non vale per GraphQL,
