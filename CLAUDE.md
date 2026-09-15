@@ -68,6 +68,16 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 
 - Le chiamate GitHub degli agenti passano dal coordinatore condiviso in
   `bin/github-coordinator.mjs`; lo shim comune e' `~/.local/bin/gh`.
+- Gli agenti non devono usare canali GitHub esterni al coordinatore: niente REST
+  o GraphQL diretto (`fetch`, SDK, `curl`, `wget`), pagine UI/browser GitHub,
+  Actions dispatch dalla UI o polling HTML, nemmeno come workaround per timeout
+  o rate limit. Il REST interno al coordinatore e' consentito: l'agent deve
+  invocare solo `gh ...` tramite lo shim oppure `bin/gh-frontaliere ...`.
+- Per Actions usa `gh workflow run`, `gh run list` e `gh run view` attraverso il
+  coordinatore; non trasferire dispatch o polling nel browser e non usare
+  `gh pr checks --watch`. Se una richiesta va in timeout o quota, controlla
+  `bin/gh-frontaliere status`, lascia applicare backoff/coda e ritenta tramite
+  lo stesso processo; non cambiare canale.
 - `gh` resta il comando compatibile da usare normalmente: la coda, il limite di
   concorrenza (8 letture di default, ridotte automaticamente con poco margine
   di rate limit), la deduplicazione GET, la cache breve e il backoff sono
