@@ -1,6 +1,6 @@
 # Frontaliere Ticino — proposta di flotta di loop automatici
 
-## Stato operativo corrente — verificato 2026-09-15, 05:58 UTC
+## Stato operativo corrente — verificato 2026-09-15, 06:01 UTC
 
 ### Goal e distinzione di stato
 
@@ -10,7 +10,7 @@ Questa sezione distingue lo stato conseguito dalla roadmap. La sezione [Piano re
 
 ### Implementato e canonico
 
-- `origin/main` è verificata a `f93221ba171738f458bdf15f34d5f1d98dc388ea`; i ledger durevoli contano 579 observations, 579 decisions, 580 health-history e 2.114 eventi lifecycle. La persistenza canonica passa dal bridge che valida artifact immutabili e apre una PR; i workflow dei loop continuano a usare directory runner-local temporanee.
+- `origin/main` è verificata a `fc766a0bfef2766c1b4394b9c768d0a773643cf3`; i ledger durevoli contano 579 observations, 579 decisions, 580 health-history e 2.114 eventi lifecycle. La persistenza canonica passa dal bridge che valida artifact immutabili e apre una PR; i workflow dei loop continuano a usare directory runner-local temporanee.
 - Il registry verifica 12/12 loop, action policy, massimali e binding senza finding. L’exporter L7 ora è canonico e restituisce il contratto `quality/status/metrics` consumabile dall’allocator; il run post-merge del workflow [34933076023](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/34933076023) e la verifica tecnica L11 [34933075993](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/34933075993) sono `success`. La persistenza dati-only L10 [PR #8711](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8711) è entrata nativamente; la nuova [PR #8723](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8723) è ancora in audit/test.
 - Le [PR #8694](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8694) (L6), [#8698](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8698) (L9), [#8697](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8697) (L2), [#8700](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8700) (L8), [#8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) (L3), [#8693](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8693) (L7) e [#8711](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8711) (L10) sono entrate tramite il percorso nativo. I rispettivi run post-merge e le fonti outcome mancanti restano da verificare separatamente.
 - Gli outcome indipendenti più recenti sulla `main` sono 4/12: L0, L1, L4 e L5. Mancano ancora, come outcome di dominio indipendenti, useful sessions/utility (L2), application submission (L3), assignment/exposure/experiment (L7), verdetto editoriale (L6), affiliate/commercial export (L8), employer funnel e paid activation (L9), oltre all’outcome indipendente di controllo fleet (L10/L11). L4 delivery/return è già misurato, ma va mantenuto nella verifica continuativa. L2, L3, L6, L7, L8, L9, L10 e L11 restano parziali, stale o non misurabili finché la fonte dichiarata e il contratto di outcome non sono completi.
