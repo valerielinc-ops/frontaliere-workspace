@@ -30,18 +30,18 @@ La tabella seguente usa l’ultima riga health canonica disponibile su `main`; l
 
 | Loop | Ultima esecuzione canonica (UTC) | Qualità / issue | Outcome mancante | Autonomia effettiva / max | Prossima azione umana |
 |---|---|---|---|---|---|
-| L0 | run 34907140410 · 2026-09-14 23:05 | observed · 0 | — | A0 observe / A4 | Rivedere l’esito fresco e chiudere la finestra di osservazione. |
-| L1 | run 34896515969 · 2026-09-14 21:03 | observed · — | — | A0 observe / A2 | Rivedere il risultato utile/error-free e mantenere il monitoraggio. |
+| L0 | run 34930002162 · 2026-09-15 04:45 | observed · 0 | — | A0 observe / A4 | Rivedere l’esito fresco e chiudere la finestra di osservazione. |
+| L1 | run 34932075421 · 2026-09-15 05:16 | unmeasurable · — | generatedAt, numeratore/denominatore | A2 issue+suspend-canary / A2 | Ripristinare la telemetria indipendente; nessun canary finché l’outcome non è completo. |
 | L2 | run 34901863969 · 2026-09-14 22:00 | partial · — | numeratore/denominatore | A1 candidate+issue / A2 | Eseguire il run post-merge della [PR #8697](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8697), poi verificare l’outcome prima di cambiare esposizione. |
 | L3 | run 34872557815 · 2026-09-14 17:05 | partial · 1.551 | generatedAt, numeratore/denominatore | A2 quarantine+candidate+issue / A4 | Eseguire il run post-merge della [PR #8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) e verificare il contratto application-path; non inferire candidature inviate. |
 | L4 | run 34864941192 · 2026-09-14 15:52 | observed · 0 | — | A0 observe / A4 | Rivedere consenso, delivery e ritorno; nessuna modifica alla delivery è autorizzata dall’esito solo. |
 | L5 | run 34919192868 · 2026-09-15 01:56 | observed · 0 | — | A0 observe / A3 | Verificare la [PR #8689](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8689) e distinguere decision moments da outcome commerciale. |
 | L6 | run 34901863932 · 2026-09-14 22:01 | stale · 2 | generatedAt, numeratore/denominatore | A2 quarantine+candidate+issue / A2 | Inserire verdetti editoriali umani con fonte e locale, quindi verificare il post-merge run di [#8694](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8694). |
-| L7 | run 34890512380 · 2026-09-14 20:02 | partial · 1 | numeratore/denominatore | A3 candidate+stop+issue / A3 | Verificare il post-merge [run 34933076023](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/34933076023), assignment, exposure, outcome e guardrail; nessun canary o cambio prezzo. |
+| L7 | run 34933076023 · 2026-09-15 05:32 | partial · 5 | numeratore/denominatore | A3 candidate+stop+issue / A3 | Verificare assignment, exposure, outcome e guardrail; nessun canary o cambio prezzo. |
 | L8 | run 34928283569 · 2026-09-15 04:18 | unmeasurable · 16 | numeratore/denominatore | A2 reconcile+issue / A2 | Ottenere l’export commerciale autorizzato e verificare il post-merge della [PR #8700](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8700); nessuna revenue è deducibile dai click. |
 | L9 | run 34921835712 · 2026-09-15 02:36 | partial · 1 | numeratore/denominatore | A2 candidate+pr+draft-outreach / A2 | Verificare funnel employer e attivazioni pagate dopo il merge di [#8698](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8698); nessun outreach automatico. |
-| L10 | run 34927597131 · 2026-09-15 04:07 | partial · 1 | numeratore/denominatore | A4 route+lock+retry+follow-up / A4 | Risolvere l’evidenza health incoerente tramite owner e PR, senza inferire throughput. |
-| L11 | run 34928283694 · 2026-09-15 04:21 | observed · 0 | outcome indipendente (`partial`) | A0 observe / A2 | Esaminare i warning tecnici e, se provati, aprire una remediation revisionata; canary/stop/rollback restano futuri. |
+| L10 | run 34928924839 · 2026-09-15 04:28 | partial · 1 | numeratore/denominatore | A4 route+lock+retry+follow-up / A4 | Risolvere l’evidenza health incoerente tramite owner e PR, senza inferire throughput. |
+| L11 | run 34933725311 · 2026-09-15 05:45 | observed · 0 | outcome indipendente (`partial`) | A0 observe / A2 | Esaminare i warning tecnici e, se provati, aprire una remediation revisionata; canary/stop/rollback restano futuri. |
 
 ## Risposta operativa verificata (2026-09-14)
 
