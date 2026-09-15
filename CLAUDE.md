@@ -78,6 +78,22 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   `gh pr checks --watch`. Se una richiesta va in timeout o quota, controlla
   `bin/gh-frontaliere status`, lascia applicare backoff/coda e ritenta tramite
   lo stesso processo; non cambiare canale.
+- Per attendere lo stato di una PR, workflow o deploy usa le subscription
+  event-driven: `bin/gh-frontaliere events subscribe ...` seguito da
+  `bin/gh-frontaliere events listen <subscription-id>` gestito dal supervisor
+  dell'agent. Non eseguire loop di `gh run view`, `gh pr view` o `gh pr checks`.
+  Esempio: `bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --number 42 --wait-for merged,failed --agent-id <id>`.
+  Il listener riceve l'evento normalizzato e invia l'ack; la subscription e gli
+  eventi pendenti sopravvivono al riavvio del daemon. Dopo aver caricato il
+  secret dal Remote Config, riavvia il daemon se `events status` mostra
+  `webhookSecretConfigured: false`.
+- L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
+  un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
+  `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook
+  sono deduplicati per `X-GitHub-Delivery` e consegnati at-least-once.
+- Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
+  una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
+  permesso per l'agent di riprendere il polling.
 - `gh` resta il comando compatibile da usare normalmente: la coda, il limite di
   concorrenza (8 letture di default, ridotte automaticamente con poco margine
   di rate limit), la deduplicazione GET, la cache breve e il backoff sono

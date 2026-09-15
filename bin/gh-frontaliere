@@ -4,8 +4,14 @@ import { createInterface } from 'node:readline/promises';
 
 import {
   confirmCancellation,
+  eventSubscription,
+  eventSubscriptions,
   getPendingCancellation,
+  listenForEvent,
+  reconcileEvents,
   sendRequest,
+  subscribeToEvents,
+  unsubscribeFromEvents,
   waitForCoordinatorStop,
 } from './github-coordinator-client.mjs';
 
@@ -17,6 +23,102 @@ function printResponse(response) {
   if (response?.stdout) process.stdout.write(response.stdout);
   if (response?.stderr) process.stderr.write(response.stderr);
   process.exitCode = Number.isInteger(response?.exitCode) ? response.exitCode : (response?.ok ? 0 : 1);
+}
+
+function printJson(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function optionValue(args, name) {
+  const index = args.findIndex((value) => value === name || value.startsWith(`${name}=`));
+  if (index < 0) return null;
+  if (args[index].startsWith(`${name}=`)) return args[index].slice(name.length + 1);
+  return args[index + 1] || null;
+}
+
+function optionValues(args, name) {
+  const values = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name) {
+      if (args[index + 1]) values.push(args[index + 1]);
+    } else if (args[index].startsWith(`${name}=`)) {
+      values.push(args[index].slice(name.length + 1));
+    }
+  }
+  return values;
+}
+
+function assertNoUnknownOptions(args, allowed) {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (!value.startsWith('-')) continue;
+    const name = value.includes('=') ? value.slice(0, value.indexOf('=')) : value;
+    if (!allowed.has(name)) throw new Error(`opzione events non riconosciuta: ${value}`);
+    if (!value.includes('=') && !['--once', '--keep'].includes(name)) index += 1;
+  }
+}
+
+async function runEventsCommand(args, identity) {
+  const subcommand = args[1];
+  if (subcommand === 'subscribe') {
+    const optionArgs = args.slice(2);
+    assertNoUnknownOptions(optionArgs, new Set([
+      '--repo', '--resource', '--wait-for', '--state', '--number', '--run-id', '--sha',
+      '--environment', '--workflow', '--deployment-id', '--ttl', '--agent-id', '--keep', '--once',
+    ]));
+    const repo = optionValue(optionArgs, '--repo');
+    const resource = optionValue(optionArgs, '--resource');
+    const waitFor = optionValues(optionArgs, '--wait-for').concat(optionValues(optionArgs, '--state'))
+      .flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
+    if (!repo || !resource || waitFor.length === 0) {
+      throw new Error(
+        'uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --wait-for merged,failed',
+      );
+    }
+    const ttlSeconds = optionValue(optionArgs, '--ttl');
+    const spec = {
+      repo,
+      resource,
+      waitFor,
+      number: optionValue(optionArgs, '--number'),
+      runId: optionValue(optionArgs, '--run-id'),
+      sha: optionValue(optionArgs, '--sha'),
+      environment: optionValue(optionArgs, '--environment'),
+      workflow: optionValue(optionArgs, '--workflow'),
+      deploymentId: optionValue(optionArgs, '--deployment-id'),
+      agentId: optionValue(optionArgs, '--agent-id'),
+      once: !optionArgs.includes('--keep'),
+    };
+    if (ttlSeconds !== null) spec.ttlSeconds = Number(ttlSeconds);
+    printJson(await subscribeToEvents(spec, { identity }));
+    return;
+  }
+  if (subcommand === 'listen') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events listen <subscription-id>');
+    printJson(await listenForEvent(args[2], { identity }));
+    return;
+  }
+  if (subcommand === 'unsubscribe') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events unsubscribe <subscription-id>');
+    printJson(await unsubscribeFromEvents(args[2], { identity }));
+    return;
+  }
+  if (subcommand === 'show') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events show <subscription-id>');
+    printJson(await eventSubscription(args[2], { identity }));
+    return;
+  }
+  if (subcommand === 'status') {
+    if (args.length > 2) throw new Error('uso: bin/gh-frontaliere events status');
+    printJson(await eventSubscriptions({ identity }));
+    return;
+  }
+  if (subcommand === 'reconcile') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events reconcile <subscription-id>');
+    printJson(await reconcileEvents(args[2], { identity }));
+    return;
+  }
+  throw new Error('uso: bin/gh-frontaliere events {subscribe|listen|show|unsubscribe|status|reconcile}');
 }
 
 async function confirmCancellationFromOwner(requestId, identity) {
@@ -71,6 +173,8 @@ try {
       throw new Error('uso: bin/gh-frontaliere confirm-cancel <request-id>');
     }
     await confirmCancellationFromOwner(args[1], identity);
+  } else if (command === 'events') {
+    await runEventsCommand(args, identity);
   } else {
     if (args.includes('--watch')) {
       throw new Error('--watch è vietato; usa un solo osservatore condiviso.');

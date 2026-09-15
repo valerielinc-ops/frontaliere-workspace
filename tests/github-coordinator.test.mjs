@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 import {
   classifyBucket,
@@ -13,12 +15,31 @@ import {
   retryDelayMilliseconds,
 } from '../bin/github-coordinator.mjs';
 import {
+  ensureCoordinator,
+  eventSubscriptions,
+  listenForEvent,
   normalizeIdentity,
+  sendRequest,
   socketPath,
+  subscribeToEvents,
+  waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
+import {
+  GitHubEventBroker,
+  eventMatchesSubscription,
+  MAX_SUBSCRIPTION_TTL_MS,
+  normalizeWebhookEvent,
+  normalizeReconciliationEvent,
+  verifyWebhookSignature,
+} from '../bin/github-event-broker.mjs';
+import { createGitHubWebhookReceiver } from '../bin/github-webhook-receiver.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 const POLICY = join(ROOT, 'bin', 'github-api-policy.mjs');
+
+function signedWebhook(body, secret) {
+  return `sha256=${createHmac('sha256', secret).update(body, 'utf8').digest('hex')}`;
+}
 
 function runPolicy(command) {
   return spawnSync(process.execPath, [POLICY], {
@@ -123,6 +144,157 @@ test('sospende ogni cancellazione Actions fino alla conferma separata del propri
   assert.match(confirmed.stdout, /run cancel 123 --repo owner\/repo/);
   assert.equal(coordinator.status().pendingCancellations.length, 0);
   assert.equal(coordinator.metrics.cancellationConfirmed, 1);
+});
+
+test('conserva le subscription webhook, deduplica le delivery e consegna gli stati PR', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const secret = 'webhook-secret-for-test';
+  const payload = {
+    action: 'closed',
+    repository: { full_name: 'owner/repo' },
+    pull_request: {
+      number: 42,
+      merged: true,
+      html_url: 'https://github.com/owner/repo/pull/42',
+      head: { sha: 'abc123' },
+    },
+  };
+  const body = JSON.stringify(payload);
+
+  try {
+    const broker = new GitHubEventBroker({ stateFile, webhookSecret: secret });
+    const subscription = broker.subscribe({
+      agentId: 'agent-test',
+      repo: 'owner/repo',
+      resource: 'pr',
+      number: 42,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+    });
+    const first = broker.ingestWebhook({
+      eventName: 'pull_request',
+      deliveryId: 'delivery-42',
+      signature: signedWebhook(body, secret),
+      rawBody: body,
+    });
+    assert.equal(first.duplicate, false);
+    assert.deepEqual(first.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).state, 'merged');
+
+    const duplicate = broker.ingestWebhook({
+      eventName: 'pull_request',
+      deliveryId: 'delivery-42',
+      signature: signedWebhook(body, secret),
+      rawBody: body,
+    });
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(broker.status().pendingEvents, 1);
+
+    const restored = new GitHubEventBroker({ stateFile, webhookSecret: secret });
+    assert.equal(restored.getSubscription(subscription.id).pendingEvents, 1);
+    assert.equal(restored.acknowledge(subscription.id, 'delivery-42').ok, true);
+    assert.equal(restored.status().pendingEvents, 0);
+    assert.equal(verifyWebhookSignature(body, 'sha256=bad', secret), false);
+
+    const bounded = broker.subscribe({
+      repo: 'owner/other-repo',
+      resource: 'workflow_run',
+      runId: 9001,
+      waitFor: ['success'],
+      expiresAt: new Date(Date.now() + (MAX_SUBSCRIPTION_TTL_MS * 2)).toISOString(),
+    });
+    assert.ok(Date.parse(bounded.expiresAt) - Date.now() <= MAX_SUBSCRIPTION_TTL_MS + 1_000);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('collega il fallimento di un workflow alla PR associata senza polling dell agent', () => {
+  const event = normalizeWebhookEvent({
+    eventName: 'workflow_run',
+    deliveryId: 'workflow-delivery-1',
+    payload: {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: {
+        id: 9001,
+        name: 'CI',
+        conclusion: 'failure',
+        head_sha: 'deadbeef',
+        pull_requests: [{ number: 42 }],
+      },
+    },
+  });
+  const subscription = {
+    repo: 'owner/repo',
+    resource: 'pull_request',
+    number: 42,
+    runId: null,
+    sha: null,
+    environment: null,
+    workflow: null,
+    waitFor: ['failed'],
+  };
+  assert.equal(event.state, 'failed');
+  assert.equal(event.resources.includes('pull_request'), true);
+  assert.equal(eventMatchesSubscription(event, subscription), true);
+
+  const neutralEvent = normalizeWebhookEvent({
+    eventName: 'workflow_run',
+    deliveryId: 'workflow-delivery-neutral',
+    payload: {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: { id: 9002, conclusion: 'neutral', head_sha: 'deadbeef' },
+    },
+  });
+  assert.equal(neutralEvent.state, 'neutral');
+});
+
+test('la riconciliazione resta nel coordinatore e recupera uno stato workflow senza listener polling', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => fakeResponse(200, JSON.stringify({
+    id: 9001,
+    name: 'CI',
+    status: 'completed',
+    conclusion: 'failure',
+    head_sha: 'deadbeef',
+    updated_at: '2026-09-15T12:00:00Z',
+  }), { 'x-ratelimit-remaining': '100' });
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    runId: '9001',
+    waitFor: ['failed'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+    eventBroker: broker,
+  });
+
+  try {
+    const result = await coordinator.reconcileEvents(subscription.id);
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).state, 'failed');
+    const normalized = normalizeReconciliationEvent({
+      subscription: broker.getSubscriptionRecord(subscription.id),
+      data: { id: 9001, status: 'completed', conclusion: 'failure', updated_at: 'v2' },
+    });
+    assert.equal(normalized.state, 'failed');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', () => {
@@ -318,4 +490,93 @@ test('il policy gate permette il gh shim e blocca bypass espliciti', () => {
   assert.equal(runPolicy('gh pr checks 123 --watch').status, 2);
   assert.equal(runPolicy('gh pr view 123; curl https://api.github.com/rate_limit').status, 2);
   assert.equal(runPolicy('echo github-coordinator; /opt/homebrew/bin/gh pr view 123').status, 2);
+});
+
+test('consegna un webhook al listener Unix e chiude la subscription dopo ack', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = 'event-integration';
+  const secret = 'event-integration-secret';
+  let receiver;
+
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = secret;
+
+  try {
+    await ensureCoordinator(identity);
+    const subscriptionResponse = await subscribeToEvents({
+      agentId: 'agent-integration',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 42,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+    }, { identity });
+    const subscriptionId = subscriptionResponse.subscription.id;
+    const eventPromise = listenForEvent(subscriptionId, { identity, timeoutMs: 5_000 });
+
+    receiver = createGitHubWebhookReceiver({ identity });
+    await new Promise((resolvePromise, rejectPromise) => {
+      receiver.once('error', rejectPromise);
+      receiver.listen(0, '127.0.0.1', resolvePromise);
+    });
+    const address = receiver.address();
+    const payload = {
+      action: 'closed',
+      repository: { full_name: 'owner/repo' },
+      pull_request: { number: 42, merged: true, head: { sha: 'abc123' } },
+    };
+    const body = JSON.stringify(payload);
+    const rejectedWebhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
+      method: 'POST',
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'integration-delivery-invalid',
+        'x-hub-signature-256': 'sha256=invalid',
+      },
+      body,
+    });
+    assert.equal(rejectedWebhookResponse.status, 401);
+    const webhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
+      method: 'POST',
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'integration-delivery-42',
+        'x-hub-signature-256': signedWebhook(body, secret),
+      },
+      body,
+    });
+    assert.equal(webhookResponse.status, 202);
+    const webhookResult = await webhookResponse.json();
+    assert.deepEqual(webhookResult.matchedSubscriptionIds, [subscriptionId]);
+
+    const event = await eventPromise;
+    assert.equal(event.state, 'merged');
+    assert.equal(event.number, 42);
+    const status = await eventSubscriptions({ identity });
+    assert.equal(status.pendingEvents, 0);
+    assert.equal(status.subscriptions.length, 0);
+  } finally {
+    if (receiver) await new Promise((resolvePromise) => receiver.close(resolvePromise));
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // The daemon may not have started if setup failed; cleanup remains safe.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });

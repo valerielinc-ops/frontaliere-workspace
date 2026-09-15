@@ -26,6 +26,7 @@ const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(THIS_DIR, 'github-coordinator.mjs');
 const DEFAULT_STATE_DIR = join(homedir(), 'Library', 'Caches', 'frontaliere');
 const CANCELLATION_PROTOCOL_VERSION = 2;
+const EVENT_PROTOCOL_VERSION = 3;
 const CONNECT_TIMEOUT_MS = 1_500;
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
@@ -234,11 +235,29 @@ async function ensureCancellationConfirmationProtocol(identity) {
   throw error;
 }
 
+async function ensureEventProtocol(identity) {
+  const response = await connectOnce(
+    { type: 'status', identity },
+    { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+  );
+  const version = Number(response?.status?.protocolVersion || 0);
+  if (version >= EVENT_PROTOCOL_VERSION) return;
+  const error = new Error(
+    'event subscriptions bloccate: il coordinatore condiviso deve essere riavviato per attivare il protocollo webhook',
+  );
+  error.code = 'event_protocol_unavailable';
+  error.exitCode = 2;
+  throw error;
+}
+
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
   const normalized = normalizeIdentity(identity);
   await ensureCoordinator(normalized);
   if (requestNeedsCancellationConfirmation(request)) {
     await ensureCancellationConfirmationProtocol(normalized);
+  }
+  if (String(request?.type || '').startsWith('events-')) {
+    await ensureEventProtocol(normalized);
   }
   const response = await connectOnce({ ...request, identity: normalized }, { identity: normalized });
   if (response?.ok === false && response?.error) {
@@ -265,6 +284,121 @@ export async function confirmCancellation(requestId, confirmation, { identity } 
     requestId,
     confirmation,
   }, { identity });
+}
+
+export async function subscribeToEvents(spec, { identity } = {}) {
+  return sendRequest({ type: 'events-subscribe', spec }, { identity });
+}
+
+export async function eventSubscriptions({ identity } = {}) {
+  return sendRequest({ type: 'events-status' }, { identity });
+}
+
+export async function eventSubscription(subscriptionId, { identity } = {}) {
+  return sendRequest({ type: 'events-subscription', subscriptionId }, { identity });
+}
+
+export async function unsubscribeFromEvents(subscriptionId, { identity } = {}) {
+  return sendRequest({ type: 'events-unsubscribe', subscriptionId }, { identity });
+}
+
+export async function reconcileEvents(subscriptionId, { identity } = {}) {
+  return sendRequest({ type: 'events-reconcile', subscriptionId }, { identity });
+}
+
+export async function ingestGitHubWebhook({ eventName, deliveryId, signature, rawBody, payload, receivedAt }, { identity } = {}) {
+  return sendRequest({
+    type: 'events-webhook',
+    eventName,
+    deliveryId,
+    signature,
+    rawBody,
+    payload,
+    receivedAt,
+  }, { identity });
+}
+
+export async function listenForEvent(subscriptionId, { identity = normalizeIdentity(), once = true, timeoutMs = 0 } = {}) {
+  const normalized = normalizeIdentity(identity);
+  if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
+    throw new TypeError('event_subscription_id_required');
+  }
+  await ensureCoordinator(normalized);
+  await ensureEventProtocol(normalized);
+  return new Promise((resolvePromise, rejectPromise) => {
+    const socket = createConnection(socketPath(normalized));
+    let buffer = '';
+    let event = null;
+    let settled = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      socket.destroy();
+      rejectOnce(new Error(`event_listener_timeout: ${subscriptionId}`));
+    }, timeoutMs) : null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+    };
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(error);
+    };
+    const resolveOnce = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(value);
+    };
+
+    socket.on('connect', () => {
+      socket.write(`${JSON.stringify({
+        type: 'event-listen',
+        identity: normalized,
+        subscriptionId,
+        once,
+      })}\n`);
+    });
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line.trim()) continue;
+        let response;
+        try {
+          response = JSON.parse(line);
+        } catch (error) {
+          socket.destroy();
+          rejectOnce(new Error(`invalid_event_listener_response: ${error.message}`));
+          return;
+        }
+        if (response?.ok === false && response.error) {
+          socket.destroy();
+          const error = new Error(response.error.message || response.error.code || 'event_listener_error');
+          Object.assign(error, response.error);
+          rejectOnce(error);
+          return;
+        }
+        if (response?.type === 'event') {
+          event = response.event;
+          socket.write(`${JSON.stringify({
+            type: 'event-ack',
+            subscriptionId,
+            eventId: event?.id,
+          })}\n`);
+        } else if (response?.type === 'acked' && event) {
+          resolveOnce(event);
+          socket.end();
+        }
+      }
+    });
+    socket.on('error', rejectOnce);
+    socket.on('close', () => {
+      if (!settled) rejectOnce(new Error(`event_listener_closed: ${subscriptionId}`));
+    });
+  });
 }
 
 export function headersToObject(headers) {

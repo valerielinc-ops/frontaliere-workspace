@@ -25,10 +25,12 @@ import { fileURLToPath } from 'node:url';
 import {
   normalizeIdentity,
   socketPath,
+  stateDirectory,
 } from './github-coordinator-client.mjs';
+import { GitHubEventBroker, normalizeReconciliationEvent } from './github-event-broker.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_PROTOCOL_VERSION = 2;
+const COORDINATOR_PROTOCOL_VERSION = 3;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
 const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
 const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
@@ -61,6 +63,10 @@ const OBSERVED_HEADERS = [
   'x-ratelimit-resource',
   'x-ratelimit-used',
 ];
+
+function eventStatePath(identity) {
+  return join(stateDirectory(), `github-events-${normalizeIdentity(identity)}.json`);
+}
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 const OWNER_CONFIRMATION = Symbol('frontaliere-owner-confirmation');
@@ -511,11 +517,13 @@ function renderGhApiResponse(pages, parsed) {
 }
 
 export class GitHubCoordinator {
-  constructor({ identity, token, realGh, socket }) {
+  constructor({ identity, token, realGh, socket, eventBroker = null }) {
     this.identity = identity;
     this.token = token;
     this.realGh = realGh;
     this.socket = socket;
+    this.eventBroker = eventBroker;
+    this.eventNotifier = null;
     this.queue = [];
     this.active = 0;
     this.activeMutations = 0;
@@ -566,6 +574,9 @@ export class GitHubCoordinator {
       metrics: { ...this.metrics },
       cacheEntries: this.cache.size,
       cliCacheEntries: this.cliCache.size,
+      events: this.eventBroker
+        ? { enabled: true, webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret), ...this.eventBroker.status() }
+        : { enabled: false },
       pendingCancellations: [...this.pendingCancellations.values()]
         .map((pending) => this.publicCancellationDetails(pending)),
       anonymous: {
@@ -621,6 +632,122 @@ export class GitHubCoordinator {
     const bucket = request.bucket || classifyBucket(details.path, details.method);
     const observed = this.buckets.get(bucket);
     return observed?.remaining === '0' && this.anonymousBudgetAvailable();
+  }
+
+  setEventNotifier(notifier) {
+    this.eventNotifier = typeof notifier === 'function' ? notifier : null;
+  }
+
+  eventSubscription(spec) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return { ok: true, subscription: this.eventBroker.subscribe(spec) };
+  }
+
+  eventSubscriptions() {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return {
+      ok: true,
+      webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      ...this.eventBroker.status(),
+    };
+  }
+
+  eventUnsubscribe(subscriptionId) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    const result = this.eventBroker.unsubscribe(subscriptionId);
+    this.eventNotifier?.(String(subscriptionId), { removed: true });
+    return result;
+  }
+
+  eventSubscriptionDetails(subscriptionId) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    const subscription = this.eventBroker.getSubscription(subscriptionId);
+    if (!subscription) {
+      return {
+        ok: false,
+        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    return { ok: true, subscription };
+  }
+
+  ingestWebhook(request) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    const result = this.eventBroker.ingestWebhook(request);
+    for (const subscriptionId of result.matchedSubscriptionIds || []) {
+      this.eventNotifier?.(subscriptionId);
+    }
+    return result;
+  }
+
+  eventPending(subscriptionId) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
+    if (!subscription) {
+      return {
+        ok: false,
+        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    return { ok: true, event: this.eventBroker.pendingEvent(subscriptionId) };
+  }
+
+  acknowledgeEvent(subscriptionId, eventId) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return this.eventBroker.acknowledge(subscriptionId, eventId);
+  }
+
+  async reconcileEvents(subscriptionId) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
+    if (!subscription) {
+      return {
+        ok: false,
+        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    let path;
+    if (subscription.resource === 'pull_request' && subscription.number) {
+      path = `/repos/${subscription.repo}/pulls/${subscription.number}`;
+    } else if (subscription.resource === 'workflow_run' && subscription.runId) {
+      path = `/repos/${subscription.repo}/actions/runs/${subscription.runId}`;
+    } else if (subscription.resource === 'deployment' && subscription.deploymentId) {
+      path = `/repos/${subscription.repo}/deployments/${subscription.deploymentId}/statuses?per_page=1`;
+    } else {
+      return {
+        ok: false,
+        error: {
+          code: 'event_reconcile_target_required',
+          message: 'reconciliation requires a subscription number, runId, or deploymentId',
+        },
+      };
+    }
+
+    const response = await this.submit({
+      type: 'api',
+      identity: this.identity,
+      method: 'GET',
+      path,
+      cacheTtlMs: 0,
+    });
+    if (!response.ok) return { ok: false, source: 'reconciliation', response };
+    let data;
+    try {
+      data = JSON.parse(response.body || 'null');
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: 'event_reconcile_response_invalid', message: error.message },
+      };
+    }
+    if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
+    const event = normalizeReconciliationEvent({ subscription, data });
+    if (!event) return { ok: true, source: 'reconciliation', event: null, matchedSubscriptionIds: [] };
+    const result = this.eventBroker.recordEvent(event);
+    for (const matchedSubscriptionId of result.matchedSubscriptionIds || []) {
+      this.eventNotifier?.(matchedSubscriptionId);
+    }
+    return { ...result, source: 'reconciliation' };
   }
 
   publicCancellationDetails(pending) {
@@ -1173,49 +1300,208 @@ function readTokenAndStart(identity) {
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   try { chmodSync(parent, 0o700); } catch { /* best effort */ }
 
-  const coordinator = new GitHubCoordinator({ identity, token, realGh, socket });
+  const eventBroker = new GitHubEventBroker({
+    stateFile: eventStatePath(identity),
+    webhookSecret: process.env.FRONTALIERE_GH_WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET,
+  });
+  const coordinator = new GitHubCoordinator({ identity, token, realGh, socket, eventBroker });
   let terminate = () => {};
+  const eventListeners = new Map();
+
+  const writeMessage = (connection, message) => {
+    if (!connection.destroyed) connection.write(`${JSON.stringify(message)}\n`);
+  };
+
+  const detachEventListener = (listener) => {
+    if (eventListeners.get(listener.subscriptionId) === listener) {
+      eventListeners.delete(listener.subscriptionId);
+    }
+  };
+
+  const deliverEvent = (listener) => {
+    if (!eventListeners.has(listener.subscriptionId) || listener.inFlightEventId) return;
+    const pending = coordinator.eventPending(listener.subscriptionId);
+    if (!pending.ok) {
+      writeMessage(listener.connection, pending);
+      detachEventListener(listener);
+      listener.connection.end();
+      return;
+    }
+    if (!pending.event) return;
+    listener.inFlightEventId = pending.event.id;
+    writeMessage(listener.connection, {
+      ok: true,
+      type: 'event',
+      subscriptionId: listener.subscriptionId,
+      event: pending.event,
+    });
+  };
+
+  const notifyEvent = (subscriptionId, metadata = {}) => {
+    const listener = eventListeners.get(String(subscriptionId));
+    if (!listener) return;
+    if (metadata.removed) {
+      writeMessage(listener.connection, {
+        ok: false,
+        error: { code: 'event_subscription_removed', message: 'event subscription was removed' },
+      });
+      detachEventListener(listener);
+      listener.connection.end();
+      return;
+    }
+    deliverEvent(listener);
+  };
+  coordinator.setEventNotifier(notifyEvent);
+
+  const attachEventListener = (connection, request) => {
+    const subscriptionId = String(request.subscriptionId || '');
+    const details = coordinator.eventSubscriptionDetails(subscriptionId);
+    if (!details.ok) {
+      writeMessage(connection, details);
+      connection.end();
+      return null;
+    }
+    if (eventListeners.has(subscriptionId)) {
+      writeMessage(connection, {
+        ok: false,
+        error: { code: 'event_listener_already_attached', message: 'event subscription already has a listener' },
+      });
+      connection.end();
+      return null;
+    }
+    const listener = {
+      connection,
+      subscriptionId,
+      once: request.once !== false,
+      inFlightEventId: null,
+    };
+    eventListeners.set(subscriptionId, listener);
+    writeMessage(connection, {
+      ok: true,
+      type: 'listening',
+      subscription: details.subscription,
+    });
+    deliverEvent(listener);
+    return listener;
+  };
+
+  const handleEventListenerMessage = (listener, request) => {
+    if (request.type === 'event-ack') {
+      if (String(request.eventId || '') !== listener.inFlightEventId) {
+        writeMessage(listener.connection, {
+          ok: false,
+          error: { code: 'event_ack_mismatch', message: 'event acknowledgement does not match the pending event' },
+        });
+        detachEventListener(listener);
+        listener.connection.end();
+        return;
+      }
+      const acknowledgement = coordinator.acknowledgeEvent(listener.subscriptionId, request.eventId);
+      if (!acknowledgement.ok) {
+        writeMessage(listener.connection, acknowledgement);
+        detachEventListener(listener);
+        listener.connection.end();
+        return;
+      }
+      listener.inFlightEventId = null;
+      writeMessage(listener.connection, { ok: true, type: 'acked', eventId: request.eventId });
+      if (listener.once) {
+        detachEventListener(listener);
+        coordinator.eventUnsubscribe(listener.subscriptionId);
+        listener.connection.end();
+      } else {
+        deliverEvent(listener);
+      }
+      return;
+    }
+    if (request.type === 'event-unsubscribe') {
+      coordinator.eventUnsubscribe(listener.subscriptionId);
+      writeMessage(listener.connection, { ok: true, type: 'unsubscribed', subscriptionId: listener.subscriptionId });
+      detachEventListener(listener);
+      listener.connection.end();
+      return;
+    }
+    writeMessage(listener.connection, {
+      ok: false,
+      error: { code: 'unsupported_event_listener_request', message: 'unsupported event listener request' },
+    });
+    detachEventListener(listener);
+    listener.connection.end();
+  };
+
   const server = createServer((connection) => {
     let buffer = '';
     let handled = false;
+    let listener = null;
     connection.on('data', (chunk) => {
       buffer += chunk.toString('utf8');
       let newline;
-      while (!handled && (newline = buffer.indexOf('\n')) >= 0) {
+      while ((newline = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         if (!line.trim()) continue;
-        handled = true;
         let request;
         try {
           request = JSON.parse(line);
         } catch (error) {
-          connection.end(`${JSON.stringify({ ok: false, error: { code: 'invalid_request', message: error.message } })}\n`);
+          writeMessage(connection, { ok: false, error: { code: 'invalid_request', message: error.message } });
+          connection.end();
           return;
         }
-        let result;
-        if (request.type === 'ping') {
-          result = Promise.resolve({ ok: true, status: coordinator.status() });
-        } else if (request.type === 'status') {
-          result = Promise.resolve({ ok: true, status: coordinator.status() });
-        } else if (request.type === 'shutdown') {
-          result = Promise.resolve({ ok: true });
-        } else if (request.type === 'cancellation-details') {
-          result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
-        } else if (request.type === 'confirm-cancellation') {
-          result = coordinator.confirmCancellation(request.requestId, request.confirmation);
-        } else if (request.type === 'api' || request.type === 'exec') {
-          result = coordinator.submit(request);
-        } else {
-          result = Promise.resolve({ ok: false, error: { code: 'unsupported_request_type' } });
+        if (listener) {
+          handleEventListenerMessage(listener, request);
+          continue;
         }
-        result.then((response) => {
-          connection.end(`${JSON.stringify(response)}\n`);
+        if (handled) continue;
+        handled = true;
+        if (request.type === 'event-listen') {
+          listener = attachEventListener(connection, request);
+          continue;
+        }
+        let result;
+        try {
+          if (request.type === 'ping') {
+            result = Promise.resolve({ ok: true, status: coordinator.status() });
+          } else if (request.type === 'status') {
+            result = Promise.resolve({ ok: true, status: coordinator.status() });
+          } else if (request.type === 'shutdown') {
+            result = Promise.resolve({ ok: true });
+          } else if (request.type === 'cancellation-details') {
+            result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
+          } else if (request.type === 'confirm-cancellation') {
+            result = coordinator.confirmCancellation(request.requestId, request.confirmation);
+          } else if (request.type === 'events-subscribe') {
+            result = Promise.resolve(coordinator.eventSubscription(request.spec));
+          } else if (request.type === 'events-status') {
+            result = Promise.resolve(coordinator.eventSubscriptions());
+          } else if (request.type === 'events-subscription') {
+            result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
+          } else if (request.type === 'events-unsubscribe') {
+            result = Promise.resolve(coordinator.eventUnsubscribe(request.subscriptionId));
+          } else if (request.type === 'events-webhook') {
+            result = Promise.resolve(coordinator.ingestWebhook(request));
+          } else if (request.type === 'events-reconcile') {
+            result = coordinator.reconcileEvents(request.subscriptionId);
+          } else if (request.type === 'api' || request.type === 'exec') {
+            result = coordinator.submit(request);
+          } else {
+            result = Promise.resolve({ ok: false, error: { code: 'unsupported_request_type' } });
+          }
+        } catch (error) {
+          result = Promise.reject(error);
+        }
+        Promise.resolve(result).then((response) => {
+          writeMessage(connection, response);
+          connection.end();
           if (request.type === 'shutdown') setTimeout(terminate, 10);
         }).catch((error) => {
-          connection.end(`${JSON.stringify({ ok: false, error: { code: error.code || 'coordinator_error', message: error.message } })}\n`);
+          writeMessage(connection, { ok: false, error: { code: error.code || 'coordinator_error', message: error.message } });
+          connection.end();
         });
       }
+    });
+    connection.on('close', () => {
+      if (listener) detachEventListener(listener);
     });
   });
 
