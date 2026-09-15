@@ -26,7 +26,7 @@ Questa sezione distingue lo stato conseguito dalla roadmap. La sezione [Piano re
 
 ### Tabella operativa live per loop
 
-La tabella seguente è una fotografia read-only calcolata sui ledger canonici presenti in `origin/main` alla SHA `2acb0e…`; i batch delle PR #8735 e #8739 non sono anticipati. Il bridge e gli audit separano la copertura durevole dagli artifact runner-local.
+La tabella seguente è una fotografia read-only calcolata sui ledger canonici presenti in `origin/main` alla SHA `d3cea5d…`; il batch della PR #8735 è incluso, mentre la PR #8739 non è anticipata. Il bridge e gli audit separano la copertura durevole dagli artifact runner-local.
 
 | Loop | Ultima esecuzione canonica (UTC) | Qualità / issue | Outcome mancante | Autonomia effettiva / max | Prossima azione umana |
 |---|---|---|---|---|---|
