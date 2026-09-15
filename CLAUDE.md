@@ -91,6 +91,11 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
   `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook
   sono deduplicati per `X-GitHub-Delivery` e consegnati at-least-once.
+- La configurazione pubblica attuale usa Cloudflare Tunnel sotto
+  `frontaliereticino.ch`: `https://gh-default.frontaliereticino.ch/github/webhook`
+  inoltra alla porta locale `18787` e `https://gh-nanako.frontaliereticino.ch/github/webhook`
+  alla `18788`. I receiver sono launch agent macOS persistenti; non mettere il
+  token del tunnel o il secret webhook nei repository.
 - Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
   una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
   permesso per l'agent di riprendere il polling.
