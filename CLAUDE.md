@@ -64,6 +64,28 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
 
+## Coordinatore GitHub locale
+
+- Le chiamate GitHub degli agenti passano dal coordinatore condiviso in
+  `bin/github-coordinator.mjs`; lo shim comune e' `~/.local/bin/gh`.
+- `gh` resta il comando compatibile da usare normalmente: la coda, il limite di
+  concorrenza (8 letture di default, ridotte automaticamente con poco margine
+  di rate limit), la deduplicazione GET, la cache breve e il backoff sono
+  applicati prima del binario reale. Non invocare direttamente
+  `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
+- `gh pr checks --watch` e' vietato: un solo osservatore condiviso deve seguire
+  una PR. Controlla il daemon con `bin/gh-frontaliere status`.
+- In caso estremo il daemon puo' usare una corsia anonima separata, solo per
+  letture REST pubbliche e solo dopo `x-ratelimit-remaining: 0` autenticato.
+  Ha un budget locale conservativo di 45 richieste/ora; non vale per GraphQL,
+  search, mutation o percorsi privati.
+- I hook vengono caricati all'avvio della sessione: dopo questa modifica le
+  sessioni Codex/Claude gia' aperte vanno riavviate. Verifica con `command -v
+  gh` e `bin/gh-frontaliere status`.
+- I token restano nel keychain/ambiente e non entrano nel protocollo del socket,
+  nei log o negli artifact. `bin/gh-nanako` seleziona una coda separata per
+  l'identita' del corpus; non usarla per distribuire il carico.
+
 ## Comandi e worktree
 
 Corpus/API:

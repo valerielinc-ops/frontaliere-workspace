@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+
+import { sendRequest, waitForCoordinatorStop } from './github-coordinator-client.mjs';
+
+function printStatus(status) {
+  process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+}
+
+function printResponse(response) {
+  if (response?.stdout) process.stdout.write(response.stdout);
+  if (response?.stderr) process.stderr.write(response.stderr);
+  process.exitCode = Number.isInteger(response?.exitCode) ? response.exitCode : (response?.ok ? 0 : 1);
+}
+
+const argv = process.argv.slice(2);
+const identityIndex = argv.findIndex((value) => value === '--identity');
+const identity = identityIndex >= 0 ? argv[identityIndex + 1] : process.env.FRONTALIERE_GH_IDENTITY;
+const args = identityIndex >= 0
+  ? argv.slice(0, identityIndex).concat(argv.slice(identityIndex + 2))
+  : argv;
+
+try {
+  const command = args[0];
+  if (command === 'status' || command === 'ping') {
+    const response = await sendRequest({ type: command === 'status' ? 'status' : 'ping' }, { identity });
+    printStatus(response.status || response);
+  } else if (command === 'stop') {
+    await sendRequest({ type: 'shutdown' }, { identity });
+    if (!await waitForCoordinatorStop(identity)) {
+      throw new Error('coordinator_shutdown_timeout');
+    }
+  } else {
+    if (args.includes('--watch')) {
+      throw new Error('--watch è vietato; usa un solo osservatore condiviso.');
+    }
+    const response = await sendRequest({ type: 'exec', args, cwd: process.cwd() }, { identity });
+    printResponse(response);
+  }
+} catch (error) {
+  process.stderr.write(`github-coordinator: ${error.message}\n`);
+  process.exitCode = 1;
+}

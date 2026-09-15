@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "${1:-status}" in
+  serve)
+    exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "$@"
+    ;;
+  *)
+    exec "$script_dir/gh-frontaliere" "$@"
+    ;;
+esac

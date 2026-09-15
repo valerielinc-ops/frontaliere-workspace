@@ -13,13 +13,18 @@
     "SKIP_CI_CHECK": "1",
     "FAST_BUILD": "1",
     "NODE_OPTIONS": "--max-old-space-size=12288",
-    "GOOGLE_APPLICATION_CREDENTIALS": "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json"
+    "GOOGLE_APPLICATION_CREDENTIALS": "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json",
+    "FRONTALIERE_GH_COORDINATOR": "1"
   },
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/bin/github-api-policy.mjs\" ] || d=\"$WORKSPACE/bin/github-api-policy.mjs\"; [ -f \"$d\" ] || exit 0; node \"$d\"'"
+          },
           {
             "type": "command",
             "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/run-mutation-gate.mjs\"'"
@@ -52,6 +57,10 @@
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -x \"$d/bin/gh-frontaliere\" ] || d=\"$WORKSPACE/bin/gh-frontaliere\"; [ -x \"$d\" ] || exit 0; node \"$d\" ping >/dev/null 2>&1 || true'"
+          },
           {
             "type": "command",
             "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; ( cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true'"

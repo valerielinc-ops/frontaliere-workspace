@@ -7,6 +7,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/github-api-policy.mjs\" ] || exit 0; node \"$d/bin/github-api-policy.mjs\"'",
+            "statusMessage": "Instradamento obbligatorio delle chiamate GitHub nel coordinatore"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/run-mutation-gate.mjs\"'",
             "statusMessage": "Blocco rerun/cancel per evitare review duplicate"
           },
@@ -44,6 +49,11 @@
       {
         "matcher": "startup|resume",
         "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -x \"$d/bin/gh-frontaliere\" ] || exit 0; node \"$d/bin/gh-frontaliere\" ping >/dev/null 2>&1 || true'",
+            "statusMessage": "Avvio del coordinatore GitHub condiviso"
+          },
           {
             "type": "command",
             "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; ( cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true'",
