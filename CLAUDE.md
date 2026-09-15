@@ -104,7 +104,9 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   deve riutilizzare/accorpare l'osservazione già presente. Una subscription
   identica viene rifiutata con `event_duplicate_subscription` e restituisce
   `existingSubscriptionId`; `--allow-duplicate` è riservato a un osservatore
-  realmente indipendente e va motivato nel contesto dell'agent.
+  realmente indipendente e va motivato nel contesto dell'agent. Due attese sullo
+  stesso target ma con `waitFor` diversi restano interessi distinti e non vanno
+  accorpate.
 - Per ripulire residui usa prima `bin/gh-frontaliere events gc` in dry-run. Solo
   `events gc --apply` rimuove duplicati vecchi senza listener e senza eventi
   pending; gli orfani unici restano protetti, salvo l'opzione esplicita

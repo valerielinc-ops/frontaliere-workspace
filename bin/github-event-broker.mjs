@@ -702,10 +702,10 @@ export class GitHubEventBroker {
     return expiredIds;
   }
 
-  duplicateTargetCounts() {
+  duplicateSubscriptionCounts() {
     const counts = new Map();
     for (const subscription of this.state.subscriptions) {
-      const key = subscriptionTargetKey(subscription);
+      const key = subscriptionDedupKey(subscription);
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     return counts;
@@ -714,14 +714,15 @@ export class GitHubEventBroker {
   duplicateGroups() {
     const groups = new Map();
     for (const subscription of this.state.subscriptions) {
-      const targetKey = subscriptionTargetKey(subscription);
-      if (!groups.has(targetKey)) groups.set(targetKey, []);
-      groups.get(targetKey).push(subscription);
+      const dedupKey = subscriptionDedupKey(subscription);
+      if (!groups.has(dedupKey)) groups.set(dedupKey, []);
+      groups.get(dedupKey).push(subscription);
     }
-    return [...groups.entries()]
-      .filter(([, subscriptions]) => subscriptions.length > 1)
-      .map(([targetKey, subscriptions]) => ({
-        targetKey,
+    return [...groups.values()]
+      .filter((subscriptions) => subscriptions.length > 1)
+      .map((subscriptions) => ({
+        targetKey: subscriptionTargetKey(subscriptions[0]),
+        waitFor: subscriptions[0].waitFor,
         count: subscriptions.length,
         subscriptionIds: subscriptions.map(({ id }) => id),
         agentIds: unique(subscriptions.map(({ agentId }) => agentId)),
@@ -738,7 +739,7 @@ export class GitHubEventBroker {
   }
 
   publicSubscription(subscription, options = {}) {
-    const duplicateTargetCount = this.duplicateTargetCounts().get(subscriptionTargetKey(subscription)) || 1;
+    const duplicateTargetCount = this.duplicateSubscriptionCounts().get(subscriptionDedupKey(subscription)) || 1;
     return subscriptionPublic(subscription, {
       ...options,
       waitEstimate: this.estimateFor(subscription),
@@ -869,15 +870,40 @@ export class GitHubEventBroker {
     }
     this.prune();
     const nowMs = this.now();
-    const duplicateCounts = this.duplicateTargetCounts();
-    const candidates = this.state.subscriptions.filter((subscription) => {
+    const duplicateCounts = this.duplicateSubscriptionCounts();
+    const eligibility = new Map();
+    for (const subscription of this.state.subscriptions) {
       const createdAtMs = Date.parse(subscription.createdAt);
       const oldEnough = Number.isFinite(createdAtMs) && nowMs - createdAtMs >= grace;
       const noListener = listenerAttachedValue(listenerAttached, subscription.id) === false;
       const noPending = subscription.pending.length === 0;
-      const duplicate = (duplicateCounts.get(subscriptionTargetKey(subscription)) || 0) > 1;
-      return oldEnough && noListener && noPending && (duplicate || includeUnique);
-    });
+      const duplicate = (duplicateCounts.get(subscriptionDedupKey(subscription)) || 0) > 1;
+      eligibility.set(subscription.id, {
+        eligible: oldEnough && noListener && noPending && (duplicate || includeUnique),
+      });
+    }
+    const keepers = new Set();
+    if (!includeUnique) {
+      const groups = new Map();
+      for (const subscription of this.state.subscriptions) {
+        const key = subscriptionDedupKey(subscription);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(subscription);
+      }
+      for (const [key, group] of groups) {
+        if ((duplicateCounts.get(key) || 0) < 2) continue;
+        const eligible = group.filter((subscription) => eligibility.get(subscription.id).eligible);
+        const protectedMembers = group.filter((subscription) => !eligibility.get(subscription.id).eligible);
+        if (protectedMembers.length === 0 && eligible.length > 0) {
+          const keeper = [...eligible]
+            .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
+          keepers.add(keeper.id);
+        }
+      }
+    }
+    const candidates = this.state.subscriptions.filter((subscription) => (
+      eligibility.get(subscription.id).eligible && !keepers.has(subscription.id)
+    ));
     const candidateIds = candidates.map(({ id }) => id);
     const removedIds = apply ? candidateIds : [];
     if (apply && removedIds.length > 0) {

@@ -327,6 +327,10 @@ test('il garbage collector rimuove solo duplicati orfani dopo una grace period e
       agentId: 'stale', repo: 'owner/repo', resource: 'workflow_run', runId: '9001',
       waitFor: ['success'], ttlSeconds: 21_600, allowDuplicate: true,
     });
+    const differentInterest = broker.subscribe({
+      agentId: 'different-interest', repo: 'owner/repo', resource: 'workflow_run', runId: '9001',
+      waitFor: ['failed'], ttlSeconds: 21_600,
+    });
     nowMs += 3_600_000;
 
     const dryRun = broker.garbageCollect({
@@ -336,6 +340,7 @@ test('il garbage collector rimuove solo duplicati orfani dopo una grace period e
     assert.equal(dryRun.dryRun, true);
     assert.deepEqual(dryRun.removedIds, []);
     assert.deepEqual(dryRun.candidates.map(({ id }) => id), [duplicate.id]);
+    assert.equal(dryRun.candidates.some(({ id }) => id === differentInterest.id), false);
 
     const applied = broker.garbageCollect({
       listenerAttached: new Set([primary.id]),
@@ -345,6 +350,28 @@ test('il garbage collector rimuove solo duplicati orfani dopo una grace period e
     assert.deepEqual(applied.removedIds, [duplicate.id]);
     assert.equal(broker.getSubscription(duplicate.id), null);
     assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
+
+    const orphanPrimary = broker.subscribe({
+      agentId: 'orphan-primary', repo: 'owner/repo', resource: 'deployment', deploymentId: '77',
+      waitFor: ['success'], ttlSeconds: 21_600,
+    });
+    const orphanDuplicate = broker.subscribe({
+      agentId: 'orphan-duplicate', repo: 'owner/repo', resource: 'deployment', deploymentId: '77',
+      waitFor: ['success'], ttlSeconds: 21_600, allowDuplicate: true,
+    });
+    nowMs += 3_600_000;
+    const orphanDryRun = broker.garbageCollect({
+      listenerAttached: new Set([primary.id]),
+      olderThanMs: 3_600_000,
+    });
+    assert.deepEqual(orphanDryRun.candidates.map(({ id }) => id), [orphanDuplicate.id]);
+    const orphanApplied = broker.garbageCollect({
+      listenerAttached: new Set([primary.id]),
+      olderThanMs: 3_600_000,
+      apply: true,
+    });
+    assert.deepEqual(orphanApplied.removedIds, [orphanDuplicate.id]);
+    assert.ok(broker.getSubscription(orphanPrimary.id));
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }
