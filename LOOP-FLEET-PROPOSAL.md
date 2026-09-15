@@ -1,6 +1,6 @@
 # Frontaliere Ticino — proposta di flotta di loop automatici
 
-## Stato operativo corrente — verificato 2026-09-15, 04:53 UTC
+## Stato operativo corrente — verificato 2026-09-15, 05:01 UTC
 
 ### Goal e distinzione di stato
 
@@ -10,15 +10,15 @@ Questa sezione distingue lo stato conseguito dalla roadmap. La sezione [Piano re
 
 ### Implementato e canonico
 
-- `origin/main` è verificata a `2d86c7a0a52220209a59b324fabc09535f237e5b`; i ledger durevoli contano 560 righe ciascuno per observations, decisions e health-history, più 2.110 eventi lifecycle. La persistenza canonica passa dal bridge che valida artifact immutabili e apre una PR; i workflow dei loop continuano a usare directory runner-local temporanee.
+- `origin/main` è verificata a `fc54ab05df254cdf1d3a078fd90a8dab86af16da`; i ledger durevoli contano 560 righe ciascuno per observations, decisions e health-history, più 2.110 eventi lifecycle. La persistenza canonica passa dal bridge che valida artifact immutabili e apre una PR; i workflow dei loop continuano a usare directory runner-local temporanee.
 - Il registry verifica 12/12 loop, action policy, massimali e binding senza finding. Il nuovo exporter L7 valida il registry completo e restituisce il contratto `quality/status/metrics` consumabile dall’allocator; la correzione è ancora nella [PR #8693](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8693), non ancora canonica.
-- Le [PR #8694](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8694) (L6), [#8698](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8698) (L9), [#8697](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8697) (L2) e [#8700](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8700) (L8) sono entrate tramite il percorso nativo. I rispettivi run post-merge e le fonti outcome mancanti restano da verificare separatamente.
+- Le [PR #8694](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8694) (L6), [#8698](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8698) (L9), [#8697](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8697) (L2) e [#8700](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8700) (L8), oltre alla [PR #8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) (L3), sono entrate tramite il percorso nativo. I rispettivi run post-merge e le fonti outcome mancanti restano da verificare separatamente.
 - Gli outcome indipendenti più recenti sulla `main` sono 4/12: L0, L1, L4 e L5. L2, L3, L6, L7, L8, L9, L10 e L11 restano parziali, stale o non misurabili finché la fonte dichiarata e il contratto di outcome non sono completi.
 - Il lifecycle osserva 434 `candidate`, 434 `owner_assigned`, 273 `pr_opened`, 273 `tests_passed`, 150 `review_approved`, 273 `merged` e 273 `post_merge_verified`; non risultano ancora `rolled_back` o `inconclusive`. TTL, SLA owner, verifica post-merge e responsabile rollback sono nel registry, ma la prova runtime di rollback non è presente.
 
 ### Ancora aperto o bloccato
 
-- Restano in verifica nativa la [PR #8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) (L3), [#8689](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8689) (L5) e [#8693](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8693) (L7). I test L3/L5 sono ancora pending; L7 è stato riallineato automaticamente a una nuova head dopo che il run precedente è stato classificato superseded e sta rieseguendo test e validazione workflow. Finché test, review, riallineamento alla `main` e verifica post-merge non sono conclusi, i loro export non sono outcome canonici.
+- Restano in verifica nativa la [PR #8689](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8689) (L5) e [#8693](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8693) (L7). Il test L5 è pending; L7 è stato riallineato automaticamente a una nuova head dopo che il run precedente è stato classificato superseded e sta rieseguendo test e validazione workflow. Finché test, review, riallineamento alla `main` e verifica post-merge non sono conclusi, i loro export non sono outcome canonici.
 - L6 richiede righe di verdetto editoriale umano indipendente; L8 richiede un export commerciale autorizzato con stati `approved/pending/reversed`; L9 richiede la verifica continuativa del funnel employer e delle attivazioni pagate. Nessun dato mancante viene trasformato in zero e nessun importo viene dedotto.
 - L11 oggi rileva, valida, riconcilia, registra e instrada errori tecnici provati verso issue/PR bounded. La sua autocorrezione fino a PR automatica, canary, stop e rollback resta futura e non è attivata da questa proposta.
 - Le azioni ad alto rischio restano bloccate: push diretto/force-push o merge manuale; bypass/downgrade dei gate; secret, Remote Config, token, ruoli e permessi; scrittura diretta su `main`, corpus, shard o pubblicato; prezzi, commissioni, partner, subscription, billing, revenue; Auto Ads e layout pubblicitario; pagine, contenuti o SEO massivi; outreach/alert/email/newsletter e contatti employer; purge, delete e rollback non bounded.
@@ -32,7 +32,7 @@ La tabella seguente usa l’ultima riga health canonica disponibile su `main`; l
 | L0 | run 34907140410 · 2026-09-14 23:05 | observed · 0 | — | A0 observe / A4 | Rivedere l’esito fresco e chiudere la finestra di osservazione. |
 | L1 | run 34896515969 · 2026-09-14 21:03 | observed · — | — | A0 observe / A2 | Rivedere il risultato utile/error-free e mantenere il monitoraggio. |
 | L2 | run 34901863969 · 2026-09-14 22:00 | partial · — | numeratore/denominatore | A1 candidate+issue / A2 | Eseguire il run post-merge della [PR #8697](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8697), poi verificare l’outcome prima di cambiare esposizione. |
-| L3 | run 34872557815 · 2026-09-14 17:05 | partial · 1.551 | generatedAt, numeratore/denominatore | A2 quarantine+candidate+issue / A4 | Chiudere i gate della [PR #8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) e verificare il contratto application-path; non inferire candidature inviate. |
+| L3 | run 34872557815 · 2026-09-14 17:05 | partial · 1.551 | generatedAt, numeratore/denominatore | A2 quarantine+candidate+issue / A4 | Eseguire il run post-merge della [PR #8684](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8684) e verificare il contratto application-path; non inferire candidature inviate. |
 | L4 | run 34864941192 · 2026-09-14 15:52 | observed · 0 | — | A0 observe / A4 | Rivedere consenso, delivery e ritorno; nessuna modifica alla delivery è autorizzata dall’esito solo. |
 | L5 | run 34919192868 · 2026-09-15 01:56 | observed · 0 | — | A0 observe / A3 | Verificare la [PR #8689](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8689) e distinguere decision moments da outcome commerciale. |
 | L6 | run 34901863932 · 2026-09-14 22:01 | stale · 2 | generatedAt, numeratore/denominatore | A2 quarantine+candidate+issue / A2 | Inserire verdetti editoriali umani con fonte e locale, quindi verificare il post-merge run di [#8694](https://github.com/valerielinc-ops/frontaliere-si-o-no/pull/8694). |
