@@ -30,7 +30,7 @@ import {
 import { GitHubEventBroker, normalizeReconciliationEvent } from './github-event-broker.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_PROTOCOL_VERSION = 3;
+const COORDINATOR_PROTOCOL_VERSION = 4;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
 const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
 const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
@@ -524,6 +524,7 @@ export class GitHubCoordinator {
     this.socket = socket;
     this.eventBroker = eventBroker;
     this.eventNotifier = null;
+    this.eventListenerInspector = null;
     this.queue = [];
     this.active = 0;
     this.activeMutations = 0;
@@ -558,9 +559,42 @@ export class GitHubCoordinator {
     };
   }
 
-  status() {
+  status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
+    const eventSummary = this.eventBroker
+      ? {
+        enabled: true,
+        webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+        ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
+      }
+      : { enabled: false };
+    if (compact) {
+      return {
+        protocolVersion: COORDINATOR_PROTOCOL_VERSION,
+        identity: this.identity,
+        socket: this.socket,
+        queueLength: this.queue.length,
+        active: this.active,
+        maxInFlight: MAX_IN_FLIGHT,
+        effectiveMaxInFlight: this.effectiveMaxInFlight(),
+        buckets: Object.fromEntries(this.buckets.entries()),
+        pausedUntil: Object.fromEntries(this.bucketPausedUntil.entries()),
+        metrics: { ...this.metrics },
+        cacheEntries: this.cache.size,
+        cliCacheEntries: this.cliCache.size,
+        events: eventSummary,
+        pendingCancellations: this.pendingCancellations.size,
+        anonymous: {
+          budget: ANONYMOUS_BUDGET,
+          used: this.anonymousUsed,
+          remaining: Math.max(0, ANONYMOUS_BUDGET - this.anonymousUsed),
+          windowStartedAt: this.anonymousWindowStartedAt,
+          windowResetAt: this.anonymousWindowStartedAt + ANONYMOUS_WINDOW_MS,
+          pausedUntil: this.anonymousPausedUntil,
+        },
+      };
+    }
     return {
       protocolVersion: COORDINATOR_PROTOCOL_VERSION,
       identity: this.identity,
@@ -575,7 +609,11 @@ export class GitHubCoordinator {
       cacheEntries: this.cache.size,
       cliCacheEntries: this.cliCache.size,
       events: this.eventBroker
-        ? { enabled: true, webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret), ...this.eventBroker.status() }
+        ? {
+          enabled: true,
+          webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+          ...this.eventBroker.status({ listenerAttached: this.eventListenerInspector }),
+        }
         : { enabled: false },
       pendingCancellations: [...this.pendingCancellations.values()]
         .map((pending) => this.publicCancellationDetails(pending)),
@@ -638,6 +676,10 @@ export class GitHubCoordinator {
     this.eventNotifier = typeof notifier === 'function' ? notifier : null;
   }
 
+  setEventListenerInspector(inspector) {
+    this.eventListenerInspector = typeof inspector === 'function' ? inspector : null;
+  }
+
   eventSubscription(spec) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     return { ok: true, subscription: this.eventBroker.subscribe(spec) };
@@ -648,7 +690,16 @@ export class GitHubCoordinator {
     return {
       ok: true,
       webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
-      ...this.eventBroker.status(),
+      ...this.eventBroker.status({ listenerAttached: this.eventListenerInspector }),
+    };
+  }
+
+  eventSubscriptionSummary() {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return {
+      ok: true,
+      webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
     };
   }
 
@@ -661,14 +712,19 @@ export class GitHubCoordinator {
 
   eventSubscriptionDetails(subscriptionId) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
-    const subscription = this.eventBroker.getSubscription(subscriptionId);
+    const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
     if (!subscription) {
       return {
         ok: false,
         error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
       };
     }
-    return { ok: true, subscription };
+    return {
+      ok: true,
+      subscription: this.eventBroker.publicSubscription(subscription, {
+        listenerAttached: this.eventListenerInspector?.(subscription.id) ?? null,
+      }),
+    };
   }
 
   ingestWebhook(request) {
@@ -695,6 +751,15 @@ export class GitHubCoordinator {
   acknowledgeEvent(subscriptionId, eventId) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     return this.eventBroker.acknowledge(subscriptionId, eventId);
+  }
+
+  expireEventSubscriptions() {
+    if (!this.eventBroker) return [];
+    const expiredIds = this.eventBroker.expireSubscriptions();
+    for (const subscriptionId of expiredIds) {
+      this.eventNotifier?.(subscriptionId, { expired: true });
+    }
+    return expiredIds;
   }
 
   async reconcileEvents(subscriptionId) {
@@ -1306,6 +1371,7 @@ function readTokenAndStart(identity) {
   });
   const coordinator = new GitHubCoordinator({ identity, token, realGh, socket, eventBroker });
   let terminate = () => {};
+  let expirationTimer = null;
   const eventListeners = new Map();
 
   const writeMessage = (connection, message) => {
@@ -1317,6 +1383,7 @@ function readTokenAndStart(identity) {
       eventListeners.delete(listener.subscriptionId);
     }
   };
+  coordinator.setEventListenerInspector((subscriptionId) => eventListeners.has(String(subscriptionId)));
 
   const deliverEvent = (listener) => {
     if (!eventListeners.has(listener.subscriptionId) || listener.inFlightEventId) return;
@@ -1344,6 +1411,18 @@ function readTokenAndStart(identity) {
       writeMessage(listener.connection, {
         ok: false,
         error: { code: 'event_subscription_removed', message: 'event subscription was removed' },
+      });
+      detachEventListener(listener);
+      listener.connection.end();
+      return;
+    }
+    if (metadata.expired) {
+      writeMessage(listener.connection, {
+        ok: false,
+        error: {
+          code: 'event_subscription_expired',
+          message: 'event subscription wait deadline reached',
+        },
       });
       detachEventListener(listener);
       listener.connection.end();
@@ -1433,6 +1512,11 @@ function readTokenAndStart(identity) {
     let buffer = '';
     let handled = false;
     let listener = null;
+    connection.on('error', () => {
+      // A supervisor disappearing must detach only its listener.  Without an
+      // error handler ECONNRESET can terminate the whole coordinator process.
+      if (listener) detachEventListener(listener);
+    });
     connection.on('data', (chunk) => {
       buffer += chunk.toString('utf8');
       let newline;
@@ -1461,9 +1545,9 @@ function readTokenAndStart(identity) {
         let result;
         try {
           if (request.type === 'ping') {
-            result = Promise.resolve({ ok: true, status: coordinator.status() });
+            result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
           } else if (request.type === 'status') {
-            result = Promise.resolve({ ok: true, status: coordinator.status() });
+            result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
           } else if (request.type === 'shutdown') {
             result = Promise.resolve({ ok: true });
           } else if (request.type === 'cancellation-details') {
@@ -1474,6 +1558,8 @@ function readTokenAndStart(identity) {
             result = Promise.resolve(coordinator.eventSubscription(request.spec));
           } else if (request.type === 'events-status') {
             result = Promise.resolve(coordinator.eventSubscriptions());
+          } else if (request.type === 'events-summary') {
+            result = Promise.resolve(coordinator.eventSubscriptionSummary());
           } else if (request.type === 'events-subscription') {
             result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
           } else if (request.type === 'events-unsubscribe') {
@@ -1509,6 +1595,7 @@ function readTokenAndStart(identity) {
   terminate = () => {
     if (terminating) return;
     terminating = true;
+    if (expirationTimer) clearInterval(expirationTimer);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1_000);
   };
@@ -1528,6 +1615,15 @@ function readTokenAndStart(identity) {
   server.on('close', cleanUp);
   process.on('SIGTERM', terminate);
   process.on('SIGINT', terminate);
+
+  expirationTimer = setInterval(() => {
+    try {
+      coordinator.expireEventSubscriptions();
+    } catch (error) {
+      process.stderr.write(`github-coordinator: event expiration failed: ${error.message}\n`);
+    }
+  }, 1_000);
+  expirationTimer.unref?.();
 
   server.listen(socket);
 }

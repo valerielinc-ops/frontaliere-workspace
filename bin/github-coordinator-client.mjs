@@ -8,7 +8,7 @@
  * resolves the selected identity locally and keeps the credential in memory.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createConnection } from 'node:net';
 import {
   mkdirSync,
@@ -23,11 +23,11 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const SERVER = join(THIS_DIR, 'github-coordinator.mjs');
+const LAUNCHER = join(THIS_DIR, 'github-coordinator-launcher');
 const DEFAULT_STATE_DIR = join(homedir(), 'Library', 'Caches', 'frontaliere');
 const CANCELLATION_PROTOCOL_VERSION = 2;
-const EVENT_PROTOCOL_VERSION = 3;
-const CONNECT_TIMEOUT_MS = 1_500;
+const EVENT_PROTOCOL_VERSION = 4;
+const CONNECT_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
 
@@ -49,6 +49,19 @@ export function socketPath(identity = normalizeIdentity()) {
 
 function startLockPath(identity) {
   return `${socketPath(identity)}.start`;
+}
+
+function persistentServiceLabel(identity) {
+  return `ch.frontaliere.github-coordinator-${normalizeIdentity(identity)}`;
+}
+
+function persistentServiceLoaded(identity) {
+  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') return false;
+  const result = spawnSync('/bin/launchctl', [
+    'print',
+    `gui/${process.getuid()}/${persistentServiceLabel(identity)}`,
+  ], { stdio: 'ignore' });
+  return result.status === 0;
 }
 
 function sleep(milliseconds) {
@@ -139,8 +152,14 @@ async function startDaemon(identity) {
     } catch {
       // No healthy daemon owns the socket; remove only this stale endpoint.
     }
+    if (persistentServiceLoaded(identity)) {
+      // launchd owns this identity.  Waiting for KeepAlive avoids a second
+      // daemon binding the same socket while the service is restarting.
+      releaseStartLock(identity);
+      return false;
+    }
     try { unlinkSync(socketPath(identity)); } catch { /* no stale socket */ }
-    const child = spawn(process.execPath, [SERVER, 'serve', '--identity', identity], {
+    const child = spawn(LAUNCHER, ['serve', '--identity', identity], {
       detached: true,
       stdio: 'ignore',
       env: {
@@ -222,7 +241,7 @@ function requestNeedsCancellationConfirmation(request) {
 
 async function ensureCancellationConfirmationProtocol(identity) {
   const response = await connectOnce(
-    { type: 'status', identity },
+    { type: 'status', identity, compact: true },
     { identity, timeoutMs: CONNECT_TIMEOUT_MS },
   );
   const version = Number(response?.status?.protocolVersion || 0);
@@ -235,19 +254,28 @@ async function ensureCancellationConfirmationProtocol(identity) {
   throw error;
 }
 
-async function ensureEventProtocol(identity) {
+async function ensureEventProtocol(identity, { requireWebhookSecret = false } = {}) {
   const response = await connectOnce(
-    { type: 'status', identity },
+    { type: 'status', identity, compact: true },
     { identity, timeoutMs: CONNECT_TIMEOUT_MS },
   );
   const version = Number(response?.status?.protocolVersion || 0);
-  if (version >= EVENT_PROTOCOL_VERSION) return;
-  const error = new Error(
-    'event subscriptions bloccate: il coordinatore condiviso deve essere riavviato per attivare il protocollo webhook',
-  );
-  error.code = 'event_protocol_unavailable';
-  error.exitCode = 2;
-  throw error;
+  if (version < EVENT_PROTOCOL_VERSION) {
+    const error = new Error(
+      'event subscriptions bloccate: il coordinatore condiviso deve essere riavviato per attivare il protocollo webhook',
+    );
+    error.code = 'event_protocol_unavailable';
+    error.exitCode = 2;
+    throw error;
+  }
+  if (requireWebhookSecret && response?.status?.events?.webhookSecretConfigured !== true) {
+    const error = new Error(
+      'event subscriptions bloccate: secret webhook non configurato nel coordinatore; carica Remote Config e riavvia il servizio',
+    );
+    error.code = 'event_webhook_secret_unconfigured';
+    error.exitCode = 2;
+    throw error;
+  }
 }
 
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
@@ -257,7 +285,9 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
     await ensureCancellationConfirmationProtocol(normalized);
   }
   if (String(request?.type || '').startsWith('events-')) {
-    await ensureEventProtocol(normalized);
+    await ensureEventProtocol(normalized, {
+      requireWebhookSecret: request.type === 'events-subscribe' || request.type === 'events-webhook',
+    });
   }
   const response = await connectOnce({ ...request, identity: normalized }, { identity: normalized });
   if (response?.ok === false && response?.error) {
@@ -294,6 +324,10 @@ export async function eventSubscriptions({ identity } = {}) {
   return sendRequest({ type: 'events-status' }, { identity });
 }
 
+export async function eventSummary({ identity } = {}) {
+  return sendRequest({ type: 'events-summary' }, { identity });
+}
+
 export async function eventSubscription(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-subscription', subscriptionId }, { identity });
 }
@@ -323,25 +357,39 @@ export async function listenForEvent(subscriptionId, { identity = normalizeIdent
   if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
     throw new TypeError('event_subscription_id_required');
   }
-  await ensureCoordinator(normalized);
-  await ensureEventProtocol(normalized);
+  const details = await eventSubscription(subscriptionId, { identity: normalized });
+  await ensureEventProtocol(normalized, { requireWebhookSecret: true });
+  const expiresAtMs = Date.parse(details.subscription?.expiresAt || '');
+  const requestedDeadlineMs = timeoutMs > 0 ? Date.now() + timeoutMs : Infinity;
+  const deadlineMs = Number.isFinite(expiresAtMs)
+    ? Math.min(expiresAtMs, requestedDeadlineMs)
+    : requestedDeadlineMs;
+  const deadlineIsSubscription = Number.isFinite(expiresAtMs) && expiresAtMs <= requestedDeadlineMs;
   return new Promise((resolvePromise, rejectPromise) => {
-    const socket = createConnection(socketPath(normalized));
-    let buffer = '';
-    let event = null;
+    let socket = null;
+    let reconnectTimer = null;
+    let deadlineTimer = null;
+    let retryAttempt = 0;
     let settled = false;
-    const timer = timeoutMs > 0 ? setTimeout(() => {
-      socket.destroy();
-      rejectOnce(new Error(`event_listener_timeout: ${subscriptionId}`));
-    }, timeoutMs) : null;
+    let event = null;
 
-    const cleanup = () => {
-      if (timer) clearTimeout(timer);
+    const deadlineError = () => {
+      const error = new Error(deadlineIsSubscription
+        ? `event_subscription_expired: ${subscriptionId}`
+        : `event_listener_timeout: ${subscriptionId}`);
+      error.code = deadlineIsSubscription ? 'event_subscription_expired' : 'event_listener_timeout';
+      return error;
+    };
+
+    const cleanup = ({ destroySocket = false } = {}) => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (destroySocket && socket && !socket.destroyed) socket.destroy();
     };
     const rejectOnce = (error) => {
       if (settled) return;
       settled = true;
-      cleanup();
+      cleanup({ destroySocket: true });
       rejectPromise(error);
     };
     const resolveOnce = (value) => {
@@ -351,53 +399,89 @@ export async function listenForEvent(subscriptionId, { identity = normalizeIdent
       resolvePromise(value);
     };
 
-    socket.on('connect', () => {
-      socket.write(`${JSON.stringify({
-        type: 'event-listen',
-        identity: normalized,
-        subscriptionId,
-        once,
-      })}\n`);
-    });
-    socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
-      let newline;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (!line.trim()) continue;
-        let response;
-        try {
-          response = JSON.parse(line);
-        } catch (error) {
-          socket.destroy();
-          rejectOnce(new Error(`invalid_event_listener_response: ${error.message}`));
-          return;
-        }
-        if (response?.ok === false && response.error) {
-          socket.destroy();
-          const error = new Error(response.error.message || response.error.code || 'event_listener_error');
-          Object.assign(error, response.error);
-          rejectOnce(error);
-          return;
-        }
-        if (response?.type === 'event') {
-          event = response.event;
-          socket.write(`${JSON.stringify({
-            type: 'event-ack',
-            subscriptionId,
-            eventId: event?.id,
-          })}\n`);
-        } else if (response?.type === 'acked' && event) {
-          resolveOnce(event);
-          socket.end();
-        }
+    const scheduleReconnect = () => {
+      if (settled || reconnectTimer) return;
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) {
+        rejectOnce(deadlineError());
+        return;
       }
-    });
-    socket.on('error', rejectOnce);
-    socket.on('close', () => {
-      if (!settled) rejectOnce(new Error(`event_listener_closed: ${subscriptionId}`));
-    });
+      const delayMs = Math.min(5_000, 100 * (2 ** Math.min(retryAttempt, 6)), remainingMs);
+      retryAttempt += 1;
+      reconnectTimer = setTimeout(async () => {
+        reconnectTimer = null;
+        try {
+          await ensureCoordinator(normalized);
+          await ensureEventProtocol(normalized, { requireWebhookSecret: true });
+          openSocket();
+        } catch {
+          scheduleReconnect();
+        }
+      }, delayMs);
+    };
+
+    const openSocket = () => {
+      if (settled) return;
+      const candidate = createConnection(socketPath(normalized));
+      socket = candidate;
+      let buffer = '';
+      let disconnected = false;
+      const onDisconnect = () => {
+        if (settled || disconnected) return;
+        disconnected = true;
+        if (socket === candidate) socket = null;
+        scheduleReconnect();
+      };
+      candidate.on('connect', () => {
+        retryAttempt = 0;
+        candidate.write(`${JSON.stringify({
+          type: 'event-listen',
+          identity: normalized,
+          subscriptionId,
+          once,
+        })}\n`);
+      });
+      candidate.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          let response;
+          try {
+            response = JSON.parse(line);
+          } catch (error) {
+            rejectOnce(new Error(`invalid_event_listener_response: ${error.message}`));
+            return;
+          }
+          if (response?.ok === false && response.error) {
+            const error = new Error(response.error.message || response.error.code || 'event_listener_error');
+            Object.assign(error, response.error);
+            rejectOnce(error);
+            return;
+          }
+          if (response?.type === 'event') {
+            event = response.event;
+            candidate.write(`${JSON.stringify({
+              type: 'event-ack',
+              subscriptionId,
+              eventId: event?.id,
+            })}\n`);
+          } else if (response?.type === 'acked' && event) {
+            resolveOnce(event);
+            candidate.end();
+          }
+        }
+      });
+      candidate.on('error', onDisconnect);
+      candidate.on('close', onDisconnect);
+    };
+
+    if (Number.isFinite(deadlineMs)) {
+      deadlineTimer = setTimeout(() => rejectOnce(deadlineError()), Math.max(0, deadlineMs - Date.now()));
+    }
+    openSocket();
   });
 }
 

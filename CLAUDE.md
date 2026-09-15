@@ -84,9 +84,24 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   dell'agent. Non eseguire loop di `gh run view`, `gh pr view` o `gh pr checks`.
   Esempio: `bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --number 42 --wait-for merged,failed --agent-id <id>`.
   Il listener riceve l'evento normalizzato e invia l'ack; la subscription e gli
-  eventi pendenti sopravvivono al riavvio del daemon. Dopo aver caricato il
-  secret dal Remote Config, riavvia il daemon se `events status` mostra
-  `webhookSecretConfigured: false`.
+  eventi pendenti sopravvivono al riavvio del daemon. La risposta di `subscribe`
+  espone `expiresAt`, `remainingMs`, `waitState`, `estimatedWaitMs` e il livello
+  di confidenza storico: l'ETA è informativa, la scadenza è il vero limite
+  operativo.
+- Il supervisor deve trattare una subscription attiva come `waiting-external`,
+  non come goal bloccato: dopo `subscribe` avvia un solo `events listen`, svolge
+  altro lavoro e attende il callback. Non ripetere `gh pr view`, `gh run view`,
+  `gh pr checks` o `events status` per fare polling. Alla scadenza il listener
+  riceve `event_subscription_expired` e il goal va marcato `timed-out` con la
+  prossima azione esplicita; una sola riconciliazione è ammessa solo se il
+  coordinatore segnala un webhook mancante.
+- Usa `bin/gh-frontaliere events summary` o `events status` (compatto di
+  default; `--full` solo per diagnosi) per un controllo sintetico di pending,
+  listener orfani, duplicati ed ETA. Anche `bin/gh-frontaliere status` è
+  compatto di default: evita `--full` nei cicli dell'agent. Se
+  `sharedObserverRecommended` è
+  `true`, non creare un altro osservatore per lo stesso target: il supervisor
+  deve riutilizzare/accorpare l'osservazione già presente.
 - L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
   un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
   `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook
@@ -105,7 +120,14 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   applicati prima del binario reale. Non invocare direttamente
   `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
 - `gh pr checks --watch` e' vietato: un solo osservatore condiviso deve seguire
-  una PR. Controlla il daemon con `bin/gh-frontaliere status`.
+  una PR. Controlla il daemon con `bin/gh-frontaliere status` (oppure
+  `--compact` esplicito).
+- I coordinatori `default` e `nanako` sono servizi launchd persistenti con label
+  `ch.frontaliere.github-coordinator-default` e
+  `ch.frontaliere.github-coordinator-nanako`; il launcher carica Remote Config
+  anche quando un client deve avviare il daemon automaticamente. Dopo una
+  modifica agli script riavvia i due servizi con `launchctl kickstart -k` e
+  verifica `bin/gh-frontaliere status --compact`.
 - Le cancellazioni di run Actions (`gh run cancel` oppure il POST al relativo
   endpoint) richiedono sempre due passaggi: la prima richiesta viene bloccata e
   produce un `request_id`; l'agent deve fermarsi e chiedere al proprietario una

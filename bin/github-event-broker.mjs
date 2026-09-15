@@ -26,6 +26,8 @@ export const MAX_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
 const SEEN_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const MAX_LATENCY_SAMPLES = 200;
+const MIN_ESTIMATE_SAMPLES = 3;
 
 function brokerError(code, message) {
   const error = new Error(message);
@@ -101,6 +103,66 @@ function parseExpiration(spec, nowMs) {
   return expiresAtMs;
 }
 
+function subscriptionTargetKey(subscription) {
+  const selectors = [
+    ['number', subscription.number],
+    ['run', subscription.runId],
+    ['sha', subscription.sha],
+    ['environment', subscription.environment],
+    ['workflow', subscription.workflow],
+    ['deployment', subscription.deploymentId],
+  ].map(([name, value]) => `${name}=${value === null || value === undefined ? '*' : value}`);
+  return `${subscription.repo}|${subscription.resource}|${selectors.join('|')}`;
+}
+
+function latencySampleKey(subscription) {
+  return `${subscription.resource}:${[...subscription.waitFor].sort().join(',')}`;
+}
+
+function listenerAttachedValue(listenerAttached, subscriptionId) {
+  if (typeof listenerAttached === 'function') {
+    const value = listenerAttached(subscriptionId);
+    return typeof value === 'boolean' ? value : null;
+  }
+  if (listenerAttached instanceof Set) return listenerAttached.has(subscriptionId);
+  if (Array.isArray(listenerAttached)) return listenerAttached.includes(subscriptionId);
+  return null;
+}
+
+function quantile(values, percentile) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * percentile;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + ((sorted[upper] - sorted[lower]) * (index - lower));
+}
+
+function summarizeWaitEstimate(samples, source = 'none') {
+  const values = samples.map((sample) => Number(sample.waitMs)).filter((value) => Number.isFinite(value));
+  if (values.length < MIN_ESTIMATE_SAMPLES) {
+    return {
+      estimatedWaitMs: null,
+      estimatedWaitP50Ms: null,
+      estimatedWaitP90Ms: null,
+      estimatedWaitSamples: values.length,
+      estimateConfidence: values.length ? 'insufficient' : 'none',
+      estimateSource: values.length ? source : 'none',
+    };
+  }
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const confidence = values.length >= 20 ? 'high' : values.length >= 10 ? 'medium' : 'low';
+  return {
+    estimatedWaitMs: Math.round(mean),
+    estimatedWaitP50Ms: Math.round(quantile(values, 0.5)),
+    estimatedWaitP90Ms: Math.round(quantile(values, 0.9)),
+    estimatedWaitSamples: values.length,
+    estimateConfidence: confidence,
+    estimateSource: source,
+  };
+}
+
 function normalizeSubscriptionSpec(spec, nowMs) {
   if (!spec || typeof spec !== 'object') {
     throw brokerError('event_subscription_invalid', 'event subscription must be an object');
@@ -135,7 +197,24 @@ function normalizeSubscriptionSpec(spec, nowMs) {
   };
 }
 
-function subscriptionPublic(subscription) {
+function subscriptionPublic(
+  subscription,
+  {
+    nowMs = Date.now(),
+    waitEstimate: estimate = summarizeWaitEstimate([]),
+    duplicateTargetCount = 1,
+    listenerAttached = null,
+  } = {},
+) {
+  const createdAtMs = Date.parse(subscription.createdAt);
+  const ageMs = Number.isFinite(createdAtMs) ? Math.max(0, nowMs - createdAtMs) : null;
+  const remainingMs = Math.max(0, subscription.expiresAtMs - nowMs);
+  const waitBudgetMs = Number.isFinite(createdAtMs)
+    ? Math.max(0, subscription.expiresAtMs - createdAtMs)
+    : null;
+  const estimatedDecisionAt = estimate.estimatedWaitP90Ms === null
+    ? null
+    : new Date(Math.min(subscription.expiresAtMs, nowMs + estimate.estimatedWaitP90Ms)).toISOString();
   return {
     id: subscription.id,
     agentId: subscription.agentId,
@@ -152,6 +231,34 @@ function subscriptionPublic(subscription) {
     createdAt: subscription.createdAt,
     expiresAt: subscription.expiresAt,
     pendingEvents: subscription.pending.length,
+    ageMs,
+    remainingMs,
+    waitBudgetMs,
+    deadlineAt: subscription.expiresAt,
+    estimatedDecisionAt,
+    waitState: subscription.pending.length > 0 ? 'event_pending' : 'waiting_external',
+    targetKey: subscriptionTargetKey(subscription),
+    duplicateTargetCount,
+    sharedObserverRecommended: duplicateTargetCount > 1,
+    listenerAttached,
+    ...estimate,
+  };
+}
+
+function storedLatencySample(value) {
+  if (!value || typeof value !== 'object') return null;
+  const resource = canonicalResource(value.resource);
+  const waitForKey = normalizedString(value.waitForKey);
+  const waitMs = Number(value.waitMs);
+  if (!['pull_request', 'workflow_run', 'deployment'].includes(resource)
+    || !waitForKey
+    || !Number.isFinite(waitMs)
+    || waitMs < 0) return null;
+  return {
+    resource,
+    waitForKey,
+    waitMs: Math.min(MAX_SUBSCRIPTION_TTL_MS, Math.round(waitMs)),
+    observedAt: normalizedString(value.observedAt) || new Date().toISOString(),
   };
 }
 
@@ -479,6 +586,7 @@ export class GitHubEventBroker {
       webhookIgnored: 0,
       matchedEvents: 0,
       pendingOverflow: 0,
+      latencySamplesRecorded: 0,
     };
     this.state = this.loadState();
   }
@@ -504,10 +612,13 @@ export class GitHubEventBroker {
         seenDeliveries: Array.isArray(parsed.seenDeliveries)
           ? parsed.seenDeliveries.filter((delivery) => delivery?.id && Number.isFinite(Number(delivery.seenAtMs)))
           : [],
+        latencySamples: Array.isArray(parsed.latencySamples)
+          ? parsed.latencySamples.map(storedLatencySample).filter(Boolean).slice(-MAX_LATENCY_SAMPLES)
+          : [],
       };
     } catch (error) {
       if (error.code === 'ENOENT') {
-        return { version: EVENT_BROKER_STATE_VERSION, subscriptions: [], seenDeliveries: [] };
+        return { version: EVENT_BROKER_STATE_VERSION, subscriptions: [], seenDeliveries: [], latencySamples: [] };
       }
       throw error;
     }
@@ -526,26 +637,136 @@ export class GitHubEventBroker {
     }
   }
 
-  prune() {
-    const nowMs = this.now();
+  pruneExpiredSubscriptions(nowMs = this.now()) {
     const subscriptionsBefore = this.state.subscriptions.length;
+    const expiredIds = this.state.subscriptions
+      .filter((subscription) => subscription.expiresAtMs <= nowMs)
+      .map((subscription) => subscription.id);
     this.state.subscriptions = this.state.subscriptions.filter((subscription) => subscription.expiresAtMs > nowMs);
     this.metrics.subscriptionsExpired += subscriptionsBefore - this.state.subscriptions.length;
+    return expiredIds;
+  }
+
+  pruneSeenDeliveries(nowMs = this.now()) {
     const seenBefore = this.state.seenDeliveries.length;
     this.state.seenDeliveries = this.state.seenDeliveries
       .filter((delivery) => nowMs - Number(delivery.seenAtMs) <= SEEN_DELIVERY_TTL_MS)
       .slice(-MAX_SEEN_DELIVERIES);
-    return subscriptionsBefore !== this.state.subscriptions.length
-      || seenBefore !== this.state.seenDeliveries.length;
+    return seenBefore !== this.state.seenDeliveries.length;
   }
 
-  status() {
+  prune() {
+    const nowMs = this.now();
+    const subscriptionsBefore = this.state.subscriptions.length;
+    const expiredIds = this.pruneExpiredSubscriptions(nowMs);
+    const seenChanged = this.pruneSeenDeliveries(nowMs);
+    return expiredIds.length > 0
+      || subscriptionsBefore !== this.state.subscriptions.length
+      || seenChanged;
+  }
+
+  expireSubscriptions() {
+    const nowMs = this.now();
+    const expiredIds = this.pruneExpiredSubscriptions(nowMs);
+    const seenChanged = this.pruneSeenDeliveries(nowMs);
+    if (expiredIds.length > 0 || seenChanged) this.persist();
+    return expiredIds;
+  }
+
+  duplicateTargetCounts() {
+    const counts = new Map();
+    for (const subscription of this.state.subscriptions) {
+      const key = subscriptionTargetKey(subscription);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return counts;
+  }
+
+  duplicateGroups() {
+    const groups = new Map();
+    for (const subscription of this.state.subscriptions) {
+      const targetKey = subscriptionTargetKey(subscription);
+      if (!groups.has(targetKey)) groups.set(targetKey, []);
+      groups.get(targetKey).push(subscription);
+    }
+    return [...groups.entries()]
+      .filter(([, subscriptions]) => subscriptions.length > 1)
+      .map(([targetKey, subscriptions]) => ({
+        targetKey,
+        count: subscriptions.length,
+        subscriptionIds: subscriptions.map(({ id }) => id),
+        agentIds: unique(subscriptions.map(({ agentId }) => agentId)),
+      }));
+  }
+
+  estimateFor(subscription) {
+    const exactKey = latencySampleKey(subscription);
+    const exact = this.state.latencySamples.filter((sample) => sample.waitForKey === exactKey);
+    const resourceSamples = this.state.latencySamples.filter((sample) => sample.resource === subscription.resource);
+    if (exact.length >= MIN_ESTIMATE_SAMPLES) return summarizeWaitEstimate(exact, 'same_wait_for');
+    if (resourceSamples.length) return summarizeWaitEstimate(resourceSamples, 'resource');
+    return summarizeWaitEstimate([], 'none');
+  }
+
+  publicSubscription(subscription, options = {}) {
+    const duplicateTargetCount = this.duplicateTargetCounts().get(subscriptionTargetKey(subscription)) || 1;
+    return subscriptionPublic(subscription, {
+      ...options,
+      waitEstimate: this.estimateFor(subscription),
+      duplicateTargetCount,
+    });
+  }
+
+  listenerCount(listenerAttached) {
+    if (typeof listenerAttached !== 'function' && !(listenerAttached instanceof Set) && !Array.isArray(listenerAttached)) return null;
+    return this.state.subscriptions
+      .filter(({ id }) => listenerAttachedValue(listenerAttached, id) === true)
+      .length;
+  }
+
+  summary({ listenerAttached = null } = {}) {
+    if (this.prune()) this.persist();
+    const subscriptions = this.state.subscriptions;
+    const duplicateGroups = this.duplicateGroups();
+    const latencyByResource = new Map();
+    for (const sample of this.state.latencySamples) {
+      if (!latencyByResource.has(sample.resource)) latencyByResource.set(sample.resource, []);
+      latencyByResource.get(sample.resource).push(sample);
+    }
+    const listenerCount = this.listenerCount(listenerAttached);
+    return {
+      stateFile: this.stateFile,
+      subscriptionCount: subscriptions.length,
+      agentCount: unique(subscriptions.map(({ agentId }) => agentId)).length,
+      pendingEvents: subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
+      listenerCount,
+      orphanedSubscriptions: listenerCount === null
+        ? null
+        : subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length,
+      duplicateGroups,
+      duplicateSubscriptions: duplicateGroups.reduce((total, group) => total + group.count - 1, 0),
+      metrics: { ...this.metrics },
+      latency: {
+        sampleCount: this.state.latencySamples.length,
+        byResource: Object.fromEntries(
+          [...latencyByResource.entries()].map(([resource, samples]) => [resource, summarizeWaitEstimate(samples, 'resource')]),
+        ),
+      },
+      observedAt: new Date(this.now()).toISOString(),
+    };
+  }
+
+  status({ listenerAttached = null } = {}) {
     if (this.prune()) this.persist();
     return {
       stateFile: this.stateFile,
-      subscriptions: this.state.subscriptions.map(subscriptionPublic),
+      subscriptions: this.state.subscriptions.map((subscription) => this.publicSubscription(subscription, {
+        nowMs: this.now(),
+        listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
+      })),
       pendingEvents: this.state.subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
       metrics: { ...this.metrics },
+      summary: this.summary({ listenerAttached }),
     };
   }
 
@@ -557,13 +778,13 @@ export class GitHubEventBroker {
     this.state.subscriptions.push(normalized);
     this.metrics.subscriptionsCreated += 1;
     this.persist();
-    return subscriptionPublic(normalized);
+    return this.publicSubscription(normalized, { nowMs });
   }
 
   getSubscription(subscriptionId) {
     if (this.prune()) this.persist();
     const subscription = this.state.subscriptions.find(({ id }) => id === String(subscriptionId || ''));
-    return subscription ? subscriptionPublic(subscription) : null;
+    return subscription ? this.publicSubscription(subscription, { nowMs: this.now() }) : null;
   }
 
   getSubscriptionRecord(subscriptionId) {
@@ -597,6 +818,21 @@ export class GitHubEventBroker {
       return { ok: false, error: { code: 'event_not_pending', message: 'event is no longer pending' } };
     }
     const [event] = subscription.pending.splice(index, 1);
+    const createdAtMs = Date.parse(subscription.createdAt);
+    const eventAtMs = Date.parse(event.receivedAt || '');
+    const waitMs = Number.isFinite(createdAtMs)
+      ? Math.max(0, (Number.isFinite(eventAtMs) ? eventAtMs : this.now()) - createdAtMs)
+      : null;
+    if (Number.isFinite(waitMs)) {
+      this.state.latencySamples.push({
+        resource: subscription.resource,
+        waitForKey: latencySampleKey(subscription),
+        waitMs: Math.min(MAX_SUBSCRIPTION_TTL_MS, Math.round(waitMs)),
+        observedAt: new Date(this.now()).toISOString(),
+      });
+      this.state.latencySamples = this.state.latencySamples.slice(-MAX_LATENCY_SAMPLES);
+      this.metrics.latencySamplesRecorded += 1;
+    }
     this.metrics.subscriptionsAcknowledged += 1;
     this.persist();
     return { ok: true, event };

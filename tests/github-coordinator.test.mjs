@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
@@ -208,6 +209,91 @@ test('conserva le subscription webhook, deduplica le delivery e consegna gli sta
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }
+});
+
+test('espone deadline, ETA storica e duplicati senza richiedere polling', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-eta-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const secret = 'webhook-secret-for-eta-test';
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: secret, now: () => nowMs });
+
+  try {
+    for (const [number, waitMs] of [[101, 10_000], [102, 20_000], [103, 30_000]]) {
+      const subscription = broker.subscribe({
+        agentId: `agent-${number}`,
+        repo: 'owner/repo',
+        resource: 'pull_request',
+        number,
+        waitFor: ['merged'],
+        ttlSeconds: 300,
+      });
+      nowMs += waitMs;
+      const event = normalizeWebhookEvent({
+        eventName: 'pull_request',
+        deliveryId: `eta-delivery-${number}`,
+        receivedAt: new Date(nowMs).toISOString(),
+        payload: {
+          action: 'closed',
+          repository: { full_name: 'owner/repo' },
+          pull_request: { number, merged: true },
+        },
+      });
+      assert.deepEqual(broker.recordEvent(event).matchedSubscriptionIds, [subscription.id]);
+      assert.equal(broker.acknowledge(subscription.id, event.id).ok, true);
+    }
+
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 104,
+      waitFor: ['merged'],
+      ttlSeconds: 300,
+    });
+    assert.equal(subscription.estimatedWaitMs, 20_000);
+    assert.equal(subscription.estimatedWaitP50Ms, 20_000);
+    assert.equal(subscription.estimatedWaitP90Ms, 28_000);
+    assert.equal(subscription.estimatedWaitSamples, 3);
+    assert.equal(subscription.estimateConfidence, 'low');
+    assert.equal(subscription.waitState, 'waiting_external');
+    assert.equal(subscription.remainingMs, 300_000);
+
+    const duplicate = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 104,
+      waitFor: ['merged'],
+      ttlSeconds: 300,
+    });
+    assert.equal(duplicate.duplicateTargetCount, 2);
+    assert.equal(duplicate.sharedObserverRecommended, true);
+    assert.equal(broker.summary().duplicateGroups.length, 1);
+
+    const restored = new GitHubEventBroker({ stateFile, webhookSecret: secret, now: () => nowMs });
+    assert.equal(restored.getSubscription(subscription.id).estimatedWaitMs, 20_000);
+
+    nowMs += 301_000;
+    assert.ok(restored.expireSubscriptions().includes(subscription.id));
+    assert.equal(restored.getSubscription(subscription.id), null);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('i comandi help delle subscription non avviano il coordinatore', () => {
+  const listenHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'listen', '--help'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(listenHelp.status, 0);
+  assert.match(listenHelp.stdout, /evento o alla scadenza/);
+
+  const subscribeHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'subscribe', '--help'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(subscribeHelp.status, 0);
+  assert.match(subscribeHelp.stdout, /--wait-for/);
 });
 
 test('collega il fallimento di un workflow alla PR associata senza polling dell agent', () => {
@@ -567,6 +653,79 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
     assert.equal(status.subscriptions.length, 0);
   } finally {
     if (receiver) await new Promise((resolvePromise) => receiver.close(resolvePromise));
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // The daemon may not have started if setup failed; cleanup remains safe.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('scollega un listener caduto senza terminare il coordinatore e segnala la scadenza', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-resilience-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = 'event-resilience';
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = 'event-resilience-secret';
+
+  try {
+    await ensureCoordinator(identity);
+    const subscription = (await subscribeToEvents({
+      agentId: 'agent-resilience',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9001',
+      waitFor: ['success'],
+      ttlSeconds: 60,
+    }, { identity })).subscription;
+    const dropped = createConnection(socketPath(identity));
+    await new Promise((resolvePromise, rejectPromise) => {
+      dropped.once('error', rejectPromise);
+      dropped.once('connect', () => {
+        dropped.write(`${JSON.stringify({
+          type: 'event-listen',
+          identity,
+          subscriptionId: subscription.id,
+        })}\n`);
+      });
+      dropped.once('data', () => dropped.destroy());
+      dropped.once('close', resolvePromise);
+    });
+
+    const status = await sendRequest({ type: 'status', compact: true }, { identity });
+    assert.equal(status.status.events.listenerCount, 0);
+    assert.equal(status.status.events.orphanedSubscriptions, 1);
+
+    const expiring = (await subscribeToEvents({
+      agentId: 'agent-resilience',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9002',
+      waitFor: ['success'],
+      ttlSeconds: 0.1,
+    }, { identity })).subscription;
+    await assert.rejects(
+      listenForEvent(expiring.id, { identity, timeoutMs: 3_000 }),
+      (error) => error.code === 'event_subscription_expired',
+    );
+    const afterExpiry = await eventSubscriptions({ identity });
+    assert.equal(afterExpiry.subscriptions.some(({ id }) => id === expiring.id), false);
+  } finally {
     try {
       await sendRequest({ type: 'shutdown' }, { identity });
       await waitForCoordinatorStop(identity, 5_000);

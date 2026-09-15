@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import {
   confirmCancellation,
   eventSubscription,
+  eventSummary,
   eventSubscriptions,
   getPendingCancellation,
   listenForEvent,
@@ -27,6 +28,37 @@ function printResponse(response) {
 
 function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function printHelp(topic = '') {
+  const help = topic === 'events'
+    ? [
+      'Uso: bin/gh-frontaliere events <comando>',
+      '',
+      'Comandi:',
+      '  subscribe  registra un interesse e restituisce scadenza ed ETA storica',
+      '  listen     attende l evento in modo event-driven e invia l ack',
+      '  show       mostra una subscription',
+      '  unsubscribe rimuove una subscription',
+      '  status     stato compatto (usa --full solo per il dettaglio completo)',
+      '  summary    riepilogo compatto di listener, duplicati, pending ed ETA',
+      '  reconcile  riconcilia una sola volta tramite il coordinatore',
+      '',
+      'Regola: dopo subscribe esegui un solo listen sotto il supervisor; non usare polling gh/status.',
+    ].join('\n')
+    : topic === 'subscribe'
+      ? 'Uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --wait-for merged,failed [--ttl secondi] [--agent-id id]'
+      : topic === 'listen'
+        ? 'Uso: bin/gh-frontaliere events listen <subscription-id>\nIl comando resta in ascolto fino all evento o alla scadenza della subscription.'
+        : [
+          'Uso: bin/gh-frontaliere <comando gh...>',
+          '     bin/gh-frontaliere status [--compact|--full]',
+          '     bin/gh-frontaliere events <subscribe|listen|show|unsubscribe|status|summary|reconcile>',
+          '     bin/gh-frontaliere confirm-cancel <request-id>',
+          '',
+          'Le richieste GitHub passano sempre dal coordinatore locale.',
+        ].join('\n');
+  process.stdout.write(`${help}\n`);
 }
 
 function optionValue(args, name) {
@@ -60,6 +92,14 @@ function assertNoUnknownOptions(args, allowed) {
 
 async function runEventsCommand(args, identity) {
   const subcommand = args[1];
+  if (args.slice(1).includes('--help') || args.slice(1).includes('-h')) {
+    printHelp(subcommand === 'subscribe' || subcommand === 'listen' ? subcommand : 'events');
+    return;
+  }
+  if (!subcommand) {
+    printHelp('events');
+    return;
+  }
   if (subcommand === 'subscribe') {
     const optionArgs = args.slice(2);
     assertNoUnknownOptions(optionArgs, new Set([
@@ -109,8 +149,19 @@ async function runEventsCommand(args, identity) {
     return;
   }
   if (subcommand === 'status') {
-    if (args.length > 2) throw new Error('uso: bin/gh-frontaliere events status');
-    printJson(await eventSubscriptions({ identity }));
+    const full = args.includes('--full');
+    const compact = !full || args.includes('--compact');
+    if (args.length > 2 && !((compact || full) && args.length === 3)) {
+      throw new Error('uso: bin/gh-frontaliere events status [--compact|--full]');
+    }
+    printJson(await (compact ? eventSummary({ identity }) : eventSubscriptions({ identity })));
+    return;
+  }
+  if (subcommand === 'summary') {
+    if (args.length > 2 && !(args.length === 3 && args[2] === '--compact')) {
+      throw new Error('uso: bin/gh-frontaliere events summary');
+    }
+    printJson(await eventSummary({ identity }));
     return;
   }
   if (subcommand === 'reconcile') {
@@ -118,7 +169,7 @@ async function runEventsCommand(args, identity) {
     printJson(await reconcileEvents(args[2], { identity }));
     return;
   }
-  throw new Error('uso: bin/gh-frontaliere events {subscribe|listen|show|unsubscribe|status|reconcile}');
+  throw new Error('uso: bin/gh-frontaliere events {subscribe|listen|show|unsubscribe|status|summary|reconcile}');
 }
 
 async function confirmCancellationFromOwner(requestId, identity) {
@@ -160,8 +211,13 @@ const args = identityIndex >= 0
 
 try {
   const command = args[0];
-  if (command === 'status' || command === 'ping') {
-    const response = await sendRequest({ type: command === 'status' ? 'status' : 'ping' }, { identity });
+  if (command === 'help' || command === undefined || (command === 'status' && args.includes('--help'))) {
+    printHelp(command === 'help' && args[1] === 'events' ? 'events' : '');
+  } else if (command === 'status' || command === 'ping') {
+    const response = await sendRequest({
+      type: command === 'status' ? 'status' : 'ping',
+      compact: command === 'status' && !args.includes('--full'),
+    }, { identity });
     printStatus(response.status || response);
   } else if (command === 'stop') {
     await sendRequest({ type: 'shutdown' }, { identity });
