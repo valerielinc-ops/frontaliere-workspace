@@ -541,7 +541,7 @@ L11 deve esaminare l’intero inventario dei workflow, non soltanto i file modif
 Le azioni previste dal contratto seguono la severità, ma non sono tutte abilitate oggi:
 
 1. **A0/A1:** produce un report JSON/Markdown con prova, path, linea, fonte e confidenza.
-2. **A2:** oggi apre o aggiorna un issue/candidate deduplicato e produce il piano; una PR di fix richiede ancora owner e percorso revisionato.
+2. **A2:** oggi apre o aggiorna un issue/candidate deduplicato e produce il piano. Per un errore tecnico provato, L11 può inoltre instradare una remediation bounded verso agent, branch e PR; test, review, merge e verifica post-merge restano nel percorso nativo e non diventano una scrittura diretta su `main`.
 3. **A3:** canary di una correzione di osservabilità già registrata è previsto dal contratto, ma non è abilitato nel runtime corrente.
 4. **A4:** stop di workflow o estrazione per difetto provato e reversibile è previsto dal contratto, ma non è abilitato nel runtime corrente; l’ultimo dato valido resta etichettato stale.
 
