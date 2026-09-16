@@ -31,4 +31,5 @@ if [ -z "${GITHUB_PAT_NANAKO:-}" ]; then
   exit 1
 fi
 
-exec env GH_TOKEN="$GITHUB_PAT_NANAKO" GH_HOST=github.com gh "$@"
+exec env FRONTALIERE_GH_IDENTITY=nanako GH_TOKEN="$GITHUB_PAT_NANAKO" GH_HOST=github.com \
+  "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/gh" "$@"

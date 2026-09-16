@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -eu
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# Client auto-starts must load the same Remote Config secret as the persistent
+# launch agent.  Keep an explicit test/workflow override when one is present.
+if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ]; then
+  . "$script_dir/rc-env.sh" >/dev/null 2>&1
+fi
+
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "$@"

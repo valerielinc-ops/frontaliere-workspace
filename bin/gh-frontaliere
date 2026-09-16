@@ -1,0 +1,494 @@
+#!/usr/bin/env node
+
+import { createInterface } from 'node:readline/promises';
+import { execFileSync } from 'node:child_process';
+
+import {
+  confirmCancellation,
+  eventAudit,
+  eventSubscription,
+  eventSubscriptionTarget,
+  eventSummary,
+  eventSubscriptions,
+  garbageCollectEvents,
+  getPendingCancellation,
+  listenForEvent,
+  reconcileEvents,
+  sendRequest,
+  subscribeToEvents,
+  unsubscribeFromEvents,
+  waitForCoordinatorStop,
+} from './github-coordinator-client.mjs';
+
+function printStatus(status) {
+  process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+}
+
+function printResponse(response) {
+  if (response?.stdout) process.stdout.write(response.stdout);
+  if (response?.stderr) process.stderr.write(response.stderr);
+  process.exitCode = Number.isInteger(response?.exitCode) ? response.exitCode : (response?.ok ? 0 : 1);
+}
+
+function printJson(value, { pretty = true } = {}) {
+  process.stdout.write(`${JSON.stringify(value, null, pretty ? 2 : 0)}\n`);
+}
+
+function printHelp(topic = '') {
+  const help = topic === 'events'
+    ? [
+      'Uso: bin/gh-frontaliere events <comando>',
+      '',
+      'Comandi:',
+      '  wait       crea/riusa un observer e attende l esito con reconnect automatico',
+      '  subscribe  registra un interesse e restituisce scadenza ed ETA storica',
+      '  listen     attende l evento in modo event-driven e invia l ack',
+      '  show       mostra una subscription o tutte quelle di --run-id/--repo',
+      '  audit      mostra le ultime delivery normalizzate e il motivo del match',
+      '  unsubscribe rimuove una subscription',
+      '  status     stato compatto (usa --full solo per il dettaglio completo)',
+      '  summary    riepilogo compatto di listener, duplicati, pending ed ETA',
+  '  health     probe locale del coordinatore (non avvia demoni)',
+      '  gc         dry-run degli orfani; usa --apply per rimuovere solo candidati sicuri',
+      '  reconcile  riconcilia una sola volta tramite il coordinatore',
+      '',
+      'Regola: dopo subscribe esegui un solo listen sotto il supervisor; non usare polling gh/status.',
+    ].join('\n')
+    : topic === 'wait'
+      ? 'Uso: bin/gh-frontaliere events wait --repo owner/repo --run-id ID --until completed\n     Per branch/workflow: aggiungi --workflow, --branch e --follow-latest; --reuse/--attach riusano l observer condiviso.'
+    : topic === 'subscribe'
+      ? 'Uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource workflow_run --run-id ID --wait-for completed [--sha SHA] [--workflow NAME] [--branch BRANCH] [--ttl secondi] [--agent-id id]'
+      : topic === 'listen'
+        ? 'Uso: bin/gh-frontaliere events listen <subscription-id>\nIl comando resta in ascolto fino all evento o alla scadenza della subscription.'
+        : [
+          'Uso: bin/gh-frontaliere <comando gh...>',
+          '     bin/gh-frontaliere status [--compact|--full]',
+          '     bin/gh-frontaliere events <wait|subscribe|listen|show|audit|health|unsubscribe|status|summary|gc|reconcile>',
+          '     bin/gh-frontaliere health [--identity default|nanako] [--alert-only]',
+          '     bin/gh-frontaliere confirm-cancel <request-id>',
+          '',
+          'Le richieste GitHub passano sempre dal coordinatore locale.',
+        ].join('\n');
+  process.stdout.write(`${help}\n`);
+}
+
+function optionValue(args, name) {
+  const index = args.findIndex((value) => value === name || value.startsWith(`${name}=`));
+  if (index < 0) return null;
+  if (args[index].startsWith(`${name}=`)) return args[index].slice(name.length + 1);
+  return args[index + 1] || null;
+}
+
+function optionValues(args, name) {
+  const values = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name) {
+      if (args[index + 1]) values.push(args[index + 1]);
+    } else if (args[index].startsWith(`${name}=`)) {
+      values.push(args[index].slice(name.length + 1));
+    }
+  }
+  return values;
+}
+
+function optionValueFrom(args, names) {
+  for (const name of names) {
+    const value = optionValue(args, name);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function assertNoUnknownOptions(args, allowed) {
+  const booleanOptions = new Set([
+    '--once', '--keep', '--apply', '--include-unique', '--allow-duplicate', '--shared', '--follow-latest',
+    '--mine', '--active', '--pending-only', '--stalled-only', '--compact', '--full', '--resume', '--reuse', '--attach', '--no-cleanup',
+  ]);
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (!value.startsWith('-')) continue;
+    const name = value.includes('=') ? value.slice(0, value.indexOf('=')) : value;
+    if (!allowed.has(name)) throw new Error(`opzione events non riconosciuta: ${value}`);
+    if (!value.includes('=') && !booleanOptions.has(name)) index += 1;
+  }
+}
+
+function parseEventFilters(optionArgs) {
+  assertNoUnknownOptions(optionArgs, new Set([
+    '--repo', '--resource', '--run-id', '--run', '--number', '--agent-id', '--limit',
+    '--mine', '--active', '--pending-only', '--stalled-only', '--compact', '--full', '--sha',
+    '--branch', '--workflow', '--environment', '--deployment-id',
+  ]));
+  const filters = {};
+  for (const [name, key] of [
+    ['--repo', 'repo'], ['--resource', 'resource'], ['--number', 'number'], ['--sha', 'sha'],
+    ['--branch', 'branch'], ['--workflow', 'workflow'], ['--environment', 'environment'],
+    ['--deployment-id', 'deploymentId'],
+  ]) {
+    const value = optionValue(optionArgs, name);
+    if (value !== null) filters[key] = value;
+  }
+  const runId = optionValueFrom(optionArgs, ['--run-id', '--run']);
+  if (runId !== null) filters.runId = runId;
+  if (optionArgs.includes('--mine')) {
+    filters.agentId = optionValue(optionArgs, '--agent-id') || process.env.FRONTALIERE_AGENT_ID || 'anonymous-agent';
+  } else if (optionValue(optionArgs, '--agent-id') !== null) {
+    filters.agentId = optionValue(optionArgs, '--agent-id');
+  }
+  const limit = optionValue(optionArgs, '--limit');
+  if (limit !== null) {
+    filters.limit = Number(limit);
+    if (!Number.isInteger(filters.limit) || filters.limit < 0) throw new Error('events --limit deve essere un intero non negativo');
+  }
+  if (optionArgs.includes('--active')) filters.active = true;
+  if (optionArgs.includes('--pending-only')) filters.pendingOnly = true;
+  if (optionArgs.includes('--stalled-only')) filters.stalledOnly = true;
+  return filters;
+}
+
+function repositoryFromGit() {
+  try {
+    const remote = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const match = remote.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+    return match ? `${match[1]}/${match[2]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function secondsToMilliseconds(optionArgs, name, { defaultValue = 0, allowZero = true } = {}) {
+  const raw = optionValue(optionArgs, name);
+  if (raw === null) return defaultValue;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || (allowZero ? seconds < 0 : seconds <= 0)) {
+    throw new Error(`${name} deve essere un numero di secondi ${allowZero ? 'non negativo' : 'positivo'}`);
+  }
+  return seconds * 1_000;
+}
+
+async function runWaitCommand(optionArgs, identity) {
+  assertNoUnknownOptions(optionArgs, new Set([
+    '--repo', '--resource', '--run-id', '--run', '--until', '--wait-for', '--number', '--sha',
+    '--branch', '--workflow', '--environment', '--deployment-id', '--ttl', '--stalled-after',
+    '--agent-id', '--timeout', '--reconcile-after', '--subscription-id', '--resume', '--keep',
+    '--follow-latest', '--reuse', '--attach', '--no-cleanup',
+  ]));
+  const subscriptionId = optionValue(optionArgs, '--subscription-id');
+  const repo = optionValue(optionArgs, '--repo') || repositoryFromGit();
+  const runId = optionValueFrom(optionArgs, ['--run-id', '--run']);
+  const resource = optionValue(optionArgs, '--resource') || 'workflow_run';
+  const until = optionValues(optionArgs, '--until').concat(optionValues(optionArgs, '--wait-for'))
+    .flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
+  const waitFor = until.length ? until : ['completed'];
+  const followLatest = optionArgs.includes('--follow-latest');
+  if (!subscriptionId && !repo) throw new Error('events wait richiede --repo quando la directory non è un checkout GitHub');
+  if (!subscriptionId && !runId && !optionValue(optionArgs, '--workflow') && !optionValue(optionArgs, '--sha')) {
+    throw new Error('events wait richiede --run-id oppure --workflow/--sha');
+  }
+  if (runId && followLatest) throw new Error('events wait non può usare --follow-latest insieme a --run-id');
+
+  const agentId = optionValue(optionArgs, '--agent-id') || process.env.FRONTALIERE_AGENT_ID || undefined;
+  const keep = optionArgs.includes('--keep') || optionArgs.includes('--no-cleanup');
+  const timeoutMs = secondsToMilliseconds(optionArgs, '--timeout');
+  const reconcileAfterMs = secondsToMilliseconds(optionArgs, '--reconcile-after', {
+    defaultValue: undefined,
+  });
+  const spec = subscriptionId ? null : {
+    repo,
+    resource,
+    runId,
+    number: optionValue(optionArgs, '--number'),
+    sha: optionValue(optionArgs, '--sha'),
+    branch: optionValue(optionArgs, '--branch'),
+    workflow: optionValue(optionArgs, '--workflow'),
+    environment: optionValue(optionArgs, '--environment'),
+    deploymentId: optionValue(optionArgs, '--deployment-id'),
+    waitFor,
+    agentId,
+    ttlSeconds: optionValue(optionArgs, '--ttl') === null ? undefined : Number(optionValue(optionArgs, '--ttl')),
+    stalledAfterSeconds: optionValue(optionArgs, '--stalled-after') === null
+      ? undefined
+      : Number(optionValue(optionArgs, '--stalled-after')),
+    followLatest,
+  };
+  let currentSubscriptionId = subscriptionId;
+  let resumes = 0;
+  while (true) {
+    if (!currentSubscriptionId) {
+      currentSubscriptionId = (await subscribeToEvents(spec, { identity })).subscription.id;
+    }
+    try {
+      const event = await listenForEvent(currentSubscriptionId, {
+        identity,
+        agentId,
+        once: !keep,
+        timeoutMs,
+        autoRenew: true,
+        ...(reconcileAfterMs === undefined ? {} : { reconcileAfterMs }),
+      });
+      printJson(event, { pretty: false });
+      return;
+    } catch (error) {
+      const canResume = optionArgs.includes('--resume')
+        && spec
+        && error.code === 'event_subscription_expired'
+        && resumes < 3;
+      if (canResume) {
+        resumes += 1;
+        currentSubscriptionId = null;
+        continue;
+      }
+      if (!keep) {
+        try { await unsubscribeFromEvents(currentSubscriptionId, { identity }); } catch { /* già scaduta o rimossa */ }
+      }
+      throw error;
+    }
+  }
+}
+
+async function runEventsCommand(args, identity) {
+  const subcommand = args[1];
+  if (args.slice(1).includes('--help') || args.slice(1).includes('-h')) {
+    printHelp(subcommand === 'subscribe' || subcommand === 'listen' ? subcommand : 'events');
+    return;
+  }
+  if (!subcommand) {
+    printHelp('events');
+    return;
+  }
+  if (subcommand === 'wait') {
+    if (args.slice(2).includes('--help') || args.slice(2).includes('-h')) {
+      printHelp('wait');
+      return;
+    }
+    await runWaitCommand(args.slice(2), identity);
+    return;
+  }
+  if (subcommand === 'subscribe') {
+    const optionArgs = args.slice(2);
+    assertNoUnknownOptions(optionArgs, new Set([
+      '--repo', '--resource', '--wait-for', '--state', '--number', '--run-id', '--sha', '--branch',
+      '--environment', '--workflow', '--deployment-id', '--ttl', '--agent-id', '--stalled-after', '--keep', '--once',
+      '--allow-duplicate', '--shared', '--follow-latest', '--reuse', '--attach',
+    ]));
+    const repo = optionValue(optionArgs, '--repo');
+    const resource = optionValue(optionArgs, '--resource');
+    const waitFor = optionValues(optionArgs, '--wait-for').concat(optionValues(optionArgs, '--state'))
+      .flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
+    if (!repo || !resource || waitFor.length === 0) {
+      throw new Error(
+        'uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --wait-for merged,failed',
+      );
+    }
+    const ttlSeconds = optionValue(optionArgs, '--ttl');
+    const spec = {
+      repo,
+      resource,
+      waitFor,
+      number: optionValue(optionArgs, '--number'),
+      runId: optionValue(optionArgs, '--run-id'),
+      sha: optionValue(optionArgs, '--sha'),
+      branch: optionValue(optionArgs, '--branch'),
+      environment: optionValue(optionArgs, '--environment'),
+      workflow: optionValue(optionArgs, '--workflow'),
+      deploymentId: optionValue(optionArgs, '--deployment-id'),
+      agentId: optionValue(optionArgs, '--agent-id'),
+      once: !optionArgs.includes('--keep'),
+      allowDuplicate: optionArgs.includes('--allow-duplicate'),
+      ...(optionArgs.includes('--shared')
+        ? { shared: true }
+        : optionArgs.includes('--allow-duplicate')
+          ? { shared: false }
+          : {}),
+      followLatest: optionArgs.includes('--follow-latest'),
+    };
+    if (ttlSeconds !== null) spec.ttlSeconds = Number(ttlSeconds);
+    const stalledAfterSeconds = optionValue(optionArgs, '--stalled-after');
+    if (stalledAfterSeconds !== null) spec.stalledAfterSeconds = Number(stalledAfterSeconds);
+    printJson(await subscribeToEvents(spec, { identity }));
+    return;
+  }
+  if (subcommand === 'listen') {
+    const optionArgs = args.slice(3);
+    assertNoUnknownOptions(optionArgs, new Set(['--agent-id']));
+    if (!args[2] || optionArgs.length > 2) throw new Error('uso: bin/gh-frontaliere events listen <subscription-id> [--agent-id id]');
+    printJson(await listenForEvent(args[2], { identity, agentId: optionValue(optionArgs, '--agent-id') }));
+    return;
+  }
+  if (subcommand === 'unsubscribe') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events unsubscribe <subscription-id>');
+    printJson(await unsubscribeFromEvents(args[2], { identity }));
+    return;
+  }
+  if (subcommand === 'audit') {
+    const optionArgs = args.slice(2);
+    const full = optionArgs.includes('--full');
+    const filters = parseEventFilters(optionArgs);
+    printJson(await eventAudit(filters, { identity }), { pretty: full || !optionArgs.includes('--compact') });
+    return;
+  }
+  if (subcommand === 'health') {
+    const optionArgs = args.slice(2);
+    for (const value of optionArgs) {
+      if (value !== '--alert-only') throw new Error('uso: bin/gh-frontaliere events health [--alert-only]');
+    }
+    const { checkCoordinatorHealth } = await import('./github-coordinator-health.mjs');
+    const result = await checkCoordinatorHealth(identity || 'default');
+    if (!optionArgs.includes('--alert-only') || !result.ok) printJson(result);
+    process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
+  if (subcommand === 'show') {
+    const optionArgs = args.slice(2);
+    if (optionArgs[0] && !optionArgs[0].startsWith('-')) {
+      if (optionArgs.length !== 1) throw new Error('uso: bin/gh-frontaliere events show <subscription-id>');
+      printJson(await eventSubscription(optionArgs[0], { identity }));
+      return;
+    }
+    const filters = parseEventFilters(optionArgs);
+    if (!filters.runId && !filters.number && !filters.repo) {
+      throw new Error('uso: bin/gh-frontaliere events show <subscription-id> oppure --run-id/--repo');
+    }
+    printJson(await eventSubscriptionTarget(filters, { identity }), { pretty: false });
+    return;
+  }
+  if (subcommand === 'status') {
+    const optionArgs = args.slice(2);
+    const full = optionArgs.includes('--full');
+    const compact = !full || optionArgs.includes('--compact');
+    const filters = parseEventFilters(optionArgs);
+    const response = compact
+      ? await eventSummary(filters, { identity })
+      : await eventSubscriptions(filters, { identity });
+    printJson(response, { pretty: !compact });
+    return;
+  }
+  if (subcommand === 'summary') {
+    const filters = parseEventFilters(args.slice(2));
+    printJson(await eventSummary(filters, { identity }), { pretty: false });
+    return;
+  }
+  if (subcommand === 'gc') {
+    const optionArgs = args.slice(2);
+    assertNoUnknownOptions(optionArgs, new Set(['--apply', '--older-than', '--include-unique']));
+    const olderThanSeconds = optionValue(optionArgs, '--older-than');
+    const olderThanMs = olderThanSeconds === null ? undefined : Number(olderThanSeconds) * 1_000;
+    if (olderThanSeconds !== null && (!Number.isFinite(olderThanMs) || olderThanMs <= 0)) {
+      throw new Error('uso: bin/gh-frontaliere events gc [--apply] [--older-than secondi] [--include-unique]');
+    }
+    printJson(await garbageCollectEvents({
+      olderThanMs,
+      apply: optionArgs.includes('--apply'),
+      includeUnique: optionArgs.includes('--include-unique'),
+    }, { identity }));
+    return;
+  }
+  if (subcommand === 'reconcile') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events reconcile <subscription-id>');
+    printJson(await reconcileEvents(args[2], { identity }));
+    return;
+  }
+  throw new Error('uso: bin/gh-frontaliere events {wait|subscribe|listen|show|audit|health|unsubscribe|status|summary|gc|reconcile}');
+}
+
+async function confirmCancellationFromOwner(requestId, identity) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      'owner_confirmation_requires_interactive_terminal: esegui bin/gh-frontaliere confirm-cancel <request-id> da un terminale del proprietario',
+    );
+  }
+
+  const response = await getPendingCancellation(requestId, { identity });
+  const cancellation = response.cancellation;
+  process.stdout.write([
+    'Richiesta di cancellazione GitHub in attesa di conferma:',
+    `  request_id: ${cancellation.id}`,
+    `  target: ${cancellation.target}`,
+    `  repo: ${cancellation.repo || '(risolto dal comando gh)'}`,
+    `  comando: ${JSON.stringify(cancellation.command)}`,
+    `  scadenza: ${cancellation.expiresAt}`,
+    '',
+  ].join('\n'));
+
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+  let confirmation;
+  try {
+    confirmation = await readline.question(`Digita "CONFERMA ${requestId}" per autorizzare, o una risposta diversa per annullare: `);
+  } finally {
+    readline.close();
+  }
+  const confirmed = await confirmCancellation(requestId, confirmation, { identity });
+  printResponse(confirmed);
+}
+
+const argv = process.argv.slice(2);
+const identityIndex = argv.findIndex((value) => value === '--identity');
+const identity = identityIndex >= 0 ? argv[identityIndex + 1] : process.env.FRONTALIERE_GH_IDENTITY;
+const args = identityIndex >= 0
+  ? argv.slice(0, identityIndex).concat(argv.slice(identityIndex + 2))
+  : argv;
+
+try {
+  const command = args[0];
+  if (command === 'help' || command === undefined || (command === 'status' && args.includes('--help'))) {
+    printHelp(command === 'help' && args[1] === 'events' ? 'events' : '');
+  } else if (command === 'health') {
+    const allowed = new Set(['--alert-only']);
+    for (const value of args.slice(1)) {
+      if (!allowed.has(value)) throw new Error('uso: bin/gh-frontaliere health [--alert-only]');
+    }
+    const { checkHealth } = await import('./github-coordinator-health.mjs');
+    const result = await checkHealth(identity ? [identity] : undefined);
+    if (!args.includes('--alert-only') || !result.ok) printJson(result);
+    process.exitCode = result.ok ? 0 : 1;
+  } else if (command === 'status' || command === 'ping') {
+    const response = await sendRequest({
+      type: command === 'status' ? 'status' : 'ping',
+      compact: command === 'status' && !args.includes('--full'),
+    }, { identity });
+    printStatus(response.status || response);
+  } else if (command === 'stop') {
+    await sendRequest({ type: 'shutdown' }, { identity });
+    if (!await waitForCoordinatorStop(identity)) {
+      throw new Error('coordinator_shutdown_timeout');
+    }
+  } else if (command === 'confirm-cancel') {
+    if (args.length !== 2 || !args[1]) {
+      throw new Error('uso: bin/gh-frontaliere confirm-cancel <request-id>');
+    }
+    await confirmCancellationFromOwner(args[1], identity);
+  } else if (command === 'events') {
+    await runEventsCommand(args, identity);
+  } else {
+    if (args.includes('--watch')) {
+      throw new Error('--watch è vietato; usa un solo osservatore condiviso.');
+    }
+    const response = await sendRequest({ type: 'exec', args, cwd: process.cwd() }, { identity });
+    printResponse(response);
+  }
+} catch (error) {
+  if (error?.waitState || error?.nextAction || error?.subscriptionId
+    || error?.existingSubscriptionId || error?.targetKey || error?.sharedObserverRecommended) {
+    process.stderr.write(`${JSON.stringify({
+      ok: false,
+      error: {
+        code: error.code || 'github_coordinator_error',
+        message: error.message,
+        subscriptionId: error.subscriptionId,
+        waitState: error.waitState,
+        nextAction: error.nextAction,
+        deadlineAt: error.deadlineAt,
+        existingSubscriptionId: error.existingSubscriptionId,
+        targetKey: error.targetKey,
+        sharedObserverRecommended: error.sharedObserverRecommended,
+      },
+    })}\n`);
+  } else {
+    process.stderr.write(`github-coordinator: ${error.message}\n`);
+  }
+  process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
+}

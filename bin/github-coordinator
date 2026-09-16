@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "${1:-status}" in
+  serve)
+    exec "$script_dir/github-coordinator-launcher" "$@"
+    ;;
+  *)
+    exec "$script_dir/gh-frontaliere" "$@"
+    ;;
+esac
