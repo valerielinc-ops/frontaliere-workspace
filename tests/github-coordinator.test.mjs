@@ -291,6 +291,152 @@ test('audita una delivery PR distinguendo target, stato logico e waitFor', () =>
   }
 });
 
+test('normalizza e abbina lo stato di conflitto della PR da webhook e riconciliazione', () => {
+  const webhook = normalizeWebhookEvent({
+    eventName: 'pull_request',
+    deliveryId: 'conflict-webhook-1520',
+    payload: {
+      action: 'synchronize',
+      repository: { full_name: 'owner/repo' },
+      pull_request: {
+        number: 1520,
+        mergeable: false,
+        mergeable_state: 'dirty',
+        head: { sha: 'conflict-head' },
+      },
+    },
+  });
+  const subscription = {
+    repo: 'owner/repo',
+    resource: 'pull_request',
+    number: 1520,
+    runId: null,
+    sha: null,
+    branch: null,
+    environment: null,
+    workflow: null,
+    deploymentId: null,
+    waitFor: ['conflict'],
+  };
+
+  assert.equal(webhook.state, 'conflict');
+  assert.deepEqual(webhook.states, ['conflict']);
+  assert.equal(webhook.mergeable, false);
+  assert.equal(webhook.mergeableState, 'dirty');
+  assert.equal(eventMatchesSubscription(webhook, subscription), true);
+
+  const reconciled = normalizeReconciliationEvent({
+    subscription,
+    checkedAt: '2026-09-16T18:00:00.000Z',
+    data: {
+      number: 1520,
+      state: 'open',
+      mergeable: false,
+      mergeable_state: 'dirty',
+      head: { sha: 'conflict-head' },
+    },
+  });
+  assert.equal(reconciled.state, 'conflict');
+  assert.equal(reconciled.action, 'open');
+  assert.equal(reconciled.mergeableState, 'dirty');
+  assert.equal(eventMatchesSubscription(reconciled, subscription), true);
+
+  const graphqlShape = normalizeWebhookEvent({
+    eventName: 'pull_request',
+    deliveryId: 'conflict-graphql-shape',
+    payload: {
+      action: 'opened',
+      repository: { full_name: 'owner/repo' },
+      pull_request: { number: 1520, mergeable: 'CONFLICTING' },
+    },
+  });
+  assert.equal(graphqlShape.state, 'conflict');
+  assert.equal(graphqlShape.mergeable, false);
+});
+
+test('normalizza e dispaccia i nuovi commenti conversazionali e inline della PR', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-comments-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'comment-secret' });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 1520,
+      waitFor: ['comment'],
+      ttlSeconds: 300,
+    });
+    const issueComment = normalizeWebhookEvent({
+      eventName: 'issue_comment',
+      deliveryId: 'comment-issue-1520',
+      payload: {
+        action: 'created',
+        repository: { full_name: 'owner/repo' },
+        issue: {
+          number: 1520,
+          html_url: 'https://github.com/owner/repo/pull/1520',
+          pull_request: { url: 'https://api.github.com/repos/owner/repo/pulls/1520' },
+        },
+        comment: { id: 7001, html_url: 'https://github.com/owner/repo/pull/1520#issuecomment-7001' },
+      },
+    });
+    assert.equal(issueComment.state, 'commented');
+    assert.deepEqual(issueComment.states, ['commented']);
+    assert.equal(issueComment.number, 1520);
+    assert.equal(issueComment.commentId, '7001');
+    assert.equal(eventMatchesSubscription(issueComment, subscription), true);
+    assert.deepEqual(broker.recordEvent(issueComment).matchedSubscriptionIds, [subscription.id]);
+
+    const reviewComment = normalizeWebhookEvent({
+      eventName: 'pull_request_review_comment',
+      deliveryId: 'comment-review-1520',
+      payload: {
+        action: 'created',
+        repository: { full_name: 'owner/repo' },
+        pull_request: {
+          number: 1520,
+          html_url: 'https://github.com/owner/repo/pull/1520',
+          head: { sha: 'comment-head' },
+        },
+        comment: { id: 7002, html_url: 'https://github.com/owner/repo/pull/1520#discussion_r7002' },
+      },
+    });
+    assert.equal(reviewComment.state, 'commented');
+    assert.equal(reviewComment.commentId, '7002');
+    assert.equal(reviewComment.sha, 'comment-head');
+    assert.deepEqual(broker.recordEvent(reviewComment).matchedSubscriptionIds, [subscription.id]);
+
+    const submittedReview = normalizeWebhookEvent({
+      eventName: 'pull_request_review',
+      deliveryId: 'comment-review-submitted-1520',
+      payload: {
+        action: 'submitted',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 1520 },
+        review: { id: 7004, state: 'commented' },
+      },
+    });
+    assert.equal(submittedReview.state, 'commented');
+    assert.equal(eventMatchesSubscription(submittedReview, subscription), true);
+
+    const ordinaryIssueComment = normalizeWebhookEvent({
+      eventName: 'issue_comment',
+      deliveryId: 'comment-issue-ordinary',
+      payload: {
+        action: 'created',
+        repository: { full_name: 'owner/repo' },
+        issue: { number: 99 },
+        comment: { id: 7003 },
+      },
+    });
+    assert.equal(ordinaryIssueComment, null);
+    assert.equal(broker.getSubscription(subscription.id).pendingEvents, 2);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('espone deadline, ETA storica e duplicati senza richiedere polling', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-eta-'));
   const stateFile = join(stateDirectory, 'events.json');
