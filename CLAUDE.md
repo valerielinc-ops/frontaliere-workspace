@@ -64,6 +64,108 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
 
+## Coordinatore GitHub locale
+
+- Le chiamate GitHub degli agenti passano dal coordinatore condiviso in
+  `bin/github-coordinator.mjs`; lo shim comune e' `~/.local/bin/gh`.
+- Gli agenti non devono usare canali GitHub esterni al coordinatore: niente REST
+  o GraphQL diretto (`fetch`, SDK, `curl`, `wget`), pagine UI/browser GitHub,
+  Actions dispatch dalla UI o polling HTML, nemmeno come workaround per timeout
+  o rate limit. Il REST interno al coordinatore e' consentito: l'agent deve
+  invocare solo `gh ...` tramite lo shim oppure `bin/gh-frontaliere ...`.
+- Per Actions usa `gh workflow run`, `gh run list` e `gh run view` attraverso il
+  coordinatore; non trasferire dispatch o polling nel browser e non usare
+  `gh pr checks --watch`. Se una richiesta va in timeout o quota, controlla
+  `bin/gh-frontaliere status`, lascia applicare backoff/coda e ritenta tramite
+  lo stesso processo; non cambiare canale.
+- Per attendere lo stato di una PR, workflow o deploy usa le subscription
+  event-driven: `bin/gh-frontaliere events subscribe ...` seguito da
+  `bin/gh-frontaliere events listen <subscription-id>` gestito dal supervisor
+  dell'agent. Non eseguire loop di `gh run view`, `gh pr view` o `gh pr checks`.
+  Esempio: `bin/gh-frontaliere events subscribe --repo owner/repo --resource pull_request --number 42 --wait-for merged,failed --agent-id <id>`.
+  Il listener riceve l'evento normalizzato e invia l'ack; la subscription e gli
+  eventi pendenti sopravvivono al riavvio del daemon. La risposta di `subscribe`
+  espone `expiresAt`, `remainingMs`, `waitState`, `estimatedWaitMs` e il livello
+  di confidenza storico: l'ETA è informativa, la scadenza è il vero limite
+  operativo. `nextAction` indica l'unica azione ammessa per il supervisor.
+- Il supervisor deve trattare una subscription attiva come `waiting-external`,
+  non come goal bloccato: dopo `subscribe` avvia un solo `events listen`, svolge
+  altro lavoro e attende il callback. Non ripetere `gh pr view`, `gh run view`,
+  `gh pr checks` o `events status` per fare polling. Alla scadenza il listener
+  riceve `event_subscription_expired` e il goal va marcato `timed-out` con la
+  prossima azione esplicita; una sola riconciliazione è ammessa solo se il
+  coordinatore segnala un webhook mancante.
+- Usa `bin/gh-frontaliere events summary` o `events status` (compatto di
+  default; `--full` solo per diagnosi) per un controllo sintetico di pending,
+  listener orfani, duplicati ed ETA. Anche `bin/gh-frontaliere status` è
+  compatto di default: evita `--full` nei cicli dell'agent. Se
+  `sharedObserverRecommended` è
+  `true`, non creare un altro osservatore per lo stesso target: il supervisor
+  deve riutilizzare/accorpare l'osservazione già presente. Una subscription
+  identica viene rifiutata con `event_duplicate_subscription` e restituisce
+  `existingSubscriptionId`; `--allow-duplicate` è riservato a un osservatore
+  realmente indipendente e va motivato nel contesto dell'agent. Due attese sullo
+  stesso target ma con `waitFor` diversi restano interessi distinti e non vanno
+  accorpate.
+- Per ripulire residui usa prima `bin/gh-frontaliere events gc` in dry-run. Solo
+  `events gc --apply` rimuove duplicati vecchi senza listener e senza eventi
+  pending; gli orfani unici restano protetti, salvo l'opzione esplicita
+  `--include-unique`.
+- L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
+  un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
+  `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook
+  sono deduplicati per `X-GitHub-Delivery` e consegnati at-least-once.
+- La configurazione pubblica attuale usa Cloudflare Tunnel sotto
+  `frontaliereticino.ch`: `https://gh-default.frontaliereticino.ch/github/webhook`
+  inoltra alla porta locale `18787` e `https://gh-nanako.frontaliereticino.ch/github/webhook`
+  alla `18788`. I receiver sono launch agent macOS persistenti; non mettere il
+  token del tunnel o il secret webhook nei repository.
+- Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
+  una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
+  permesso per l'agent di riprendere il polling.
+- `gh` resta il comando compatibile da usare normalmente: la coda, il limite di
+  concorrenza (8 letture di default, ridotte automaticamente con poco margine
+  di rate limit), la deduplicazione GET, la cache breve e il backoff sono
+  applicati prima del binario reale. Non invocare direttamente
+  `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
+- `gh pr checks --watch` e' vietato: un solo osservatore condiviso deve seguire
+  una PR. Controlla il daemon con `bin/gh-frontaliere status` (oppure
+  `--compact` esplicito).
+- I coordinatori `default` e `nanako` sono servizi launchd persistenti con label
+  `ch.frontaliere.github-coordinator-default` e
+  `ch.frontaliere.github-coordinator-nanako`; il launcher carica Remote Config
+  anche quando un client deve avviare il daemon automaticamente. Dopo una
+  modifica agli script riavvia i due servizi con `launchctl kickstart -k` e
+  verifica `bin/gh-frontaliere status --compact`. Receiver e coordinatore
+  osservano i propri sorgenti e chiedono un reload a launchd quando cambia il
+  client: non lasciare in memoria un processo con il vecchio protocollo.
+- Per una diagnosi sintetica senza auto-avvio usa
+  `bin/gh-frontaliere health --alert-only` (oppure
+  `bin/github-coordinator-health`). Deve risultare un solo processo per
+  identità, socket raggiungibile, protocollo aggiornato e secret configurato;
+  duplicati/orfani sono warning separati. Il controllo è locale e non chiama
+  GitHub.
+- Le cancellazioni di run Actions (`gh run cancel` oppure il POST al relativo
+  endpoint) richiedono sempre due passaggi: la prima richiesta viene bloccata e
+  produce un `request_id`; l'agent deve fermarsi e chiedere al proprietario una
+  seconda conferma, senza invocare autonomamente il comando di conferma. Dopo
+  aver verificato target e comando, il proprietario esegue da un terminale
+  interattivo `bin/gh-frontaliere confirm-cancel <request-id>` e digita la frase
+  esatta mostrata. Le richieste pendenti scadono dopo 5 minuti e non passano da
+  REST o UI GitHub. Il token GitHub non distingue agent e proprietario: il
+  terminale interattivo e la verifica esplicita sono quindi il confine operativo
+  della seconda approvazione.
+- In caso estremo il daemon puo' usare una corsia anonima separata, solo per
+  letture REST pubbliche e solo dopo `x-ratelimit-remaining: 0` autenticato.
+  Ha un budget locale conservativo di 45 richieste/ora; non vale per GraphQL,
+  search, mutation o percorsi privati.
+- I hook vengono caricati all'avvio della sessione: dopo questa modifica le
+  sessioni Codex/Claude gia' aperte vanno riavviate. Verifica con `command -v
+  gh` e `bin/gh-frontaliere status`.
+- I token restano nel keychain/ambiente e non entrano nel protocollo del socket,
+  nei log o negli artifact. `bin/gh-nanako` seleziona una coda separata per
+  l'identita' del corpus; non usarla per distribuire il carico.
+
 ## Comandi e worktree
 
 Corpus/API:
