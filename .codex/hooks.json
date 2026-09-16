@@ -22,7 +22,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/sibling-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; node \"$d/scripts/ci/sibling-check-gate.mjs\"'",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/.codex/repo-pr-gate-dispatch.mjs\" ] || exit 0; node \"$d/.codex/repo-pr-gate-dispatch.mjs\"'",
             "statusMessage": "Controllo dei file gemelli prima della PR"
           },
           {
