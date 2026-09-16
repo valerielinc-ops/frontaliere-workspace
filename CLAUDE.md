@@ -201,6 +201,13 @@ materializza soltanto il path necessario.
   usa `bin/gh-nanako` soltanto dopo aver caricato Remote Config.
 - Su entrambi i repo: test verdi -> review automatica -> auto-merge dopo
   `## LGTM`. Non mergiare a mano una PR che il ciclo sta seguendo.
+- **Completion gate per le implementazioni:** salvo richiesta esplicita di sola
+  diagnosi, draft o codice non pubblicato, un'implementazione non è conclusa
+  quando il codice è soltanto pronto o la PR è soltanto aperta. Lo stesso ciclo
+  deve eseguire commit, push, apertura della PR verso `main`, attivazione del
+  percorso di review/auto-merge, attesa dello stato `MERGED`, verifica del
+  risultato e cleanup del worktree/branch locale. Se un blocco esterno
+  impedisce il merge, va dichiarato come blocco operativo e il task resta aperto.
 - Il body delle PR deve contenere esattamente `## Implementato` e
   `## Non implementato (ancora)`. Inserisci bullet sostanziosi prima di
   qualsiasi sottosezione.
