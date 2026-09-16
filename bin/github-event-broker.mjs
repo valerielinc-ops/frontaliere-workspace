@@ -53,12 +53,52 @@ function normalizedState(value) {
   const state = String(value || '').trim().toLowerCase().replace(/-/g, '_');
   const aliases = {
     changes_requested: 'needs_review',
+    comment: 'commented',
+    new_comment: 'commented',
+    conflicting: 'conflict',
+    dirty: 'conflict',
+    merge_conflict: 'conflict',
+    mergeable_conflict: 'conflict',
     error: 'failed',
     failure: 'failed',
     timed_out: 'failed',
     startup_failure: 'failed',
   };
   return aliases[state] || state;
+}
+
+function normalizedCommentId(value) {
+  return value === null || value === undefined ? null : String(value);
+}
+
+const MERGE_CONFLICT_STATES = new Set([
+  'dirty',
+  'conflicting',
+  'merge_conflict',
+  'mergeable_conflict',
+]);
+
+function normalizedMergeableState(value) {
+  const state = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  return state || null;
+}
+
+function normalizedMergeable(value) {
+  if (value === true || value === false) return value;
+  const state = normalizedMergeableState(value);
+  if (state === 'mergeable') return true;
+  if (state === 'conflicting') return false;
+  return null;
+}
+
+function pullRequestMergeability(pullRequest) {
+  const mergeableState = normalizedMergeableState(
+    pullRequest?.mergeable_state ?? pullRequest?.mergeableState,
+  );
+  const mergeable = normalizedMergeable(pullRequest?.mergeable);
+  const conflict = MERGE_CONFLICT_STATES.has(mergeableState)
+    || normalizedMergeableState(pullRequest?.mergeable) === 'conflicting';
+  return { mergeable, mergeableState, conflict };
 }
 
 function canonicalResource(value) {
@@ -508,6 +548,10 @@ function eventAuditRecord({
     deploymentId: event?.deploymentId === null || event?.deploymentId === undefined
       ? null
       : String(event.deploymentId),
+    commentId: normalizedCommentId(event?.commentId),
+    commentUrl: normalizedString(event?.commentUrl),
+    mergeable: event?.mergeable === true || event?.mergeable === false ? event.mergeable : null,
+    mergeableState: normalizedMergeableState(event?.mergeableState),
     state: normalizedStateValue || null,
     states: Array.isArray(event?.states) ? unique(event.states.map(normalizedState)) : [],
     action: normalizedActionValue || null,
@@ -578,6 +622,10 @@ function normalizedEvent({
   environment = null,
   sha = null,
   conclusion = null,
+  commentId = null,
+  commentUrl = null,
+  mergeable = null,
+  mergeableState = null,
   url = null,
   receivedAt,
 }) {
@@ -600,6 +648,10 @@ function normalizedEvent({
     environment,
     sha,
     conclusion: normalizedState(conclusion),
+    commentId: normalizedCommentId(commentId),
+    commentUrl: normalizedString(commentUrl),
+    mergeable: mergeable === true || mergeable === false ? mergeable : null,
+    mergeableState: normalizedMergeableState(mergeableState),
     url,
     receivedAt,
   };
@@ -629,7 +681,8 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
     const pullRequest = payload.pull_request || {};
     const action = normalizedState(payload.action);
     const merged = action === 'closed' && pullRequest.merged === true;
-    const state = merged ? 'merged' : action;
+    const mergeability = pullRequestMergeability(pullRequest);
+    const state = merged ? 'merged' : mergeability.conflict ? 'conflict' : action;
     return normalizedEvent({
       deliveryId,
       eventName: event,
@@ -637,10 +690,12 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       resource: 'pull_request',
       resources: [],
       state,
-      states: merged ? ['closed'] : [],
+      states: merged ? ['closed'] : mergeability.conflict ? ['conflict'] : [],
       action,
       number: pullRequest.number || payload.number || null,
       sha: pullRequest.head?.sha || null,
+      mergeable: mergeability.mergeable,
+      mergeableState: mergeability.mergeableState,
       url: pullRequest.html_url || null,
       receivedAt,
     });
@@ -649,11 +704,14 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
   if (event === 'pull_request_review') {
     const pullRequest = payload.pull_request || {};
     const reviewState = normalizedState(payload.review?.state);
+    const mergeability = pullRequestMergeability(pullRequest);
     const state = reviewState === 'needs_review'
       ? 'needs_review'
       : reviewState === 'approved'
         ? 'approved'
-        : normalizedState(payload.action);
+      : reviewState === 'commented'
+          ? 'commented'
+          : normalizedState(payload.action);
     return normalizedEvent({
       deliveryId,
       eventName: event,
@@ -661,11 +719,42 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       resource: 'pull_request',
       resources: [],
       state,
-      states: reviewState ? [reviewState] : [],
+      states: [
+        ...(reviewState ? [reviewState] : []),
+        ...(mergeability.conflict ? ['conflict'] : []),
+      ],
       action: payload.action,
       number: pullRequest.number || payload.number || null,
       sha: pullRequest.head?.sha || null,
+      mergeable: mergeability.mergeable,
+      mergeableState: mergeability.mergeableState,
       url: payload.review?.html_url || pullRequest.html_url || null,
+      receivedAt,
+    });
+  }
+
+  if (event === 'issue_comment' || event === 'pull_request_review_comment') {
+    const pullRequest = event === 'issue_comment'
+      ? payload.issue?.pull_request ? payload.issue : null
+      : payload.pull_request || null;
+    if (!pullRequest) return null;
+    const action = normalizedState(payload.action);
+    const comment = payload.comment || {};
+    const commentUrl = comment.html_url || pullRequest.html_url || null;
+    return normalizedEvent({
+      deliveryId,
+      eventName: event,
+      repo,
+      resource: 'pull_request',
+      resources: [],
+      state: action === 'created' ? 'commented' : action,
+      states: action === 'created' ? ['commented'] : [],
+      action,
+      number: pullRequest.number || payload.number || null,
+      sha: pullRequest.head?.sha || null,
+      commentId: comment.id,
+      commentUrl,
+      url: commentUrl,
       receivedAt,
     });
   }
@@ -781,7 +870,8 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
   const deliveryId = `reconcile:${subscription.id}:${fingerprint}`;
   if (subscription.resource === 'pull_request') {
     const merged = data.merged === true || Boolean(data.merged_at);
-    const state = merged ? 'merged' : normalizedState(data.state);
+    const mergeability = pullRequestMergeability(data);
+    const state = merged ? 'merged' : mergeability.conflict ? 'conflict' : normalizedState(data.state);
     return normalizedEvent({
       deliveryId,
       eventName: 'reconciliation',
@@ -789,10 +879,12 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
       resource: 'pull_request',
       resources: [],
       state,
-      states: merged ? ['closed'] : [],
+      states: merged ? ['closed'] : mergeability.conflict ? ['conflict'] : [],
       action: data.state,
       number: data.number || subscription.number || null,
       sha: data.head?.sha || data.head_sha || null,
+      mergeable: mergeability.mergeable,
+      mergeableState: mergeability.mergeableState,
       url: data.html_url || null,
       receivedAt: checkedAt,
     });
