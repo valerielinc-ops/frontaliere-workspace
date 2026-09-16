@@ -10,7 +10,7 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 
 import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordinator-client.mjs';
 
-export const REQUIRED_COORDINATOR_PROTOCOL = 4;
+export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
 
 function serviceLabel(identity) {
@@ -107,6 +107,20 @@ export async function checkCoordinatorHealth(identity) {
         message: `${normalized}: ${eventSummary.duplicateSubscriptions} duplicate observers are active`,
       });
     }
+    if (Number(eventSummary.pendingEvents || 0) > 0) {
+      warnings.push({
+        code: 'pending_events',
+        count: Number(eventSummary.pendingEvents),
+        message: `${normalized}: ${eventSummary.pendingEvents} webhook events await acknowledgement`,
+      });
+    }
+    if (Number(eventSummary.stalledSubscriptions || 0) > 0) {
+      warnings.push({
+        code: 'stalled_subscriptions',
+        count: Number(eventSummary.stalledSubscriptions),
+        message: `${normalized}: ${eventSummary.stalledSubscriptions} subscriptions have no recent target update`,
+      });
+    }
     if (Number(status.metrics?.socketErrors || 0) > 0) {
       warnings.push({
         code: 'socket_errors_seen',
@@ -129,13 +143,15 @@ export async function checkCoordinatorHealth(identity) {
       queueLength: status.queueLength,
       active: status.active,
       metrics: status.metrics,
-        events: {
-          subscriptionCount: status.events?.subscriptionCount,
-          pendingEvents: status.events?.pendingEvents,
-          activeListeners: status.events?.activeListeners,
-          listenerCount: status.events?.listenerCount,
+      events: {
+        subscriptionCount: status.events?.subscriptionCount,
+        pendingEvents: status.events?.pendingEvents,
+        activeListeners: status.events?.activeListeners,
+        listenerHeartbeatMetrics: status.events?.listenerHeartbeatMetrics,
+        listenerCount: status.events?.listenerCount,
         orphanedSubscriptions: status.events?.orphanedSubscriptions,
         duplicateSubscriptions: status.events?.duplicateSubscriptions,
+        stalledSubscriptions: status.events?.stalledSubscriptions,
       },
     } : null,
   };

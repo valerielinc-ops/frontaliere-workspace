@@ -17,6 +17,7 @@ import {
 } from '../bin/github-coordinator.mjs';
 import {
   ensureCoordinator,
+  eventAudit,
   eventSubscriptions,
   ingestGitHubWebhook,
   listenForEvent,
@@ -28,6 +29,7 @@ import {
 } from '../bin/github-coordinator-client.mjs';
 import {
   GitHubEventBroker,
+  DEFAULT_STALLED_AFTER_MS,
   eventMatchesSubscription,
   MAX_SUBSCRIPTION_TTL_MS,
   normalizeWebhookEvent,
@@ -212,6 +214,83 @@ test('conserva le subscription webhook, deduplica le delivery e consegna gli sta
   }
 });
 
+test('audita una delivery PR distinguendo target, stato logico e waitFor', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-audit-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'audit-secret' });
+
+  try {
+    const subscription = broker.subscribe({
+      agentId: 'audit-agent',
+      repo: 'valerielinc-ops/frontaliere-si-o-no',
+      resource: 'pull_request',
+      number: 8818,
+      waitFor: ['merged', 'failed'],
+      ttlSeconds: 300,
+    });
+    const merged = normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'audit-merge-8818',
+      receivedAt: '2026-09-16T07:17:24.463Z',
+      payload: {
+        action: 'closed',
+        number: 8818,
+        repository: { full_name: 'valerielinc-ops/frontaliere-si-o-no' },
+        pull_request: {
+          number: 8818,
+          merged: true,
+          head: { sha: '5fde425359a79a9b3dcbe179f0314a71be97870a' },
+        },
+      },
+    });
+    const result = broker.recordEvent(merged);
+    assert.equal(merged.state, 'merged');
+    assert.deepEqual(result.targetMatchedSubscriptionIds, [subscription.id]);
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    const reconciled = normalizeReconciliationEvent({
+      subscription,
+      data: {
+        number: 8818,
+        state: 'closed',
+        merged: true,
+        merged_at: '2026-09-16T07:17:22Z',
+        head: { sha: '5fde425359a79a9b3dcbe179f0314a71be97870a' },
+      },
+      checkedAt: '2026-09-16T07:25:44.000Z',
+    });
+    assert.deepEqual(
+      { action: reconciled.action, state: reconciled.state, states: reconciled.states, number: reconciled.number },
+      { action: 'closed', state: 'merged', states: ['merged', 'closed'], number: 8818 },
+    );
+    assert.equal(eventMatchesSubscription(reconciled, subscription), true);
+
+    const unmatchedState = normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'audit-open-8818',
+      receivedAt: '2026-09-16T07:18:24.463Z',
+      payload: {
+        action: 'opened',
+        repository: { full_name: 'valerielinc-ops/frontaliere-si-o-no' },
+        pull_request: { number: 8818, merged: false },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(unmatchedState).matchedSubscriptionIds, []);
+
+    const audit = broker.audit({ repo: 'valerielinc-ops/frontaliere-si-o-no', number: 8818, limit: 2 });
+    assert.equal(audit.eventCount, 2);
+    assert.equal(audit.events[0].deliveryId, 'audit-open-8818');
+    assert.equal(audit.events[0].classification, 'target_matched_wait_unmatched');
+    assert.equal(audit.events[1].classification, 'matched');
+    assert.equal(audit.events[1].state, 'merged');
+    assert.deepEqual(audit.events[1].matchedSubscriptionIds, [subscription.id]);
+
+    const restored = new GitHubEventBroker({ stateFile, webhookSecret: 'audit-secret' });
+    assert.equal(restored.audit({ number: 8818 }).events.length, 2);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('espone deadline, ETA storica e duplicati senza richiedere polling', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-eta-'));
   const stateFile = join(stateDirectory, 'events.json');
@@ -259,17 +338,20 @@ test('espone deadline, ETA storica e duplicati senza richiedere polling', () => 
     assert.equal(subscription.waitState, 'waiting_external');
     assert.equal(subscription.remainingMs, 300_000);
 
-    assert.throws(
-      () => broker.subscribe({
-        repo: 'owner/repo',
-        resource: 'pull_request',
-        number: 104,
-        waitFor: ['merged'],
-        ttlSeconds: 300,
-      }),
-      (error) => error.code === 'event_duplicate_subscription'
-        && error.existingSubscriptionId === subscription.id
-        && error.sharedObserverRecommended === true,
+    const joined = broker.subscribe({
+      agentId: 'second-agent',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 104,
+      waitFor: ['merged'],
+      ttlSeconds: 300,
+    });
+    assert.equal(joined.id, subscription.id);
+    assert.equal(joined.sharedJoin, true);
+    assert.equal(joined.sharedObserverCount, 2);
+    assert.equal(
+      broker.status().subscriptions.filter(({ number }) => number === 104).length,
+      1,
     );
 
     const duplicate = broker.subscribe({
@@ -309,6 +391,122 @@ test('i comandi help delle subscription non avviano il coordinatore', () => {
   });
   assert.equal(subscribeHelp.status, 0);
   assert.match(subscribeHelp.stdout, /--wait-for/);
+  const waitHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'wait', '--help'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(waitHelp.status, 0);
+  assert.match(waitHelp.stdout, /--run-id/);
+  const eventsHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', '--help'], {
+    cwd: ROOT,
+    env: { ...process.env, FRONTALIERE_GH_STATE_DIR: join(tmpdir(), 'frontaliere-events-help-state') },
+    encoding: 'utf8',
+  });
+  assert.equal(eventsHelp.status, 0);
+  assert.match(eventsHelp.stdout, /audit/);
+});
+
+test('mantiene l ultima attività, segnala stalled e rinnova una subscription senza alterare gli interessi', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-liveness-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'liveness-secret', now: () => nowMs });
+
+  try {
+    const subscription = broker.subscribe({
+      agentId: 'liveness-agent',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9010',
+      waitFor: ['success'],
+      ttlSeconds: 60,
+      stalledAfterMs: 30_000,
+    });
+    nowMs += 31_000;
+    const stalled = broker.getSubscription(subscription.id);
+    assert.equal(stalled.stalled, true);
+    assert.equal(stalled.waitState, 'stalled');
+    assert.equal(stalled.nextAction, 'reconcile_once_or_escalate');
+
+    nowMs += 1_000;
+    const running = normalizeWebhookEvent({
+      eventName: 'workflow_run',
+      deliveryId: 'liveness-running',
+      receivedAt: new Date(nowMs).toISOString(),
+      payload: {
+        action: 'in_progress',
+        repository: { full_name: 'owner/repo' },
+        workflow_run: { id: 9010, name: 'CI', status: 'in_progress', head_branch: 'main' },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(running).matchedSubscriptionIds, []);
+    assert.equal(broker.getSubscription(subscription.id).lastActivityState, 'in_progress');
+    assert.equal(broker.getSubscription(subscription.id).stalled, false);
+
+    const oldExpiresAt = Date.parse(broker.getSubscription(subscription.id).expiresAt);
+    const renewed = broker.renew(subscription.id, { ttlSeconds: 120, agentId: 'liveness-agent' });
+    assert.equal(renewed.ok, true);
+    assert.ok(Date.parse(renewed.subscription.expiresAt) > oldExpiresAt);
+    assert.equal(renewed.subscription.lastActivityState, 'in_progress');
+    assert.equal(broker.metrics.subscriptionsRenewed, 1);
+    assert.equal(DEFAULT_STALLED_AFTER_MS > 0, true);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('segue il run successivo quando il run precedente viene cancellato', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-follow-latest-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'follow-secret' });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      workflow: 'Deploy',
+      branch: 'main',
+      waitFor: ['completed'],
+      followLatest: true,
+      ttlSeconds: 300,
+    });
+    const cancelled = normalizeWebhookEvent({
+      eventName: 'workflow_run',
+      deliveryId: 'follow-cancelled',
+      payload: {
+        action: 'completed',
+        repository: { full_name: 'owner/repo' },
+        workflow_run: {
+          id: 9011,
+          name: 'Deploy',
+          conclusion: 'cancelled',
+          head_branch: 'main',
+        },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(cancelled).matchedSubscriptionIds, []);
+    assert.equal(broker.pendingEvent(subscription.id), null);
+    assert.equal(broker.getSubscription(subscription.id).lastActivityState, 'cancelled');
+
+    const success = normalizeWebhookEvent({
+      eventName: 'workflow_run',
+      deliveryId: 'follow-success',
+      payload: {
+        action: 'completed',
+        repository: { full_name: 'owner/repo' },
+        workflow_run: {
+          id: 9012,
+          name: 'Deploy',
+          conclusion: 'success',
+          head_branch: 'main',
+        },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(success).matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).runId, '9012');
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('il garbage collector rimuove solo duplicati orfani dopo una grace period esplicita', () => {
@@ -481,10 +679,13 @@ test('la riconciliazione resta nel coordinatore e recupera uno stato workflow se
     socket: '/tmp/frontaliere-github-coordinator-test.sock',
     eventBroker: broker,
   });
+  const notified = [];
+  coordinator.setEventNotifier((subscriptionId) => notified.push(subscriptionId));
 
   try {
     const result = await coordinator.reconcileEvents(subscription.id);
     assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.deepEqual(notified, [subscription.id]);
     assert.equal(broker.pendingEvent(subscription.id).state, 'failed');
     const normalized = normalizeReconciliationEvent({
       subscription: broker.getSubscriptionRecord(subscription.id),
@@ -765,6 +966,9 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
     const status = await eventSubscriptions({ identity });
     assert.equal(status.pendingEvents, 0);
     assert.equal(status.subscriptions.length, 0);
+    const audit = await eventAudit({ repo: 'owner/repo', number: 42, limit: 1 }, { identity });
+    assert.equal(audit.events[0].classification, 'matched');
+    assert.deepEqual(audit.events[0].matchedSubscriptionIds, [subscriptionId]);
   } finally {
     if (receiver) await new Promise((resolvePromise) => receiver.close(resolvePromise));
     try {
@@ -943,6 +1147,94 @@ test('scollega un listener caduto senza terminare il coordinatore e segnala la s
       await waitForCoordinatorStop(identity, 5_000);
     } catch {
       // The daemon may not have started if setup failed; cleanup remains safe.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('riaggancia il listener dopo il riavvio, rinnova la lease e recupera il replay', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-reconnect-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = 'event-reconnect';
+  const secret = 'event-reconnect-secret';
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = secret;
+
+  try {
+    await ensureCoordinator(identity);
+    const subscription = (await subscribeToEvents({
+      agentId: 'agent-reconnect',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9003',
+      waitFor: ['success'],
+      ttlSeconds: 60,
+    }, { identity })).subscription;
+    const eventPromise = listenForEvent(subscription.id, {
+      identity,
+      agentId: 'agent-reconnect',
+      timeoutMs: 5_000,
+      heartbeatIntervalMs: 20,
+      reconcileAfterMs: 0,
+    });
+    eventPromise.catch(() => {});
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const status = await eventSubscriptions({ identity });
+      if (status.activeListeners === 1) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    let beforeRestart;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      beforeRestart = await eventSubscriptions({ identity });
+      if (beforeRestart.metrics.eventListenerHeartbeats > 0) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    assert.ok(beforeRestart.listenerHeartbeatMetrics.heartbeats > 0);
+
+    await sendRequest({ type: 'shutdown' }, { identity });
+    assert.equal(await waitForCoordinatorStop(identity, 5_000), true);
+
+    await ensureCoordinator(identity);
+    const payload = {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: {
+        id: 9003,
+        name: 'CI',
+        conclusion: 'success',
+        head_sha: 'reconnect-abc123',
+      },
+    };
+    const body = JSON.stringify(payload);
+    await ingestGitHubWebhook({
+      eventName: 'workflow_run',
+      deliveryId: 'reconnect-delivery-9003',
+      signature: signedWebhook(body, secret),
+      rawBody: body,
+    }, { identity });
+
+    const event = await eventPromise;
+    assert.equal(event.state, 'success');
+    assert.equal(event.runId, '9003');
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // Il daemon puo' non avere raggiunto l'avvio; il cleanup resta sicuro.
     }
     for (const [name, value] of Object.entries(previousEnvironment)) {
       if (value === undefined) delete process.env[name];

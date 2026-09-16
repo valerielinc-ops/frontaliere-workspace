@@ -23,12 +23,17 @@ export const EVENT_BROKER_STATE_VERSION = 1;
 export const DEFAULT_SUBSCRIPTION_TTL_MS = 6 * 60 * 60 * 1_000;
 export const MAX_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const DEFAULT_ORPHAN_GRACE_MS = 60 * 60 * 1_000;
+export const DEFAULT_STALLED_AFTER_MS = 4 * 60 * 60 * 1_000;
 
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
+const MAX_EVENT_AUDIT = 256;
 const SEEN_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_LATENCY_SAMPLES = 200;
 const MIN_ESTIMATE_SAMPLES = 3;
+const TERMINAL_STATES = new Set([
+  'cancelled', 'completed', 'failed', 'merged', 'neutral', 'skipped', 'success',
+]);
 
 function brokerError(code, message) {
   const error = new Error(message);
@@ -104,16 +109,29 @@ function parseExpiration(spec, nowMs) {
   return expiresAtMs;
 }
 
+function parseStalledAfter(spec) {
+  const requested = Number(spec.stalledAfterMs ?? (
+    spec.stalledAfterSeconds === undefined
+      ? DEFAULT_STALLED_AFTER_MS
+      : Number(spec.stalledAfterSeconds) * 1_000
+  ));
+  if (!Number.isFinite(requested) || requested <= 0) {
+    throw brokerError('event_stalled_after_invalid', 'event stalled threshold must be positive');
+  }
+  return Math.min(MAX_SUBSCRIPTION_TTL_MS, requested);
+}
+
 function subscriptionTargetKey(subscription) {
   const selectors = [
     ['number', subscription.number],
     ['run', subscription.runId],
     ['sha', subscription.sha],
+    ['branch', subscription.branch],
     ['environment', subscription.environment],
     ['workflow', subscription.workflow],
     ['deployment', subscription.deploymentId],
   ].map(([name, value]) => `${name}=${value === null || value === undefined ? '*' : value}`);
-  return `${subscription.repo}|${subscription.resource}|${selectors.join('|')}`;
+  return `${subscription.repo}|${subscription.resource}|${selectors.join('|')}|followLatest=${subscription.followLatest === true}`;
 }
 
 function subscriptionDedupKey(subscription) {
@@ -121,7 +139,13 @@ function subscriptionDedupKey(subscription) {
 }
 
 function latencySampleKey(subscription) {
-  return `${subscription.resource}:${[...subscription.waitFor].sort().join(',')}`;
+  return [
+    subscription.repo,
+    subscription.resource,
+    subscription.workflow || '*',
+    subscription.branch || '*',
+    [...subscription.waitFor].sort().join(','),
+  ].join(':');
 }
 
 function listenerAttachedValue(listenerAttached, subscriptionId) {
@@ -132,6 +156,79 @@ function listenerAttachedValue(listenerAttached, subscriptionId) {
   if (listenerAttached instanceof Set) return listenerAttached.has(subscriptionId);
   if (Array.isArray(listenerAttached)) return listenerAttached.includes(subscriptionId);
   return null;
+}
+
+function listenerInfoValue(listenerInfo, subscriptionId) {
+  if (typeof listenerInfo === 'function') {
+    const value = listenerInfo(subscriptionId);
+    return Array.isArray(value) ? value : value ? [value] : [];
+  }
+  return [];
+}
+
+function targetMatchesFilter(subscription, filters = {}) {
+  if (filters.repo && subscription.repo !== filters.repo) return false;
+  if (filters.resource && subscription.resource !== canonicalResource(filters.resource)) return false;
+  if (filters.runId && String(subscription.runId) !== String(filters.runId)) return false;
+  if (filters.number !== undefined && filters.number !== null && subscription.number !== Number(filters.number)) return false;
+  for (const key of ['sha', 'branch', 'environment', 'workflow', 'deploymentId']) {
+    if (filters[key] && subscription[key] !== String(filters[key])) return false;
+  }
+  if (filters.agentId) {
+    const agents = subscription.shared
+      ? subscription.sharedAgentIds
+      : [subscription.agentId];
+    if (!agents.includes(String(filters.agentId))) return false;
+  }
+  return true;
+}
+
+function formatAge(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'n/d';
+  if (milliseconds < 60_000) return `${Math.max(0, Math.round(milliseconds / 1_000))}s fa`;
+  if (milliseconds < 60 * 60_000) return `${Math.round(milliseconds / 60_000)}m fa`;
+  return `${Math.round(milliseconds / (60 * 60_000))}h fa`;
+}
+
+function compactSubscriptionLine(subscription) {
+  const target = subscription.runId
+    ? `run ${subscription.runId}`
+    : subscription.number
+      ? `PR #${subscription.number}`
+      : subscription.repo;
+  const state = subscription.stalled ? 'stalled' : subscription.waitState;
+  const latestHeartbeat = (subscription.listenerInfo || [])
+    .map((listenerInfo) => Date.parse(listenerInfo.lastHeartbeatAt || ''))
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  const listener = subscription.listenerAttached === true
+    ? `listener OK · heartbeat ${latestHeartbeat ? formatAge(Date.now() - latestHeartbeat) : 'n/d'}`
+    : subscription.listenerAttached === false
+      ? 'listener assente'
+      : 'listener n/d';
+  const last = Number.isFinite(subscription.staleSinceMs)
+    ? formatAge(subscription.staleSinceMs)
+    : subscription.lastActivityAt || subscription.observedAt || subscription.createdAt;
+  return `${target}: ${state} · ultimo aggiornamento ${last || 'n/d'} · ${listener}`;
+}
+
+function subscriptionIsStalled(subscription, nowMs) {
+  const lastActivityMs = Date.parse(subscription.lastActivityAt || '');
+  const staleSinceMs = Number.isFinite(lastActivityMs)
+    ? Math.max(0, nowMs - lastActivityMs)
+    : null;
+  return subscription.pending.length === 0
+    && staleSinceMs !== null
+    && staleSinceMs >= subscription.stalledAfterMs
+    && !TERMINAL_STATES.has(subscription.lastActivityState);
+}
+
+function selectedSubscription(subscription, filters, listenerAttached, nowMs) {
+  if (!targetMatchesFilter(subscription, filters)) return false;
+  if (filters.active === true && listenerAttachedValue(listenerAttached, subscription.id) !== true) return false;
+  if (filters.pendingOnly === true && subscription.pending.length === 0) return false;
+  if (filters.stalledOnly === true && !subscriptionIsStalled(subscription, nowMs)) return false;
+  return true;
 }
 
 function quantile(values, percentile) {
@@ -179,10 +276,12 @@ function normalizeSubscriptionSpec(spec, nowMs) {
     throw brokerError('event_resource_invalid', `unsupported event resource: ${spec.resource}`);
   }
   const expiresAtMs = parseExpiration(spec, nowMs);
+  const stalledAfterMs = parseStalledAfter(spec);
   const number = spec.number === undefined || spec.number === null ? null : Number(spec.number);
   if (number !== null && (!Number.isInteger(number) || number <= 0)) {
     throw brokerError('event_number_invalid', 'event subscription number must be a positive integer');
   }
+  const allowDuplicate = spec.allowDuplicate === true || spec.allow_duplicate === true;
   return {
     agentId: normalizedString(spec.agentId ?? spec.agent_id ?? spec.sessionId ?? spec.session_id) || 'anonymous-agent',
     resource,
@@ -190,14 +289,21 @@ function normalizeSubscriptionSpec(spec, nowMs) {
     number,
     runId: spec.runId === undefined || spec.runId === null ? null : String(spec.runId),
     sha: normalizedString(spec.sha),
+    branch: normalizedString(spec.branch),
     environment: normalizedString(spec.environment),
     workflow: normalizedString(spec.workflow),
     deploymentId: spec.deploymentId === undefined || spec.deploymentId === null ? null : String(spec.deploymentId),
     waitFor: subscriptionStates(spec),
-    allowDuplicate: spec.allowDuplicate === true || spec.allow_duplicate === true,
-    shared: spec.shared === true || spec.sharedObserver === true,
+    allowDuplicate,
+    shared: spec.shared === true || spec.sharedObserver === true || !allowDuplicate,
+    followLatest: spec.followLatest === true || spec.follow_latest === true,
     once: spec.once !== false,
+    stalledAfterMs,
     createdAt: new Date(nowMs).toISOString(),
+    lastActivityAt: new Date(nowMs).toISOString(),
+    lastActivityState: null,
+    lastActivityAction: null,
+    lastActivityRunId: null,
     expiresAtMs,
     expiresAt: new Date(expiresAtMs).toISOString(),
     pending: [],
@@ -211,6 +317,7 @@ function subscriptionPublic(
     waitEstimate: estimate = summarizeWaitEstimate([]),
     duplicateTargetCount = 1,
     listenerAttached = null,
+    listenerInfo = [],
     sharedJoin = false,
   } = {},
 ) {
@@ -223,10 +330,21 @@ function subscriptionPublic(
   const estimatedDecisionAt = estimate.estimatedWaitP90Ms === null
     ? null
     : new Date(Math.min(subscription.expiresAtMs, nowMs + estimate.estimatedWaitP90Ms)).toISOString();
-  const waitState = subscription.pending.length > 0 ? 'event_pending' : 'waiting_external';
+  const lastActivityMs = Date.parse(subscription.lastActivityAt || '');
+  const staleSinceMs = Number.isFinite(lastActivityMs)
+    ? Math.max(0, nowMs - lastActivityMs)
+    : null;
+  const stalled = subscriptionIsStalled(subscription, nowMs);
+  const waitState = subscription.pending.length > 0
+    ? 'event_pending'
+    : stalled
+      ? 'stalled'
+      : 'waiting_external';
   const nextAction = waitState === 'event_pending'
     ? 'ack_event'
-    : subscription.shared
+    : waitState === 'stalled'
+      ? 'reconcile_once_or_escalate'
+      : subscription.shared
       ? 'attach_shared_listener'
       : duplicateTargetCount > 1
       ? 'reuse_shared_observer'
@@ -242,16 +360,28 @@ function subscriptionPublic(
     environment: subscription.environment,
     workflow: subscription.workflow,
     deploymentId: subscription.deploymentId,
+    branch: subscription.branch,
+    followLatest: subscription.followLatest === true,
     waitFor: subscription.waitFor,
     once: subscription.once,
     createdAt: subscription.createdAt,
+    lastRenewedAt: subscription.lastRenewedAt || null,
     expiresAt: subscription.expiresAt,
     pendingEvents: subscription.pending.length,
     ageMs,
+    lastActivityAt: subscription.lastActivityAt,
+    updatedAt: subscription.lastActivityAt,
+    lastActivityState: subscription.lastActivityState,
+    lastActivityAction: subscription.lastActivityAction,
+    lastActivityRunId: subscription.lastActivityRunId,
+    staleSinceMs,
+    stalledAfterMs: subscription.stalledAfterMs,
+    stalled,
     remainingMs,
     waitBudgetMs,
     deadlineAt: subscription.expiresAt,
     estimatedDecisionAt,
+    observedAt: new Date(nowMs).toISOString(),
     waitState,
     nextAction,
     shared: subscription.shared === true,
@@ -263,6 +393,16 @@ function subscriptionPublic(
     duplicateTargetCount,
     sharedObserverRecommended: duplicateTargetCount > 1,
     listenerAttached,
+    listenerInfo,
+    compactLine: compactSubscriptionLine({
+      ...subscription,
+      waitState,
+      stalled,
+      lastActivityAt: subscription.lastActivityAt,
+      staleSinceMs,
+      listenerAttached,
+      listenerInfo,
+    }),
     ...estimate,
   };
 }
@@ -270,6 +410,7 @@ function subscriptionPublic(
 function storedLatencySample(value) {
   if (!value || typeof value !== 'object') return null;
   const resource = canonicalResource(value.resource);
+  const repo = validRepo(value.repo);
   const waitForKey = normalizedString(value.waitForKey);
   const waitMs = Number(value.waitMs);
   if (!['pull_request', 'workflow_run', 'deployment'].includes(resource)
@@ -277,6 +418,7 @@ function storedLatencySample(value) {
     || !Number.isFinite(waitMs)
     || waitMs < 0) return null;
   return {
+    repo,
     resource,
     waitForKey,
     waitMs: Math.min(MAX_SUBSCRIPTION_TTL_MS, Math.round(waitMs)),
@@ -304,6 +446,7 @@ function storedSubscription(value) {
     number,
     runId: value.runId === null || value.runId === undefined ? null : String(value.runId),
     sha: normalizedString(value.sha),
+    branch: normalizedString(value.branch),
     environment: normalizedString(value.environment),
     workflow: normalizedString(value.workflow),
     deploymentId: value.deploymentId === null || value.deploymentId === undefined ? null : String(value.deploymentId),
@@ -314,11 +457,98 @@ function storedSubscription(value) {
         normalizedString(value.agentId) || 'anonymous-agent',
       ))
       : [],
+    followLatest: value.followLatest === true,
     once: value.once !== false,
     createdAt: normalizedString(value.createdAt) || new Date().toISOString(),
+    stalledAfterMs: Number.isFinite(Number(value.stalledAfterMs)) && Number(value.stalledAfterMs) > 0
+      ? Math.min(MAX_SUBSCRIPTION_TTL_MS, Number(value.stalledAfterMs))
+      : DEFAULT_STALLED_AFTER_MS,
+    lastActivityAt: normalizedString(value.lastActivityAt)
+      || normalizedString(value.createdAt)
+      || new Date().toISOString(),
+    lastActivityState: normalizedString(value.lastActivityState),
+    lastActivityAction: normalizedString(value.lastActivityAction),
+    lastActivityRunId: value.lastActivityRunId === null || value.lastActivityRunId === undefined
+      ? null
+      : String(value.lastActivityRunId),
+    lastRenewedAt: normalizedString(value.lastRenewedAt),
     expiresAtMs,
     expiresAt: new Date(expiresAtMs).toISOString(),
     pending: Array.isArray(value.pending) ? value.pending : [],
+  };
+}
+
+function eventAuditRecord({
+  event,
+  eventName,
+  deliveryId,
+  targetMatchedSubscriptionIds = [],
+  matchedSubscriptionIds = [],
+  ignoredReason = null,
+  duplicate = false,
+  recordedAt,
+}) {
+  const targetMatches = unique(targetMatchedSubscriptionIds.map(String));
+  const waitMatches = unique(matchedSubscriptionIds.map(String));
+  const normalizedStateValue = normalizedState(event?.state);
+  const normalizedActionValue = normalizedState(event?.action);
+  const id = String(deliveryId || event?.id || `audit:${Date.now()}`);
+  return {
+    id,
+    deliveryId: id,
+    eventName: normalizedString(eventName || event?.eventName) || 'unknown',
+    repo: validRepo(event?.repo),
+    resource: event?.resource ? canonicalResource(event.resource) : null,
+    number: event?.number === null || event?.number === undefined ? null : Number(event.number),
+    runId: event?.runId === null || event?.runId === undefined ? null : String(event.runId),
+    sha: normalizedString(event?.sha),
+    branch: normalizedString(event?.branch),
+    workflow: normalizedString(event?.workflow),
+    environment: normalizedString(event?.environment),
+    deploymentId: event?.deploymentId === null || event?.deploymentId === undefined
+      ? null
+      : String(event.deploymentId),
+    state: normalizedStateValue || null,
+    states: Array.isArray(event?.states) ? unique(event.states.map(normalizedState)) : [],
+    action: normalizedActionValue || null,
+    conclusion: normalizedState(event?.conclusion) || null,
+    receivedAt: normalizedString(event?.receivedAt) || recordedAt,
+    recordedAt,
+    targetMatchedSubscriptionIds: targetMatches,
+    matchedSubscriptionIds: waitMatches,
+    targetMatchCount: targetMatches.length,
+    matchCount: waitMatches.length,
+    classification: ignoredReason
+      ? 'ignored'
+      : waitMatches.length > 0
+        ? 'matched'
+        : targetMatches.length > 0
+          ? 'target_matched_wait_unmatched'
+          : 'unmatched',
+    ignoredReason: normalizedString(ignoredReason),
+    duplicate: duplicate === true,
+  };
+}
+
+function storedEventAudit(value) {
+  if (!value || typeof value !== 'object' || !normalizedString(value.id || value.deliveryId)) return null;
+  const record = eventAuditRecord({
+    event: value,
+    eventName: value.eventName,
+    deliveryId: value.id || value.deliveryId,
+    targetMatchedSubscriptionIds: Array.isArray(value.targetMatchedSubscriptionIds)
+      ? value.targetMatchedSubscriptionIds
+      : [],
+    matchedSubscriptionIds: Array.isArray(value.matchedSubscriptionIds)
+      ? value.matchedSubscriptionIds
+      : [],
+    ignoredReason: value.ignoredReason,
+    duplicate: value.duplicate,
+    recordedAt: normalizedString(value.recordedAt) || new Date().toISOString(),
+  });
+  return {
+    ...record,
+    receivedAt: normalizedString(value.receivedAt) || record.recordedAt,
   };
 }
 
@@ -343,6 +573,7 @@ function normalizedEvent({
   pullRequestNumbers = [],
   runId = null,
   workflow = null,
+  branch = null,
   deploymentId = null,
   environment = null,
   sha = null,
@@ -364,6 +595,7 @@ function normalizedEvent({
     pullRequestNumbers: unique(pullRequestNumbers.map((value) => String(value))),
     runId: runId === null || runId === undefined ? null : String(runId),
     workflow,
+    branch,
     deploymentId: deploymentId === null || deploymentId === undefined ? null : String(deploymentId),
     environment,
     sha,
@@ -458,6 +690,7 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       pullRequestNumbers,
       runId: run.id,
       workflow: run.name || run.workflow_name || null,
+      branch: run.head_branch || null,
       sha: run.head_sha || null,
       conclusion: run.conclusion || null,
       url: run.html_url || null,
@@ -508,6 +741,16 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
 }
 
 export function eventMatchesSubscription(event, subscription) {
+  if (!eventMatchesSubscriptionTarget(event, subscription)) return false;
+  if (subscription.followLatest
+    && subscription.resource === 'workflow_run'
+    && event.state === 'cancelled'
+    && subscription.waitFor.includes('completed')) return false;
+  const states = event.states || [event.state];
+  return subscription.waitFor.some((state) => states.includes(state));
+}
+
+export function eventMatchesSubscriptionTarget(event, subscription) {
   if (!event || !subscription || event.repo !== subscription.repo) return false;
   const resources = event.resources || [event.resource];
   if (!resources.includes(subscription.resource)) return false;
@@ -517,11 +760,11 @@ export function eventMatchesSubscription(event, subscription) {
   }
   if (subscription.runId && String(event.runId) !== String(subscription.runId)) return false;
   if (subscription.sha && event.sha !== subscription.sha) return false;
+  if (subscription.branch && event.branch !== subscription.branch) return false;
   if (subscription.environment && event.environment !== subscription.environment) return false;
   if (subscription.workflow && event.workflow !== subscription.workflow) return false;
   if (subscription.deploymentId && String(event.deploymentId) !== String(subscription.deploymentId)) return false;
-  const states = event.states || [event.state];
-  return subscription.waitFor.some((state) => states.includes(state));
+  return true;
 }
 
 export function verifyWebhookSignature(rawBody, signature, secret) {
@@ -573,6 +816,7 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
       pullRequestNumbers,
       runId: data.id || data.run_id || subscription.runId,
       workflow: data.name || data.workflow_name || null,
+      branch: data.head_branch || subscription.branch || null,
       sha: data.head_sha || null,
       conclusion: data.conclusion || null,
       url: data.html_url || null,
@@ -600,15 +844,17 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
 }
 
 export class GitHubEventBroker {
-  constructor({ stateFile, webhookSecret, now = () => Date.now() }) {
+  constructor({ stateFile, webhookSecret, now = () => Date.now(), legacyStateFile = null }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
-    this.webhookSecret = webhookSecret || null;
+    this.legacyStateFile = legacyStateFile && legacyStateFile !== stateFile ? legacyStateFile : null;
+    this.webhookSecret = normalizedString(webhookSecret);
     this.now = now;
     this.metrics = {
       subscriptionsCreated: 0,
       subscriptionsExpired: 0,
       subscriptionsAcknowledged: 0,
+      subscriptionsRenewed: 0,
       webhookEvents: 0,
       webhookDuplicates: 0,
       webhookIgnored: 0,
@@ -618,39 +864,100 @@ export class GitHubEventBroker {
       subscriptionsGarbageCollected: 0,
     };
     this.state = this.loadState();
+    if (this.state.migratedLegacyFiles?.length > 0) this.persist();
   }
 
   loadState() {
     mkdirSync(dirname(this.stateFile), { recursive: true, mode: 0o700 });
     try { chmodSync(dirname(this.stateFile), 0o700); } catch { /* best effort */ }
-    try {
-      const raw = readFileSync(this.stateFile, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed.version !== EVENT_BROKER_STATE_VERSION) {
-        throw brokerError('event_state_version_unsupported', 'unsupported event broker state version');
+    const readState = (path) => {
+      try {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'));
+        if (parsed.version !== EVENT_BROKER_STATE_VERSION) {
+          throw brokerError('event_state_version_unsupported', 'unsupported event broker state version');
+        }
+        const subscriptions = Array.isArray(parsed.subscriptions)
+          ? parsed.subscriptions.map(storedSubscription)
+          : [];
+        if (subscriptions.some((subscription) => !subscription || !subscription.repo || !subscription.waitFor.length)) {
+          throw brokerError('event_state_invalid', 'event broker state contains an invalid subscription');
+        }
+        return {
+          version: EVENT_BROKER_STATE_VERSION,
+          subscriptions,
+          seenDeliveries: Array.isArray(parsed.seenDeliveries)
+            ? parsed.seenDeliveries.filter((delivery) => delivery?.id && Number.isFinite(Number(delivery.seenAtMs)))
+            : [],
+          latencySamples: Array.isArray(parsed.latencySamples)
+            ? parsed.latencySamples.map(storedLatencySample).filter(Boolean).slice(-MAX_LATENCY_SAMPLES)
+            : [],
+          eventAudit: Array.isArray(parsed.eventAudit)
+            ? parsed.eventAudit.map(storedEventAudit).filter(Boolean).slice(-MAX_EVENT_AUDIT)
+            : [],
+          migratedLegacyFiles: Array.isArray(parsed.migratedLegacyFiles)
+            ? parsed.migratedLegacyFiles.map(String)
+            : [],
+        };
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
       }
-      const subscriptions = Array.isArray(parsed.subscriptions)
-        ? parsed.subscriptions.map(storedSubscription)
-        : [];
-      if (subscriptions.some((subscription) => !subscription || !subscription.repo || !subscription.waitFor.length)) {
-        throw brokerError('event_state_invalid', 'event broker state contains an invalid subscription');
+    };
+    const current = readState(this.stateFile) || {
+      version: EVENT_BROKER_STATE_VERSION,
+      subscriptions: [],
+      seenDeliveries: [],
+      latencySamples: [],
+      eventAudit: [],
+      migratedLegacyFiles: [],
+    };
+    if (!this.legacyStateFile || current.migratedLegacyFiles.includes(this.legacyStateFile)) return current;
+    const legacy = readState(this.legacyStateFile);
+    if (!legacy) return current;
+    const subscriptionsByKey = new Map(current.subscriptions.map((subscription) => [
+      subscriptionDedupKey(subscription),
+      subscription,
+    ]));
+    for (const subscription of legacy.subscriptions) {
+      const key = subscriptionDedupKey(subscription);
+      const existing = subscriptionsByKey.get(key);
+      if (!existing) {
+        subscriptionsByKey.set(key, subscription);
+        continue;
       }
-      return {
-        version: EVENT_BROKER_STATE_VERSION,
-        subscriptions,
-        seenDeliveries: Array.isArray(parsed.seenDeliveries)
-          ? parsed.seenDeliveries.filter((delivery) => delivery?.id && Number.isFinite(Number(delivery.seenAtMs)))
-          : [],
-        latencySamples: Array.isArray(parsed.latencySamples)
-          ? parsed.latencySamples.map(storedLatencySample).filter(Boolean).slice(-MAX_LATENCY_SAMPLES)
-          : [],
-      };
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        return { version: EVENT_BROKER_STATE_VERSION, subscriptions: [], seenDeliveries: [], latencySamples: [] };
+      existing.shared = true;
+      existing.sharedAgentIds = unique([
+        ...(existing.sharedAgentIds || []),
+        existing.agentId,
+        ...(subscription.sharedAgentIds || []),
+        subscription.agentId,
+      ]);
+      existing.pending = [...existing.pending, ...subscription.pending]
+        .filter((event, index, events) => events.findIndex((candidate) => candidate.id === event.id) === index)
+        .slice(-32);
+      if (subscription.expiresAtMs > existing.expiresAtMs) {
+        existing.expiresAtMs = subscription.expiresAtMs;
+        existing.expiresAt = subscription.expiresAt;
       }
-      throw error;
+      const existingActivityMs = Date.parse(existing.lastActivityAt || '');
+      const legacyActivityMs = Date.parse(subscription.lastActivityAt || '');
+      if (!Number.isFinite(existingActivityMs) || legacyActivityMs > existingActivityMs) {
+        existing.lastActivityAt = subscription.lastActivityAt;
+        existing.lastActivityState = subscription.lastActivityState;
+        existing.lastActivityAction = subscription.lastActivityAction;
+        existing.lastActivityRunId = subscription.lastActivityRunId;
+      }
     }
+    const seenById = new Map(current.seenDeliveries.map((delivery) => [delivery.id, delivery]));
+    for (const delivery of legacy.seenDeliveries) seenById.set(delivery.id, delivery);
+    current.subscriptions = [...subscriptionsByKey.values()];
+    current.seenDeliveries = [...seenById.values()].slice(-MAX_SEEN_DELIVERIES);
+    current.latencySamples = [...current.latencySamples, ...legacy.latencySamples].slice(-MAX_LATENCY_SAMPLES);
+    const auditById = new Map(current.eventAudit.map((event) => [event.id, event]));
+    for (const event of legacy.eventAudit) auditById.set(event.id, event);
+    current.eventAudit = [...auditById.values()].slice(-MAX_EVENT_AUDIT);
+    current.migratedLegacyFiles.push(this.legacyStateFile);
+    return current;
   }
 
   persist() {
@@ -732,8 +1039,15 @@ export class GitHubEventBroker {
   estimateFor(subscription) {
     const exactKey = latencySampleKey(subscription);
     const exact = this.state.latencySamples.filter((sample) => sample.waitForKey === exactKey);
+    const contextual = this.state.latencySamples.filter((sample) => (
+      sample.repo === subscription.repo
+      && sample.resource === subscription.resource
+      && (sample.workflow || '*') === (subscription.workflow || '*')
+      && (sample.branch || '*') === (subscription.branch || '*')
+    ));
     const resourceSamples = this.state.latencySamples.filter((sample) => sample.resource === subscription.resource);
     if (exact.length >= MIN_ESTIMATE_SAMPLES) return summarizeWaitEstimate(exact, 'same_wait_for');
+    if (contextual.length >= MIN_ESTIMATE_SAMPLES) return summarizeWaitEstimate(contextual, 'same_repo_workflow');
     if (resourceSamples.length) return summarizeWaitEstimate(resourceSamples, 'resource');
     return summarizeWaitEstimate([], 'none');
   }
@@ -754,27 +1068,60 @@ export class GitHubEventBroker {
       .length;
   }
 
-  summary({ listenerAttached = null } = {}) {
+  summary({ listenerAttached = null, listenerInfo = null, ...filters } = {}) {
     if (this.prune()) this.persist();
-    const subscriptions = this.state.subscriptions;
-    const duplicateGroups = this.duplicateGroups();
+    const allSubscriptions = this.state.subscriptions;
+    const nowMs = this.now();
+    const subscriptions = allSubscriptions.filter((subscription) => (
+      selectedSubscription(subscription, filters, listenerAttached, nowMs)
+    ));
+    const duplicateGroups = this.duplicateGroups()
+      .filter((group) => subscriptions.some(({ id }) => group.subscriptionIds.includes(id)));
     const latencyByResource = new Map();
     for (const sample of this.state.latencySamples) {
       if (!latencyByResource.has(sample.resource)) latencyByResource.set(sample.resource, []);
       latencyByResource.get(sample.resource).push(sample);
     }
-    const listenerCount = this.listenerCount(listenerAttached);
+    const publicSubscriptions = subscriptions.map((subscription) => this.publicSubscription(subscription, {
+      nowMs,
+      listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
+      listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
+    }));
+    const listenerCount = listenerAttached === null
+      ? null
+      : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
+    const stalledSubscriptions = publicSubscriptions.filter(({ stalled }) => stalled);
+    const pendingEvents = subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0);
+    const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
+    const duplicateSubscriptions = duplicateGroups.reduce((total, group) => total + group.count - 1, 0);
+    const alerts = [];
+    if (pendingEvents > 0) alerts.push({ code: 'pending_events', count: pendingEvents });
+    if (listenerAttached !== null && orphanedSubscriptions > 0) {
+      alerts.push({ code: 'listener_missing', count: orphanedSubscriptions });
+    }
+    if (duplicateSubscriptions > 0) alerts.push({ code: 'duplicate_subscriptions', count: duplicateSubscriptions });
+    if (stalledSubscriptions.length > 0) {
+      alerts.push({ code: 'stalled_subscriptions', count: stalledSubscriptions.length });
+    }
+    const summaryLine = publicSubscriptions.length === 1
+      ? publicSubscriptions[0].compactLine
+      : String(publicSubscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
+        + ' listener attivi · ' + String(pendingEvents) + ' eventi pending';
     return {
       stateFile: this.stateFile,
       subscriptionCount: subscriptions.length,
-      agentCount: unique(subscriptions.map(({ agentId }) => agentId)).length,
-      pendingEvents: subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
+      totalSubscriptionCount: allSubscriptions.length,
+      agentCount: unique(subscriptions.flatMap((subscription) => subscription.shared
+        ? subscription.sharedAgentIds
+        : [subscription.agentId])).length,
+      pendingEvents,
       listenerCount,
-      orphanedSubscriptions: listenerCount === null
-        ? null
-        : subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length,
+      orphanedSubscriptions: listenerAttached === null ? null : orphanedSubscriptions,
+      stalledSubscriptions: stalledSubscriptions.length,
       duplicateGroups,
-      duplicateSubscriptions: duplicateGroups.reduce((total, group) => total + group.count - 1, 0),
+      duplicateSubscriptions,
+      alerts,
+      summaryLine,
       metrics: { ...this.metrics },
       latency: {
         sampleCount: this.state.latencySamples.length,
@@ -786,17 +1133,29 @@ export class GitHubEventBroker {
     };
   }
 
-  status({ listenerAttached = null } = {}) {
+  status({ listenerAttached = null, listenerInfo = null, limit, ...filters } = {}) {
     if (this.prune()) this.persist();
+    const nowMs = this.now();
+    const allSubscriptions = this.state.subscriptions.filter((subscription) => (
+      selectedSubscription(subscription, filters, listenerAttached, nowMs)
+    ));
+    const numericLimit = limit === undefined || limit === null ? null : Number(limit);
+    const boundedLimit = Number.isFinite(numericLimit) && numericLimit >= 0
+      ? Math.floor(numericLimit)
+      : null;
+    const subscriptions = boundedLimit === null
+      ? allSubscriptions
+      : allSubscriptions.slice(0, boundedLimit);
     return {
       stateFile: this.stateFile,
-      subscriptions: this.state.subscriptions.map((subscription) => this.publicSubscription(subscription, {
-        nowMs: this.now(),
+      subscriptions: subscriptions.map((subscription) => this.publicSubscription(subscription, {
+        nowMs,
         listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
+        listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
       })),
-      pendingEvents: this.state.subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
+      pendingEvents: subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
       metrics: { ...this.metrics },
-      summary: this.summary({ listenerAttached }),
+      summary: this.summary({ ...filters, listenerAttached, listenerInfo }),
     };
   }
 
@@ -805,29 +1164,29 @@ export class GitHubEventBroker {
     const nowMs = this.now();
     const normalized = normalizeSubscriptionSpec(spec, nowMs);
     const allowDuplicate = normalized.allowDuplicate === true;
-    const shared = normalized.shared === true;
     const agentId = normalized.agentId;
     delete normalized.allowDuplicate;
     const duplicate = this.state.subscriptions
       .filter((subscription) => subscriptionDedupKey(subscription) === subscriptionDedupKey(normalized))
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
-    if (duplicate && shared && duplicate.shared) {
-      if (!duplicate.sharedAgentIds.includes(agentId)) duplicate.sharedAgentIds.push(agentId);
+    if (duplicate && !allowDuplicate) {
+      duplicate.shared = true;
+      duplicate.sharedAgentIds = unique([
+        ...(duplicate.sharedAgentIds || []),
+        duplicate.agentId,
+        agentId,
+      ]);
+      if (normalized.expiresAtMs > duplicate.expiresAtMs) {
+        duplicate.expiresAtMs = Math.min(
+          nowMs + MAX_SUBSCRIPTION_TTL_MS,
+          Math.max(duplicate.expiresAtMs, normalized.expiresAtMs),
+        );
+        duplicate.expiresAt = new Date(duplicate.expiresAtMs).toISOString();
+      }
       this.persist();
       return this.publicSubscription(duplicate, { nowMs, sharedJoin: true });
     }
-    if (duplicate && !allowDuplicate) {
-      const error = brokerError(
-        'event_duplicate_subscription',
-        'an observer for this exact target and wait state already exists; reuse the shared observer',
-      );
-      error.existingSubscriptionId = duplicate.id;
-      error.existingSubscription = this.publicSubscription(duplicate, { nowMs });
-      error.targetKey = subscriptionTargetKey(duplicate);
-      error.sharedObserverRecommended = true;
-      throw error;
-    }
-    if (shared) normalized.sharedAgentIds = [agentId];
+    if (normalized.shared) normalized.sharedAgentIds = [agentId];
     normalized.id = `sub-${randomUUID()}`;
     this.state.subscriptions.push(normalized);
     this.metrics.subscriptionsCreated += 1;
@@ -844,6 +1203,42 @@ export class GitHubEventBroker {
   getSubscriptionRecord(subscriptionId) {
     if (this.prune()) this.persist();
     return this.state.subscriptions.find(({ id }) => id === String(subscriptionId || '')) || null;
+  }
+
+  renew(subscriptionId, { ttlMs, ttlSeconds, agentId } = {}) {
+    const subscription = this.getSubscriptionRecord(subscriptionId);
+    if (!subscription) {
+      return {
+        ok: false,
+        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    const requestedTtl = Number(ttlMs ?? (
+      ttlSeconds === undefined ? DEFAULT_SUBSCRIPTION_TTL_MS : Number(ttlSeconds) * 1_000
+    ));
+    if (!Number.isFinite(requestedTtl) || requestedTtl <= 0) {
+      return {
+        ok: false,
+        error: { code: 'event_ttl_invalid', message: 'event subscription TTL must be positive' },
+      };
+    }
+    if (agentId && subscription.shared && !subscription.sharedAgentIds.includes(String(agentId))) {
+      subscription.sharedAgentIds.push(String(agentId));
+    }
+    const nowMs = this.now();
+    subscription.expiresAtMs = Math.min(
+      nowMs + MAX_SUBSCRIPTION_TTL_MS,
+      Math.max(subscription.expiresAtMs, nowMs + Math.min(MAX_SUBSCRIPTION_TTL_MS, requestedTtl)),
+    );
+    subscription.expiresAt = new Date(subscription.expiresAtMs).toISOString();
+    subscription.lastRenewedAt = new Date(nowMs).toISOString();
+    this.metrics.subscriptionsRenewed += 1;
+    this.persist();
+    return {
+      ok: true,
+      subscription: this.publicSubscription(subscription, { nowMs }),
+      renewedAt: subscription.lastRenewedAt,
+    };
   }
 
   listSubscriptions() {
@@ -948,7 +1343,10 @@ export class GitHubEventBroker {
       : null;
     if (Number.isFinite(waitMs)) {
       this.state.latencySamples.push({
+        repo: subscription.repo,
         resource: subscription.resource,
+        workflow: subscription.workflow,
+        branch: subscription.branch,
         waitForKey: latencySampleKey(subscription),
         waitMs: Math.min(MAX_SUBSCRIPTION_TTL_MS, Math.round(waitMs)),
         observedAt: new Date(this.now()).toISOString(),
@@ -961,14 +1359,77 @@ export class GitHubEventBroker {
     return { ok: true, event };
   }
 
+  appendEventAudit(options) {
+    const record = eventAuditRecord({
+      ...options,
+      recordedAt: options.recordedAt || new Date(this.now()).toISOString(),
+    });
+    this.state.eventAudit = [
+      ...this.state.eventAudit.filter((event) => event.id !== record.id),
+      record,
+    ].slice(-MAX_EVENT_AUDIT);
+    return record;
+  }
+
+  audit({ limit = 20, ...filters } = {}) {
+    if (this.prune()) this.persist();
+    const numericLimit = Number(limit);
+    const boundedLimit = Number.isFinite(numericLimit) && numericLimit >= 0
+      ? Math.floor(numericLimit)
+      : 20;
+    const events = this.state.eventAudit
+      .filter((event) => {
+        if (filters.repo && event.repo !== filters.repo) return false;
+        if (filters.resource && event.resource !== canonicalResource(filters.resource)) return false;
+        if (filters.runId && String(event.runId) !== String(filters.runId)) return false;
+        if (filters.number !== undefined && filters.number !== null && event.number !== Number(filters.number)) return false;
+        for (const key of ['sha', 'branch', 'environment', 'workflow', 'deploymentId']) {
+          if (filters[key] && event[key] !== String(filters[key])) return false;
+        }
+        return true;
+      })
+      .slice()
+      .reverse()
+      .slice(0, boundedLimit);
+    const unmatchedEvents = events.filter((event) => event.classification !== 'matched').length;
+    return {
+      stateFile: this.stateFile,
+      eventCount: events.length,
+      unmatchedEvents,
+      events,
+      observedAt: new Date(this.now()).toISOString(),
+    };
+  }
+
   recordEvent(event) {
     if (!event || !event.id || !event.repo || !event.state) {
       return { ok: true, ignored: true, matchedSubscriptionIds: [] };
     }
     if (this.prune()) this.persist();
     const matchedSubscriptionIds = [];
+    const targetMatchedSubscriptionIds = [];
     let changed = false;
     for (const subscription of this.state.subscriptions) {
+      if (!eventMatchesSubscriptionTarget(event, subscription)) continue;
+      targetMatchedSubscriptionIds.push(subscription.id);
+      const receivedAtMs = Date.parse(event.receivedAt || '');
+      const previousActivityMs = Date.parse(subscription.lastActivityAt || '');
+      if (!Number.isFinite(previousActivityMs) || !Number.isFinite(receivedAtMs) || receivedAtMs >= previousActivityMs) {
+        const activityAt = Number.isFinite(receivedAtMs)
+          ? new Date(receivedAtMs).toISOString()
+          : new Date(this.now()).toISOString();
+        const activityChanged = subscription.lastActivityAt !== activityAt
+          || subscription.lastActivityState !== event.state
+          || subscription.lastActivityAction !== event.action
+          || subscription.lastActivityRunId !== event.runId;
+        if (activityChanged) {
+          subscription.lastActivityAt = activityAt;
+          subscription.lastActivityState = event.state;
+          subscription.lastActivityAction = event.action;
+          subscription.lastActivityRunId = event.runId;
+          changed = true;
+        }
+      }
       if (!eventMatchesSubscription(event, subscription)) continue;
       matchedSubscriptionIds.push(subscription.id);
       if (subscription.pending.some(({ id }) => id === event.id)) continue;
@@ -980,8 +1441,21 @@ export class GitHubEventBroker {
       this.metrics.matchedEvents += 1;
       changed = true;
     }
+    this.appendEventAudit({
+      event,
+      eventName: event.eventName,
+      deliveryId: event.id,
+      targetMatchedSubscriptionIds,
+      matchedSubscriptionIds,
+    });
+    changed = true;
     if (changed) this.persist();
-    return { ok: true, event, matchedSubscriptionIds };
+    return {
+      ok: true,
+      event,
+      targetMatchedSubscriptionIds,
+      matchedSubscriptionIds,
+    };
   }
 
   ingestWebhook({ eventName, deliveryId, signature, rawBody, payload, receivedAt = new Date(this.now()).toISOString() }) {
@@ -1016,6 +1490,11 @@ export class GitHubEventBroker {
     });
     if (!event) {
       this.metrics.webhookIgnored += 1;
+      this.appendEventAudit({
+        eventName,
+        deliveryId: normalizedDeliveryId,
+        ignoredReason: 'unsupported_event',
+      });
       this.persist();
       return { ok: true, ignored: true, matchedSubscriptionIds: [] };
     }

@@ -30,13 +30,14 @@ import { fileURLToPath } from 'node:url';
 import {
   normalizeIdentity,
   coordinatorOwnerLockPath,
+  legacyStateDirectory,
   socketPath,
   stateDirectory,
 } from './github-coordinator-client.mjs';
 import { GitHubEventBroker, normalizeReconciliationEvent } from './github-event-broker.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_PROTOCOL_VERSION = 4;
+const COORDINATOR_PROTOCOL_VERSION = 5;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
 const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
 const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
@@ -72,6 +73,12 @@ const OBSERVED_HEADERS = [
 
 function eventStatePath(identity) {
   return join(stateDirectory(), `github-events-${normalizeIdentity(identity)}.json`);
+}
+
+function legacyEventStatePath(identity) {
+  if (process.env.FRONTALIERE_GH_STATE_DIR) return null;
+  const directory = legacyStateDirectory();
+  return directory ? join(directory, `github-events-${normalizeIdentity(identity)}.json`) : null;
 }
 
 const WATCHED_SOURCE_NAMES = new Set([
@@ -624,6 +631,7 @@ export class GitHubCoordinator {
     this.eventNotifier = null;
     this.eventListenerInspector = null;
     this.eventListenerCountInspector = null;
+    this.eventListenerInfoInspector = null;
     this.queue = [];
     this.active = 0;
     this.activeMutations = 0;
@@ -658,6 +666,8 @@ export class GitHubCoordinator {
       socketConnections: 0,
       socketErrors: 0,
       socketDisconnects: 0,
+      eventListenerHeartbeats: 0,
+      eventListenerTimeouts: 0,
       sourceReloads: 0,
     };
   }
@@ -667,10 +677,17 @@ export class GitHubCoordinator {
     this.prunePendingCancellations();
     const eventSummary = this.eventBroker
       ? {
-        enabled: true,
+        enabled: Boolean(this.eventBroker.webhookSecret),
         webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
         activeListeners: this.eventListenerCountInspector?.() ?? null,
-        ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
+        listenerHeartbeatMetrics: {
+          heartbeats: this.metrics.eventListenerHeartbeats,
+          timeouts: this.metrics.eventListenerTimeouts,
+        },
+        ...this.eventBroker.summary({
+          listenerAttached: this.eventListenerInspector,
+          listenerInfo: this.eventListenerInfoInspector,
+        }),
       }
       : { enabled: false };
     if (compact) {
@@ -714,9 +731,16 @@ export class GitHubCoordinator {
       cliCacheEntries: this.cliCache.size,
       events: this.eventBroker
         ? {
-          enabled: true,
+          enabled: Boolean(this.eventBroker.webhookSecret),
           webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
-          ...this.eventBroker.status({ listenerAttached: this.eventListenerInspector }),
+          listenerHeartbeatMetrics: {
+            heartbeats: this.metrics.eventListenerHeartbeats,
+            timeouts: this.metrics.eventListenerTimeouts,
+          },
+          ...this.eventBroker.status({
+            listenerAttached: this.eventListenerInspector,
+            listenerInfo: this.eventListenerInfoInspector,
+          }),
         }
         : { enabled: false },
       pendingCancellations: [...this.pendingCancellations.values()]
@@ -788,28 +812,53 @@ export class GitHubCoordinator {
     this.eventListenerCountInspector = typeof inspector === 'function' ? inspector : null;
   }
 
+  setEventListenerInfoInspector(inspector) {
+    this.eventListenerInfoInspector = typeof inspector === 'function' ? inspector : null;
+  }
+
   eventSubscription(spec) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    if (!this.eventBroker.webhookSecret) {
+      const error = new Error('event subscriptions require a configured webhook secret');
+      error.code = 'event_webhook_secret_unconfigured';
+      throw error;
+    }
     return { ok: true, subscription: this.eventBroker.subscribe(spec) };
   }
 
-  eventSubscriptions() {
+  eventSubscriptions(options = {}) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     return {
       ok: true,
       webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
       activeListeners: this.eventListenerCountInspector?.() ?? null,
-      ...this.eventBroker.status({ listenerAttached: this.eventListenerInspector }),
+      listenerHeartbeatMetrics: {
+        heartbeats: this.metrics.eventListenerHeartbeats,
+        timeouts: this.metrics.eventListenerTimeouts,
+      },
+      ...this.eventBroker.status({
+        ...options,
+        listenerAttached: this.eventListenerInspector,
+        listenerInfo: this.eventListenerInfoInspector,
+      }),
     };
   }
 
-  eventSubscriptionSummary() {
+  eventSubscriptionSummary(options = {}) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     return {
       ok: true,
       webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
       activeListeners: this.eventListenerCountInspector?.() ?? null,
-      ...this.eventBroker.summary({ listenerAttached: this.eventListenerInspector }),
+      listenerHeartbeatMetrics: {
+        heartbeats: this.metrics.eventListenerHeartbeats,
+        timeouts: this.metrics.eventListenerTimeouts,
+      },
+      ...this.eventBroker.summary({
+        ...options,
+        listenerAttached: this.eventListenerInspector,
+        listenerInfo: this.eventListenerInfoInspector,
+      }),
     };
   }
 
@@ -845,6 +894,40 @@ export class GitHubCoordinator {
       ok: true,
       subscription: this.eventBroker.publicSubscription(subscription, {
         listenerAttached: this.eventListenerInspector?.(subscription.id) ?? null,
+        listenerInfo: this.eventListenerInfoInspector?.(subscription.id) ?? [],
+      }),
+      recentEvents: this.eventBroker.audit({
+        repo: subscription.repo,
+        resource: subscription.resource,
+        number: subscription.number,
+        runId: subscription.runId,
+        sha: subscription.sha,
+        branch: subscription.branch,
+        workflow: subscription.workflow,
+        environment: subscription.environment,
+        deploymentId: subscription.deploymentId,
+        limit: 10,
+      }).events,
+    };
+  }
+
+  eventAudit(options = {}) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return {
+      ok: true,
+      webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
+      ...this.eventBroker.audit(options),
+    };
+  }
+
+  eventSubscriptionTarget(options = {}) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return {
+      ok: true,
+      ...this.eventBroker.status({
+        ...options,
+        listenerAttached: this.eventListenerInspector,
+        listenerInfo: this.eventListenerInfoInspector,
       }),
     };
   }
@@ -875,6 +958,48 @@ export class GitHubCoordinator {
     return this.eventBroker.acknowledge(subscriptionId, eventId);
   }
 
+  renewEventSubscription(subscriptionId, options = {}) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    return this.eventBroker.renew(subscriptionId, options);
+  }
+
+  heartbeatEventListener(subscriptionId, options = {}) {
+    if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    if (options.renew === false) {
+      const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
+      if (!subscription) {
+        return {
+          ok: false,
+          error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+        };
+      }
+      return {
+        ok: true,
+        subscription: this.eventBroker.publicSubscription(subscription, { nowMs: Date.now() }),
+      };
+    }
+    const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
+    if (!subscription) {
+      return {
+        ok: false,
+        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    const leaseMs = Number(options.ttlMs ?? options.leaseMs ?? 6 * 60 * 60 * 1_000);
+    const renewThresholdMs = Math.max(60_000, Number.isFinite(leaseMs) ? leaseMs / 3 : 2 * 60 * 60 * 1_000);
+    if (subscription.expiresAtMs - Date.now() <= renewThresholdMs) {
+      return this.eventBroker.renew(subscriptionId, {
+        ...options,
+        ttlMs: Number.isFinite(leaseMs) && leaseMs > 0 ? leaseMs : undefined,
+      });
+    }
+    return {
+      ok: true,
+      renewed: false,
+      subscription: this.eventBroker.publicSubscription(subscription, { nowMs: Date.now() }),
+    };
+  }
+
   expireEventSubscriptions() {
     if (!this.eventBroker) return [];
     const expiredIds = this.eventBroker.expireSubscriptions();
@@ -894,10 +1019,17 @@ export class GitHubCoordinator {
       };
     }
     let path;
+    let listWorkflowRuns = false;
     if (subscription.resource === 'pull_request' && subscription.number) {
       path = `/repos/${subscription.repo}/pulls/${subscription.number}`;
     } else if (subscription.resource === 'workflow_run' && subscription.runId) {
       path = `/repos/${subscription.repo}/actions/runs/${subscription.runId}`;
+    } else if (subscription.resource === 'workflow_run'
+      && (subscription.workflow || subscription.branch || subscription.sha || subscription.followLatest)) {
+      const query = new URLSearchParams({ per_page: '20' });
+      if (subscription.branch) query.set('branch', subscription.branch);
+      path = `/repos/${subscription.repo}/actions/runs?${query.toString()}`;
+      listWorkflowRuns = true;
     } else if (subscription.resource === 'deployment' && subscription.deploymentId) {
       path = `/repos/${subscription.repo}/deployments/${subscription.deploymentId}/statuses?per_page=1`;
     } else {
@@ -926,6 +1058,17 @@ export class GitHubCoordinator {
         ok: false,
         error: { code: 'event_reconcile_response_invalid', message: error.message },
       };
+    }
+    if (listWorkflowRuns) {
+      const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
+      data = runs.find((run) => (
+        (!subscription.workflow
+          || run.name === subscription.workflow
+          || run.workflow_name === subscription.workflow
+          || String(run.workflow_id) === String(subscription.workflow))
+        && (!subscription.sha || run.head_sha === subscription.sha)
+        && (!subscription.branch || run.head_branch === subscription.branch)
+      )) || null;
     }
     if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
     const event = normalizeReconciliationEvent({ subscription, data });
@@ -1492,13 +1635,17 @@ function readTokenAndStart(identity) {
 
   const eventBroker = new GitHubEventBroker({
     stateFile: eventStatePath(identity),
+    legacyStateFile: legacyEventStatePath(identity),
     webhookSecret: process.env.FRONTALIERE_GH_WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET,
   });
   const coordinator = new GitHubCoordinator({ identity, token, realGh, socket, eventBroker });
   let terminate = () => {};
   let expirationTimer = null;
+  let listenerHeartbeatTimer = null;
   const eventListeners = new Map();
   const sharedAcknowledgements = new Set();
+  const EVENT_LISTENER_HEARTBEAT_TIMEOUT_MS = 3 * 60 * 1_000;
+  const EVENT_LISTENER_ACK_TIMEOUT_MS = 3 * 60 * 1_000;
 
   const writeMessage = (connection, message) => {
     if (!connection.destroyed) connection.write(`${JSON.stringify(message)}\n`);
@@ -1514,6 +1661,17 @@ function readTokenAndStart(identity) {
   coordinator.setEventListenerCountInspector(
     () => [...eventListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
   );
+  coordinator.setEventListenerInfoInspector((subscriptionId) => [...(
+    eventListeners.get(String(subscriptionId)) || []
+  )].map((listener) => ({
+    agentId: listener.agentId,
+    connectedAt: listener.connectedAt,
+    lastHeartbeatAt: listener.lastHeartbeatAt,
+    heartbeatCount: listener.heartbeatCount,
+    inFlightEventId: listener.inFlightEventId,
+    lastEventAt: listener.lastEventAt,
+    lastAckAt: listener.lastAckAt,
+  })));
 
   const deliverEvent = (listener) => {
     if (!eventListeners.get(listener.subscriptionId)?.has(listener) || listener.inFlightEventId) return;
@@ -1526,6 +1684,7 @@ function readTokenAndStart(identity) {
     }
     if (!pending.event) return;
     listener.inFlightEventId = pending.event.id;
+    listener.lastEventAt = new Date().toISOString();
     writeMessage(listener.connection, {
       ok: true,
       type: 'event',
@@ -1568,14 +1727,33 @@ function readTokenAndStart(identity) {
 
   const attachEventListener = (connection, request) => {
     const subscriptionId = String(request.subscriptionId || '');
+    if (!eventBroker.webhookSecret) {
+      writeMessage(connection, {
+        ok: false,
+        error: { code: 'event_webhook_secret_unconfigured', message: 'webhook secret is not configured' },
+      });
+      connection.end();
+      return null;
+    }
     const details = coordinator.eventSubscriptionDetails(subscriptionId);
     if (!details.ok) {
       writeMessage(connection, details);
       connection.end();
       return null;
     }
+    const lease = coordinator.heartbeatEventListener(subscriptionId, {
+      renew: request.renew !== false,
+      leaseMs: request.leaseMs,
+      agentId: request.agentId,
+    });
+    if (!lease.ok) {
+      writeMessage(connection, lease);
+      connection.end();
+      return null;
+    }
     const listeners = eventListeners.get(subscriptionId);
-    if (listeners?.size && !details.subscription.shared) {
+    const effectiveSubscription = lease.subscription || details.subscription;
+    if (listeners?.size && !effectiveSubscription.shared) {
       writeMessage(connection, {
         ok: false,
         error: { code: 'event_listener_already_attached', message: 'event subscription already has a listener' },
@@ -1587,22 +1765,52 @@ function readTokenAndStart(identity) {
       connection,
       subscriptionId,
       once: request.once !== false,
-      shared: details.subscription.shared === true,
+      shared: effectiveSubscription.shared === true,
       agentId: request.agentId || 'anonymous-agent',
       inFlightEventId: null,
+      connectedAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      heartbeatCount: 0,
+      lastEventAt: null,
+      lastAckAt: null,
     };
     if (!listeners) eventListeners.set(subscriptionId, new Set());
     eventListeners.get(subscriptionId).add(listener);
     writeMessage(connection, {
       ok: true,
       type: 'listening',
-      subscription: details.subscription,
+      subscription: effectiveSubscription,
     });
     deliverEvent(listener);
     return listener;
   };
 
   const handleEventListenerMessage = (listener, request) => {
+    if (request.type === 'event-heartbeat') {
+      const heartbeat = coordinator.heartbeatEventListener(listener.subscriptionId, {
+        renew: request.renew !== false,
+        leaseMs: request.leaseMs,
+        agentId: listener.agentId,
+      });
+      if (!heartbeat.ok) {
+        writeMessage(listener.connection, heartbeat);
+        detachEventListener(listener);
+        listener.connection.end();
+        return;
+      }
+      listener.lastHeartbeatAt = new Date().toISOString();
+      listener.heartbeatCount += 1;
+      coordinator.metrics.eventListenerHeartbeats += 1;
+      writeMessage(listener.connection, {
+        ok: true,
+        type: 'heartbeat',
+        subscription: heartbeat.subscription,
+      });
+      // A notifier can race with a restart or a socket transition.  The
+      // heartbeat is also a durable replay point for a pending event.
+      deliverEvent(listener);
+      return;
+    }
     if (request.type === 'event-ack') {
       if (String(request.eventId || '') !== listener.inFlightEventId) {
         writeMessage(listener.connection, {
@@ -1615,6 +1823,8 @@ function readTokenAndStart(identity) {
       }
       const eventKey = `${listener.subscriptionId}:${request.eventId}`;
       const acknowledgement = coordinator.acknowledgeEvent(listener.subscriptionId, request.eventId);
+      const currentSubscription = coordinator.eventSubscriptionDetails(listener.subscriptionId).subscription;
+      if (currentSubscription?.shared) listener.shared = true;
       const sharedDuplicateAcknowledgement = listener.shared
         && !acknowledgement.ok
         && acknowledgement.error?.code === 'event_not_pending'
@@ -1632,6 +1842,7 @@ function readTokenAndStart(identity) {
         }
       }
       listener.inFlightEventId = null;
+      listener.lastAckAt = new Date().toISOString();
       writeMessage(listener.connection, { ok: true, type: 'acked', eventId: request.eventId });
       if (listener.once) {
         detachEventListener(listener);
@@ -1662,6 +1873,34 @@ function readTokenAndStart(identity) {
     });
     detachEventListener(listener);
     listener.connection.end();
+  };
+
+  const expireStaleListeners = () => {
+    const nowMs = Date.now();
+    for (const listeners of eventListeners.values()) {
+      for (const listener of [...listeners]) {
+        const heartbeatAtMs = Date.parse(listener.lastHeartbeatAt || '');
+        const eventAtMs = Date.parse(listener.lastEventAt || '');
+        const heartbeatExpired = !Number.isFinite(heartbeatAtMs)
+          || nowMs - heartbeatAtMs > EVENT_LISTENER_HEARTBEAT_TIMEOUT_MS;
+        const acknowledgementExpired = listener.inFlightEventId
+          && Number.isFinite(eventAtMs)
+          && nowMs - eventAtMs > EVENT_LISTENER_ACK_TIMEOUT_MS;
+        if (!heartbeatExpired && !acknowledgementExpired) continue;
+        coordinator.metrics.eventListenerTimeouts += 1;
+        writeMessage(listener.connection, {
+          ok: false,
+          error: {
+            code: 'event_listener_closed',
+            message: heartbeatExpired
+              ? 'event listener heartbeat expired'
+              : 'event listener acknowledgement expired',
+          },
+        });
+        detachEventListener(listener);
+        listener.connection.destroy();
+      }
+    }
   };
 
   const server = createServer((connection) => {
@@ -1715,15 +1954,21 @@ function readTokenAndStart(identity) {
           } else if (request.type === 'events-subscribe') {
             result = Promise.resolve(coordinator.eventSubscription(request.spec));
           } else if (request.type === 'events-status') {
-            result = Promise.resolve(coordinator.eventSubscriptions());
+            result = Promise.resolve(coordinator.eventSubscriptions(request.options || {}));
           } else if (request.type === 'events-summary') {
-            result = Promise.resolve(coordinator.eventSubscriptionSummary());
+            result = Promise.resolve(coordinator.eventSubscriptionSummary(request.options || {}));
+          } else if (request.type === 'events-audit') {
+            result = Promise.resolve(coordinator.eventAudit(request.options || {}));
           } else if (request.type === 'events-gc') {
             result = Promise.resolve(coordinator.eventGarbageCollect(request.options || {}));
           } else if (request.type === 'events-subscription') {
             result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
+          } else if (request.type === 'events-subscription-target') {
+            result = Promise.resolve(coordinator.eventSubscriptionTarget(request.options || {}));
           } else if (request.type === 'events-unsubscribe') {
             result = Promise.resolve(coordinator.eventUnsubscribe(request.subscriptionId));
+          } else if (request.type === 'events-renew') {
+            result = Promise.resolve(coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
           } else if (request.type === 'events-webhook') {
             result = Promise.resolve(coordinator.ingestWebhook(request));
           } else if (request.type === 'events-reconcile') {
@@ -1765,6 +2010,17 @@ function readTokenAndStart(identity) {
     if (terminating) return;
     terminating = true;
     if (expirationTimer) clearInterval(expirationTimer);
+    if (listenerHeartbeatTimer) clearInterval(listenerHeartbeatTimer);
+    for (const listeners of eventListeners.values()) {
+      for (const listener of listeners) {
+        writeMessage(listener.connection, {
+          ok: false,
+          error: { code: 'event_listener_closed', message: 'coordinator is restarting' },
+        });
+        listener.connection.destroy();
+      }
+    }
+    eventListeners.clear();
     stopSourceWatcher();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1_000);
@@ -1800,6 +2056,9 @@ function readTokenAndStart(identity) {
     }
   }, 1_000);
   expirationTimer.unref?.();
+
+  listenerHeartbeatTimer = setInterval(expireStaleListeners, 60_000);
+  listenerHeartbeatTimer.unref?.();
 
   stopSourceWatcher = installSourceReloadWatcher(() => {
     coordinator.metrics.sourceReloads += 1;

@@ -24,9 +24,15 @@ import { fileURLToPath } from 'node:url';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(THIS_DIR, 'github-coordinator-launcher');
-const DEFAULT_STATE_DIR = join(homedir(), 'Library', 'Caches', 'frontaliere');
+const DEFAULT_STATE_DIR = process.platform === 'darwin'
+  ? join(homedir(), 'Library', 'Application Support', 'frontaliere')
+  : process.env.XDG_STATE_HOME
+    ? join(process.env.XDG_STATE_HOME, 'frontaliere')
+    : join(homedir(), '.local', 'state', 'frontaliere');
 const CANCELLATION_PROTOCOL_VERSION = 2;
-const EVENT_PROTOCOL_VERSION = 4;
+const EVENT_PROTOCOL_VERSION = 5;
+export const EVENT_LISTENER_HEARTBEAT_INTERVAL_MS = 60_000;
+export const DEFAULT_EVENT_RECONCILE_AFTER_MS = 5 * 60 * 1_000;
 const CONNECT_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
@@ -41,6 +47,12 @@ export function normalizeIdentity(value = process.env.FRONTALIERE_GH_IDENTITY ||
 
 export function stateDirectory() {
   return process.env.FRONTALIERE_GH_STATE_DIR || DEFAULT_STATE_DIR;
+}
+
+export function legacyStateDirectory() {
+  return process.platform === 'darwin'
+    ? join(homedir(), 'Library', 'Caches', 'frontaliere')
+    : null;
 }
 
 export function socketPath(identity = normalizeIdentity()) {
@@ -340,12 +352,28 @@ export async function subscribeToEvents(spec, { identity } = {}) {
   return sendRequest({ type: 'events-subscribe', spec }, { identity });
 }
 
-export async function eventSubscriptions({ identity } = {}) {
-  return sendRequest({ type: 'events-status' }, { identity });
+function splitEventOptions(options, context) {
+  if (context && Object.keys(context).length > 0) return { options: options || {}, identity: context.identity };
+  if (options && Object.prototype.hasOwnProperty.call(options, 'identity')) {
+    const { identity, ...eventOptions } = options;
+    return { options: eventOptions, identity };
+  }
+  return { options: options || {}, identity: undefined };
 }
 
-export async function eventSummary({ identity } = {}) {
-  return sendRequest({ type: 'events-summary' }, { identity });
+export async function eventSubscriptions(options = {}, context = {}) {
+  const split = splitEventOptions(options, context);
+  return sendRequest({ type: 'events-status', options: split.options }, { identity: split.identity });
+}
+
+export async function eventSummary(options = {}, context = {}) {
+  const split = splitEventOptions(options, context);
+  return sendRequest({ type: 'events-summary', options: split.options }, { identity: split.identity });
+}
+
+export async function eventAudit(options = {}, context = {}) {
+  const split = splitEventOptions(options, context);
+  return sendRequest({ type: 'events-audit', options: split.options }, { identity: split.identity });
 }
 
 export async function garbageCollectEvents(options = {}, { identity } = {}) {
@@ -356,12 +384,20 @@ export async function eventSubscription(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-subscription', subscriptionId }, { identity });
 }
 
+export async function eventSubscriptionTarget(options = {}, { identity } = {}) {
+  return sendRequest({ type: 'events-subscription-target', options }, { identity });
+}
+
 export async function unsubscribeFromEvents(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-unsubscribe', subscriptionId }, { identity });
 }
 
 export async function reconcileEvents(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-reconcile', subscriptionId }, { identity });
+}
+
+export async function renewEventSubscription(subscriptionId, options = {}, { identity } = {}) {
+  return sendRequest({ type: 'events-renew', subscriptionId, options }, { identity });
 }
 
 export async function ingestGitHubWebhook({ eventName, deliveryId, signature, rawBody, payload, receivedAt }, { identity } = {}) {
@@ -381,6 +417,10 @@ export async function listenForEvent(subscriptionId, {
   agentId = process.env.FRONTALIERE_AGENT_ID || null,
   once = true,
   timeoutMs = 0,
+  autoRenew = true,
+  leaseMs = 6 * 60 * 60 * 1_000,
+  heartbeatIntervalMs = EVENT_LISTENER_HEARTBEAT_INTERVAL_MS,
+  reconcileAfterMs = DEFAULT_EVENT_RECONCILE_AFTER_MS,
 } = {}) {
   const normalized = normalizeIdentity(identity);
   if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
@@ -388,16 +428,20 @@ export async function listenForEvent(subscriptionId, {
   }
   const details = await eventSubscription(subscriptionId, { identity: normalized });
   await ensureEventProtocol(normalized, { requireWebhookSecret: true });
-  const expiresAtMs = Date.parse(details.subscription?.expiresAt || '');
+  let leaseDeadlineMs = Date.parse(details.subscription?.expiresAt || '');
   const requestedDeadlineMs = timeoutMs > 0 ? Date.now() + timeoutMs : Infinity;
-  const deadlineMs = Number.isFinite(expiresAtMs)
-    ? Math.min(expiresAtMs, requestedDeadlineMs)
-    : requestedDeadlineMs;
-  const deadlineIsSubscription = Number.isFinite(expiresAtMs) && expiresAtMs <= requestedDeadlineMs;
+  let deadlineIsSubscription = Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= requestedDeadlineMs;
+  const renewalInterval = Number.isFinite(Number(heartbeatIntervalMs)) && Number(heartbeatIntervalMs) > 0
+    ? Number(heartbeatIntervalMs)
+    : EVENT_LISTENER_HEARTBEAT_INTERVAL_MS;
+  const leaseRenewalEnabled = autoRenew
+    && (!Number.isFinite(leaseDeadlineMs) || leaseDeadlineMs - Date.now() >= renewalInterval * 2);
   return new Promise((resolvePromise, rejectPromise) => {
     let socket = null;
     let reconnectTimer = null;
     let deadlineTimer = null;
+    let heartbeatTimer = null;
+    let reconcileTimer = null;
     let retryAttempt = 0;
     let settled = false;
     let event = null;
@@ -410,13 +454,33 @@ export async function listenForEvent(subscriptionId, {
       error.subscriptionId = subscriptionId;
       error.waitState = 'timed_out';
       error.nextAction = 'reconcile_once_or_escalate';
-      if (Number.isFinite(expiresAtMs)) error.deadlineAt = new Date(expiresAtMs).toISOString();
+      if (Number.isFinite(leaseDeadlineMs)) error.deadlineAt = new Date(leaseDeadlineMs).toISOString();
       return error;
+    };
+
+    const scheduleDeadline = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      const deadlineMs = Number.isFinite(leaseDeadlineMs)
+        ? Math.min(leaseDeadlineMs, requestedDeadlineMs)
+        : requestedDeadlineMs;
+      deadlineIsSubscription = Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= requestedDeadlineMs;
+      if (!Number.isFinite(deadlineMs)) return;
+      deadlineTimer = setTimeout(() => rejectOnce(deadlineError()), Math.max(0, deadlineMs - Date.now()));
+    };
+
+    const refreshLease = (subscription) => {
+      const refreshed = Date.parse(subscription?.expiresAt || '');
+      if (Number.isFinite(refreshed)) {
+        leaseDeadlineMs = refreshed;
+        scheduleDeadline();
+      }
     };
 
     const cleanup = ({ destroySocket = false } = {}) => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (reconcileTimer) clearTimeout(reconcileTimer);
       if (destroySocket && socket && !socket.destroyed) socket.destroy();
     };
     const rejectOnce = (error) => {
@@ -434,6 +498,9 @@ export async function listenForEvent(subscriptionId, {
 
     const scheduleReconnect = () => {
       if (settled || reconnectTimer) return;
+      const deadlineMs = Number.isFinite(leaseDeadlineMs)
+        ? Math.min(leaseDeadlineMs, requestedDeadlineMs)
+        : requestedDeadlineMs;
       const remainingMs = deadlineMs - Date.now();
       if (remainingMs <= 0) {
         rejectOnce(deadlineError());
@@ -446,12 +513,40 @@ export async function listenForEvent(subscriptionId, {
         try {
           await ensureCoordinator(normalized);
           await ensureEventProtocol(normalized, { requireWebhookSecret: true });
+          const refreshed = await eventSubscription(subscriptionId, { identity: normalized });
+          refreshLease(refreshed.subscription);
           openSocket();
         } catch {
           scheduleReconnect();
         }
       }, delayMs);
     };
+
+    const startHeartbeat = (candidate) => {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      const intervalMs = Number.isFinite(Number(heartbeatIntervalMs)) && Number(heartbeatIntervalMs) > 0
+        ? Number(heartbeatIntervalMs)
+        : EVENT_LISTENER_HEARTBEAT_INTERVAL_MS;
+      heartbeatTimer = setInterval(() => {
+        if (settled || candidate.destroyed) return;
+        candidate.write(JSON.stringify({
+          type: 'event-heartbeat',
+          identity: normalized,
+          subscriptionId,
+          renew: leaseRenewalEnabled,
+          leaseMs,
+          ...(agentId ? { agentId } : {}),
+        }) + '\n');
+      }, intervalMs);
+      heartbeatTimer.unref?.();
+    };
+
+    const transientListenerError = (code) => new Set([
+      'event_listener_closed',
+      'GITHUB_COORDINATOR_TIMEOUT',
+      'github_coordinator_unavailable',
+      'ECONNRESET',
+    ]).has(code);
 
     const openSocket = () => {
       if (settled) return;
@@ -462,16 +557,23 @@ export async function listenForEvent(subscriptionId, {
       const onDisconnect = () => {
         if (settled || disconnected) return;
         disconnected = true;
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
         if (socket === candidate) socket = null;
         scheduleReconnect();
       };
       candidate.on('connect', () => {
         retryAttempt = 0;
+        startHeartbeat(candidate);
         candidate.write(`${JSON.stringify({
           type: 'event-listen',
           identity: normalized,
           subscriptionId,
           once,
+          renew: leaseRenewalEnabled,
+          leaseMs,
           ...(agentId ? { agentId } : {}),
         })}\n`);
       });
@@ -492,10 +594,17 @@ export async function listenForEvent(subscriptionId, {
           if (response?.ok === false && response.error) {
             const error = new Error(response.error.message || response.error.code || 'event_listener_error');
             Object.assign(error, response.error);
+            if (transientListenerError(error.code)) {
+              onDisconnect();
+              candidate.destroy();
+              return;
+            }
             rejectOnce(error);
             return;
           }
-          if (response?.type === 'event') {
+          if (response?.type === 'listening' || response?.type === 'heartbeat') {
+            refreshLease(response.subscription);
+          } else if (response?.type === 'event') {
             event = response.event;
             candidate.write(`${JSON.stringify({
               type: 'event-ack',
@@ -512,8 +621,12 @@ export async function listenForEvent(subscriptionId, {
       candidate.on('close', onDisconnect);
     };
 
-    if (Number.isFinite(deadlineMs)) {
-      deadlineTimer = setTimeout(() => rejectOnce(deadlineError()), Math.max(0, deadlineMs - Date.now()));
+    scheduleDeadline();
+    if (Number.isFinite(Number(reconcileAfterMs)) && Number(reconcileAfterMs) > 0) {
+      reconcileTimer = setTimeout(() => {
+        reconcileEvents(subscriptionId, { identity: normalized }).catch(() => {});
+      }, Number(reconcileAfterMs));
+      reconcileTimer.unref?.();
     }
     openSocket();
   });
