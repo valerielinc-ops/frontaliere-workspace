@@ -33,3 +33,8 @@ privato/
 # .backlog/ e' lo stato operativo delle sessioni lunghe: contiene misure sul
 # funzionamento interno e decisioni ancora aperte. Resta sul disco e continua a
 # funzionare (led.sh, osservatore.sh); semplicemente non si pubblica.
+
+# .scratch/ e' lo scratchpad delle sessioni agent: log di osservazione, body di PR
+# in preparazione, misure intermedie. Come .backlog/ resta sul disco e non si
+# pubblica, perche' questo repo e' pubblico e quel materiale non e' rivisto.
+.scratch/

@@ -264,15 +264,13 @@ Se modifichi gli hook nel sito, aggiorna anche entrambe le configurazioni della
 root. Per il contratto completo leggi la sezione `Hook: sollevati nella root`
 del riferimento.
 
-## Stile compresso: caveman e ponytail
+## Stile compresso: ponytail
 
-I plugin `caveman` e `ponytail` sono attivi in permanenza: `defaultMode: "full"`
-in `~/.config/caveman/config.json` e `~/.config/ponytail/config.json`, piu'
-`.caveman.json` nella root che fissa la stessa scelta per questo workspace.
-Comprimono la prosa; codice, comandi, nomi di API e stringhe d'errore restano
-verbatim.
+Il plugin `ponytail` e' attivo in permanenza: `defaultMode: "full"` in
+`~/.config/ponytail/config.json`. Comprime la prosa; codice, comandi, nomi di
+API e stringhe d'errore restano verbatim.
 
-Vanno spenti con `/caveman off` e `/ponytail off` in tre casi:
+Va spento con `/ponytail off` in tre casi:
 
 - Mentre componi il body di una PR. Il contratto vuole `## Implementato` e
   `## Non implementato (ancora)` con bullet sostanziosi, e un body compresso
@@ -281,10 +279,10 @@ Vanno spenti con `/caveman off` e `/ponytail off` in tre casi:
 - Mentre analizzi il fallimento di un test vitest.
 
 Nei due casi di analisi la ragione e' la stessa: la diagnosi si fa citando
-l'output esatto, mentre caveman sopprime i dump di log lunghi. Qui la
+l'output esatto, mentre la compressione sopprime i dump di log lunghi. Qui la
 distinzione fra un rosso vero e un falso rosso sta proprio in quelle righe.
 
-Riaccendi con `/caveman full` e `/ponytail full` quando l'analisi e' chiusa.
+Riaccendi con `/ponytail full` quando l'analisi e' chiusa.
 
 Per vedere cosa occupa la context window usa `unclog` (installato con `uv tool
 install unclog`): elenca agenti, skill, comandi e server MCP col loro costo in
