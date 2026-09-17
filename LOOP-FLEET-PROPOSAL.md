@@ -1,6 +1,6 @@
 # Frontaliere Ticino — proposta di flotta di loop automatici
 
-## Stato operativo corrente — verificato 2026-09-17, 05:09:05 UTC (post-#8965; audit ledger 35183527873; main `38d929e9…`)
+## Stato operativo corrente — verificato 2026-09-17, 07:43:24 UTC (post-#8991; coordinator live; main `d8a52e3c…`)
 
 ### Goal e distinzione di stato
 
@@ -83,6 +83,98 @@ come una garanzia già implementata.
 La PR #8912 (`80048ca5…`) resta aperta con i veto `needs-human` e
 `collision-risk` e con finding tecnici successivi: non viene sbloccata
 artificialmente.
+
+### Feedback operativo sul coordinatore GitHub locale — verificato 2026-09-17, 06:28 UTC
+
+Il mio giudizio da agente client è positivo sul disegno, ma non ancora di
+“autonomia totale” sul piano operativo. Il coordinatore sta facendo bene il
+lavoro di confine: socket Unix separati per identità, token fuori dal
+protocollo, coda per le mutation, concorrenza bounded per le letture, cache e
+deduplicazione dei GET, backoff sui rate limit, webhook HMAC at-least-once e
+attese event-driven. La suite pulita sulla `main` del workspace passa 38/38
+test nella prima verifica; la cancellazione di run Actions resta correttamente
+protetta dalla seconda conferma del proprietario.
+
+Rettifica verificata alle 06:57 UTC: il daemon `default` è operativo con 50
+subscription, 39 listener registrati e 45 listener attivi, ma segnala 11
+subscription senza listener, 4 eventi pending, 8 target stalled e 29 errori
+socket dall’avvio del processo. Il socket risponde e la coda è vuota, quindi
+non è un outage totale; il valore `ok=true` non va però letto come salute
+completa finché questi warning non hanno una gestione automatica dimostrabile.
+La `origin/main` del workspace è stata aggiornata da #60/#62 e la sua suite
+contiene 40/41 test: #63 corregge la sola fixture della subscription privata e
+passa 41/41 in locale.
+
+Rettifica verificata sul sito: il run [35192265398](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/35192265398)
+di #8982 è fallito nello scaricamento dei trusted helper con HTTP 403
+`API rate limit exceeded for installation`, prima dell’esecuzione del codice
+della PR. Il retry esistente usa la stessa sorgente API e quindi non è ancora
+un recupero affidabile sotto quota esaurita; #8982 deve restare aperta per il
+retry automatico, senza merge manuale.
+
+Durante la stessa finestra `launchd` ha osservato la checkout root sporca e i
+log hanno registrato riavvii del supervisore, un marker di conflitto transitorio
+e un errore `ReferenceError` nel codice non ancora canonico. La checkout
+pulita è sintatticamente valida; questo conferma che il daemon non dovrebbe
+seguire direttamente file di lavoro modificabili dagli agenti.
+
+La misura live è però più istruttiva della suite: `default` e `nanako` sono
+attualmente gestiti da `launchd` con protocollo 5 e secret webhook configurato.
+Alla verifica iniziale delle 06:28 UTC `default` aveva 13 subscription senza
+listener, 8 stalled e 4 eventi pending; la rettifica corrente sopra riporta il
+conteggio aggiornato a 11 senza listener e 8 target stalled.
+`events gc` in dry-run trova zero candidati sicuri, quindi non rimuove
+subscription uniche o eventi che potrebbero ancora essere consegnati. È una
+scelta safety corretta, ma manca un reaper autonomo basato su lease/owner/TTL
+che riconcili o archivi in modo dimostrabile questi stati. L’ETA storica p90
+per le PR è circa 39,6 minuti: il percorso è event-driven, ma la latenza del
+ciclo remoto resta reale.
+
+Rettifica live verificata alle 07:12 UTC: il daemon `default` è ancora
+operativo, con quota autenticata 4.719/5.000, coda vuota, 46 subscription,
+33 listener registrati e 35 listener attivi. Restano 13 subscription senza
+listener, 5 eventi pending, 8 target stalled e 29 errori socket dall’avvio;
+`health` risponde `ok: true` ma conserva questi warning. L’ETA p90 osservata
+per le PR è 2.646.843 ms (circa 44,1 minuti), con 94 campioni PR e confidenza
+alta. #8983, #8984 e #8985 sono state mergiate automaticamente; #8981 è
+attualmente `CONFLICTING` con auto-merge attivo e #8982 è `BLOCKED` mentre la
+nuova HEAD attraversa test e review. Questi stati sono eventi di liveness da
+riconciliare automaticamente, non richieste di intervento umano.
+
+Rettifica live verificata alle 07:43:24 UTC: dopo un riavvio del daemon il
+socket è tornato raggiungibile, ma il coordinatore è in auto-degrado: coda 6,
+un job attivo, concorrenza effettiva 1/8, 47 subscription, 29 listener attivi,
+18 subscription senza listener, 13 target stalled e 6 eventi pending. Gli
+errori socket dall’avvio del processo sono 42; `sourceReloads` è 0 nella
+sessione corrente e `node --check` sul sorgente corrente è pulito. Il p90
+osservato per le PR è 2.557.826 ms (circa 42,6 minuti), con p50 969.332 ms e
+99 campioni PR. Il probe `health` precedente aveva registrato un timeout del
+socket, quindi `processo vivo` e `servizio sano` non sono ancora distinti in
+modo sufficiente. La suite indipendente del workspace passa ora 41/41 test.
+Questa è una degradazione recuperata automaticamente, ma la coda di stati
+orfani/stalled dimostra che manca ancora il reaper persistente con lease,
+reclaim e replay bounded.
+
+Durante questa sessione una `gh pr create` ha superato il timeout del client,
+mentre la mutation remota è comunque andata a buon fine e ha creato la PR
+attesa. Il controllo successivo ha evitato un duplicato. Questo è il finding
+più concreto: le mutation devono avere receipt durevole/idempotency key e una
+riconciliazione automatica dopo timeout, perché “errore del client” oggi non
+significa “mutation non eseguita”. Inoltre il daemon deve partire da una
+checkout/release pin-nata e non da una checkout di workspace che gli agenti
+modificano continuamente; il debounce di #58/#59 attenua il problema ma non
+lo elimina.
+
+L’evoluzione che raccomando, in ordine, è: (1) receipt e retry idempotente per
+ogni mutation GitHub; (2) state machine persistente per subscription con lease,
+heartbeat, reclaim sicuro e distinzione tra listener morto, target stalled ed
+evento pending; (3) metriche a delta/rate per socket error, webhook rispetto a
+reconciliation e p50/p90 per resource; (4) test di caos per mutation completata
+con risposta persa, restart launchd, listener crash/replay, outage webhook e
+GC di duplicati. Non estenderei l’autonomia a deploy, corpus pubblicato,
+prezzi, revenue, advertising o cancellazioni: il coordinatore deve continuare
+a negare o deferire quelle mutation, mentre il percorso tecnico PR→test→LGTM→
+auto-merge resta automatico secondo la decisione del proprietario.
 
 ## Implementato
 
