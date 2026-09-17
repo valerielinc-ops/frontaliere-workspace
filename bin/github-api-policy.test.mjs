@@ -40,6 +40,35 @@ test('blocks gh run watch', () => {
   assert.match(result.stderr, /events subscribe .*events listen <id>/);
 });
 
+test('blocks absolute-path gh run watch', () => {
+  const command = '/opt/homebrew/bin/gh run watch 123';
+  assert.equal(containsDirectCall(command), true);
+  const result = runPolicy(command);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /gh pr checks --watch.*gh run watch/);
+  assert.match(result.stderr, /events subscribe .*events listen <id>/);
+});
+
+test('allows non-watch GitHub run queries', () => {
+  for (const command of ['gh run view 123', 'gh run list']) {
+    assert.equal(containsDirectCall(command), false);
+    assert.equal(runPolicy(command).status, 0);
+  }
+});
+
+test('allows the frontaliere wrapper for a non-watch run query', () => {
+  const command = 'bin/gh-frontaliere run view 123';
+  assert.equal(containsDirectCall(command), false);
+  assert.equal(runPolicy(command).status, 0);
+});
+
+test('keeps pull-request watch guidance actionable', () => {
+  const result = runPolicy('gh pr checks --watch 123');
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /gh pr checks --watch.*gh run watch/);
+  assert.match(result.stderr, /events subscribe .*events listen <id>/);
+});
+
 test('allows the shared coordinator wrappers', () => {
   assert.equal(containsDirectCall('bin/gh-frontaliere pr view 123'), false);
   assert.equal(containsDirectCall('bin/gh-nanako run view 456'), false);
