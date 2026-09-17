@@ -1806,12 +1806,13 @@ export class GitHubCoordinator {
   async executeCli(request) {
     this.metrics.cliCommands += 1;
     const args = Array.isArray(request.args) ? request.args.map(String) : [];
-    if (args.includes('--watch')) {
+    const isRunWatch = args[0] === 'run' && args[1] === 'watch';
+    if (isRunWatch || args.includes('--watch')) {
       return {
         ok: false,
         exitCode: 2,
         stdout: '',
-        stderr: 'github-coordinator: --watch è vietato; usa un solo osservatore condiviso.\n',
+        stderr: `${isRunWatch ? 'github-coordinator: gh run watch' : 'github-coordinator: --watch'} è vietato; usa un solo osservatore condiviso.\n`,
       };
     }
 

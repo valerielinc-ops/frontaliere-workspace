@@ -438,6 +438,32 @@ test('chiude stdin per le CLI che lo usano come input', async () => {
   }
 });
 
+test('blocca gh run watch prima di avviare un subprocess', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-run-watch-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const response = await coordinator.submit({
+    type: 'exec',
+    identity: 'test',
+    args: ['run', 'watch', '123', '--exit-status'],
+    cwd: directory,
+  });
+
+  try {
+    assert.equal(response.ok, false);
+    assert.equal(response.exitCode, 2);
+    assert.match(response.stderr, /gh run watch è vietato/);
+    assert.equal(existsSync(join(directory, 'invocations.jsonl')), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('mantiene la cache per le letture CLI piccole e deduplica gh pr view', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-read-'));
   const realGh = createFakeGh(directory);
