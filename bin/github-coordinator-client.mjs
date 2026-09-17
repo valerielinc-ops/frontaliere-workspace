@@ -34,6 +34,12 @@ const EVENT_PROTOCOL_VERSION = 5;
 export const EVENT_LISTENER_HEARTBEAT_INTERVAL_MS = 60_000;
 export const DEFAULT_EVENT_RECONCILE_AFTER_MS = 5 * 60 * 1_000;
 const CONNECT_TIMEOUT_MS = 3_000;
+// Le richieste `exec` (gh reale: `run view --log`, `run list --limit 100`, ...)
+// possono durare minuti: il timer da 3 s copre solo il connect, poi vale questo.
+const EXEC_RESPONSE_TIMEOUT_MS = Math.max(
+  CONNECT_TIMEOUT_MS,
+  Number(process.env.FRONTALIERE_GH_RESPONSE_TIMEOUT_MS) || 20 * 60_000,
+);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
 
@@ -93,18 +99,21 @@ function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {}) {
+function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS, responseTimeoutMs } = {}) {
   const targetSocket = socketPath(identity);
+  const responseBudgetMs = responseTimeoutMs
+    ?? (request?.type === 'exec' ? EXEC_RESPONSE_TIMEOUT_MS : timeoutMs);
   return new Promise((resolvePromise, reject) => {
     let settled = false;
     let buffer = '';
     const socket = createConnection(targetSocket);
-    const timer = setTimeout(() => {
+    const onTimeout = (phase) => () => {
       socket.destroy();
-      const error = new Error(`github_coordinator_timeout: ${targetSocket}`);
+      const error = new Error(`github_coordinator_timeout: ${targetSocket} (${phase})`);
       error.code = 'GITHUB_COORDINATOR_TIMEOUT';
       rejectOnce(error);
-    }, timeoutMs);
+    };
+    let timer = setTimeout(onTimeout('connect'), timeoutMs);
 
     const rejectOnce = (error) => {
       if (settled) return;
@@ -121,6 +130,8 @@ function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {})
     };
 
     socket.on('connect', () => {
+      clearTimeout(timer);
+      timer = setTimeout(onTimeout('response'), responseBudgetMs);
       socket.write(`${JSON.stringify(request)}\n`);
     });
     socket.on('data', (chunk) => {

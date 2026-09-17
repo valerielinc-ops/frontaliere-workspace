@@ -2,6 +2,7 @@
 
 import { createInterface } from 'node:readline/promises';
 import { execFileSync } from 'node:child_process';
+import { readFileSync, unlinkSync } from 'node:fs';
 
 import {
   confirmCancellation,
@@ -25,7 +26,11 @@ function printStatus(status) {
 }
 
 function printResponse(response) {
-  if (response?.stdout) process.stdout.write(response.stdout);
+  if (response?.stdoutFile) {
+    // Output spillato dal daemon oltre il cap del protocollo: riversa e cancella.
+    process.stdout.write(readFileSync(response.stdoutFile));
+    try { unlinkSync(response.stdoutFile); } catch { /* best effort */ }
+  } else if (response?.stdout) process.stdout.write(response.stdout);
   if (response?.stderr) process.stderr.write(response.stderr);
   process.exitCode = Number.isInteger(response?.exitCode) ? response.exitCode : (response?.ok ? 0 : 1);
 }
