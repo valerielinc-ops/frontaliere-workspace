@@ -18,6 +18,7 @@ import { homedir, tmpdir } from 'node:os';
 import {
   classifyBucket,
   cancellationRequestDetails,
+  createDebouncedReloadScheduler,
   GitHubCoordinator,
   isSafeRead,
   parseGhApiArguments,
@@ -114,6 +115,69 @@ if (mode === 'large') {
   chmodSync(script, 0o700);
   return script;
 }
+
+function sendRawCoordinatorLine(identity, line) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const socket = createConnection(socketPath(identity));
+    let buffer = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      socket.destroy();
+      rejectOnce(new Error(`raw_coordinator_request_timeout: ${identity}`));
+    }, 5_000);
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectPromise(error);
+    };
+    const resolveOnce = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise(value);
+    };
+    socket.on('connect', () => socket.write(`${line}\n`));
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      try {
+        resolveOnce(JSON.parse(buffer.slice(0, newline)));
+        socket.end();
+      } catch (error) {
+        socket.destroy();
+        rejectOnce(error);
+      }
+    });
+    socket.on('error', rejectOnce);
+    socket.on('close', () => {
+      if (!settled) rejectOnce(new Error(`raw_coordinator_connection_closed: ${identity}`));
+    });
+  });
+}
+
+test('accorpa gli eventi source ravvicinati e aspetta la quiescenza', async () => {
+  let activeRequests = 1;
+  let reloads = 0;
+  const scheduler = createDebouncedReloadScheduler({
+    onReload: () => { reloads += 1; },
+    getActiveRequests: () => activeRequests,
+    debounceMs: 15,
+    quiescenceMs: 5,
+  });
+
+  try {
+    assert.equal(scheduler.request(), true);
+    assert.equal(scheduler.request(), false);
+    assert.equal(scheduler.request(), false);
+    setTimeout(() => { activeRequests = 0; }, 30);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+    assert.equal(reloads, 1);
+  } finally {
+    scheduler.stop();
+  }
+});
 
 test('classifica i bucket GitHub senza confondere search e GraphQL', () => {
   assert.equal(classifyBucket('/graphql'), 'graphql');
@@ -1210,6 +1274,45 @@ test('il policy gate permette il gh shim e blocca bypass espliciti', () => {
   assert.equal(runPolicy('gh pr checks 123 --watch').status, 2);
   assert.equal(runPolicy('gh pr view 123; curl https://api.github.com/rate_limit').status, 2);
   assert.equal(runPolicy('echo github-coordinator; /opt/homebrew/bin/gh pr view 123').status, 2);
+});
+
+test('isola un errore di elaborazione su una connessione e mantiene vivo il coordinator', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-isolation-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = `connection-isolation-${process.pid}`;
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = 'connection-isolation-secret';
+
+  try {
+    await ensureCoordinator(identity);
+    const containedFailure = await sendRawCoordinatorLine(identity, 'null');
+    assert.equal(containedFailure.ok, false);
+    assert.equal(containedFailure.error.code, 'coordinator_error');
+
+    const healthyResponse = await sendRequest({ type: 'ping', compact: true }, { identity });
+    assert.equal(healthyResponse.ok, true);
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // Il daemon puo' non avere raggiunto l'avvio; il cleanup resta sicuro.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('consegna un webhook al listener Unix e chiude la subscription dopo ack', async () => {

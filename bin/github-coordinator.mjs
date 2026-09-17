@@ -58,6 +58,8 @@ const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_CACHE_TTL_MS = 5_000;
 const MAX_CACHE_TTL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+export const SOURCE_RELOAD_DEBOUNCE_MS = 3_000;
+export const SOURCE_RELOAD_QUIESCENCE_MS = 250;
 const OBSERVED_HEADERS = [
   'etag',
   'last-modified',
@@ -88,6 +90,82 @@ const WATCHED_SOURCE_NAMES = new Set([
   'github-event-broker.mjs',
   'github-coordinator-launcher',
 ]);
+
+function describeError(error) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.stack ? { stack: error.stack } : {}),
+    };
+  }
+  return { name: typeof error, message: String(error) };
+}
+
+function logStructuredError(event, error, details = {}) {
+  try {
+    process.stderr.write(`${JSON.stringify({
+      component: 'github-coordinator',
+      event,
+      error: describeError(error),
+      ...details,
+    })}\n`);
+  } catch {
+    // Logging must not turn a contained failure into a process failure.
+  }
+}
+
+export function createDebouncedReloadScheduler({
+  onReload,
+  getActiveRequests = () => 0,
+  debounceMs = SOURCE_RELOAD_DEBOUNCE_MS,
+  quiescenceMs = SOURCE_RELOAD_QUIESCENCE_MS,
+} = {}) {
+  if (typeof onReload !== 'function') throw new TypeError('source_reload_callback_required');
+  let debounceTimer = null;
+  let quiescenceTimer = null;
+  let pending = false;
+  let stopped = false;
+
+  const attemptReload = () => {
+    debounceTimer = null;
+    if (stopped || !pending) return;
+    if (getActiveRequests() > 0) {
+      quiescenceTimer = setTimeout(attemptReload, quiescenceMs);
+      quiescenceTimer.unref?.();
+      return;
+    }
+    pending = false;
+    quiescenceTimer = null;
+    onReload();
+  };
+
+  return {
+    request() {
+      if (stopped) return false;
+      const firstRequest = !pending;
+      pending = true;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (quiescenceTimer) clearTimeout(quiescenceTimer);
+      quiescenceTimer = null;
+      debounceTimer = setTimeout(attemptReload, debounceMs);
+      debounceTimer.unref?.();
+      return firstRequest;
+    },
+    stop() {
+      stopped = true;
+      pending = false;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (quiescenceTimer) clearTimeout(quiescenceTimer);
+      debounceTimer = null;
+      quiescenceTimer = null;
+    },
+    isPending() {
+      return pending;
+    },
+  };
+}
 
 function processIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -156,22 +234,54 @@ function releaseCoordinatorOwner(ownerLock, { removeSocket = false } = {}) {
   try { closeSync(ownerLock.fd); } catch { /* already closed */ }
 }
 
-function installSourceReloadWatcher(onReload) {
+function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = {}) {
   let triggered = false;
   let watcher;
+  let scheduler;
+  const triggerReload = () => {
+    if (triggered) return;
+    triggered = true;
+    scheduler.stop();
+    try { watcher?.close(); } catch { /* watcher already closed */ }
+    process.stderr.write('github-coordinator: source quiescent; restarting under supervisor\n');
+    onReload();
+  };
+  scheduler = createDebouncedReloadScheduler({
+    onReload: triggerReload,
+    getActiveRequests,
+  });
   try {
     watcher = watch(THIS_DIR, { persistent: false }, (_eventType, filename) => {
       const name = String(filename || '');
       if (triggered || !WATCHED_SOURCE_NAMES.has(name)) return;
-      triggered = true;
-      process.stderr.write('github-coordinator: source changed; restarting under supervisor\n');
-      watcher.close();
-      onReload();
+      if (scheduler.request()) {
+        process.stderr.write(
+          `github-coordinator: source changed; restart scheduled (debounce=${SOURCE_RELOAD_DEBOUNCE_MS}ms, quiescence=${SOURCE_RELOAD_QUIESCENCE_MS}ms)\n`,
+        );
+      }
     });
   } catch (error) {
     process.stderr.write(`github-coordinator: source watcher unavailable: ${error.message}\n`);
   }
-  return () => watcher?.close();
+  return () => {
+    scheduler.stop();
+    try { watcher?.close(); } catch { /* watcher already closed */ }
+  };
+}
+
+function installProcessSafetyHandlers(terminate) {
+  let handlingFailure = false;
+  const handleFailure = (event, error) => {
+    logStructuredError(event, error, { pid: process.pid });
+    if (handlingFailure) {
+      process.exitCode = 1;
+      return;
+    }
+    handlingFailure = true;
+    terminate(1);
+  };
+  process.on('uncaughtException', (error) => handleFailure('uncaught_exception', error));
+  process.on('unhandledRejection', (reason) => handleFailure('unhandled_rejection', reason));
 }
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -1663,6 +1773,7 @@ function readTokenAndStart(identity) {
   let listenerHeartbeatTimer = null;
   const eventListeners = new Map();
   const sharedAcknowledgements = new Set();
+  let activeRequestCount = 0;
   const EVENT_LISTENER_HEARTBEAT_TIMEOUT_MS = 3 * 60 * 1_000;
   const EVENT_LISTENER_ACK_TIMEOUT_MS = 3 * 60 * 1_000;
 
@@ -1670,11 +1781,52 @@ function readTokenAndStart(identity) {
     if (!connection.destroyed) connection.write(`${JSON.stringify(message)}\n`);
   };
 
+  const clientErrorDetails = (error) => {
+    const details = {
+      code: error?.code || 'coordinator_error',
+      message: error?.message || String(error),
+    };
+    for (const field of [
+      'requestId',
+      'existingSubscriptionId',
+      'existingSubscription',
+      'targetKey',
+      'sharedObserverRecommended',
+      'exitCode',
+    ]) {
+      if (error?.[field] !== undefined) details[field] = error[field];
+    }
+    return details;
+  };
+
   const detachEventListener = (listener) => {
     const listeners = eventListeners.get(listener.subscriptionId);
     if (!listeners) return;
     listeners.delete(listener);
     if (listeners.size === 0) eventListeners.delete(listener.subscriptionId);
+  };
+
+  const detachConnectionListeners = (connection, listener = null) => {
+    if (listener) detachEventListener(listener);
+    for (const listeners of eventListeners.values()) {
+      for (const candidate of [...listeners]) {
+        if (candidate.connection === connection) detachEventListener(candidate);
+      }
+    }
+  };
+
+  const closeConnectionAfterError = (connection, error, listener = null) => {
+    logStructuredError('client_request_failed', error);
+    detachConnectionListeners(connection, listener);
+    try {
+      if (!connection.destroyed) {
+        writeMessage(connection, { ok: false, error: clientErrorDetails(error) });
+        connection.end();
+      }
+    } catch (closeError) {
+      logStructuredError('client_connection_close_failed', closeError);
+      connection.destroy();
+    }
   };
   coordinator.setEventListenerInspector((subscriptionId) => (eventListeners.get(String(subscriptionId))?.size || 0) > 0);
   coordinator.setEventListenerCountInspector(
@@ -1931,102 +2083,134 @@ function readTokenAndStart(identity) {
       coordinator.metrics.socketErrors += 1;
       // A supervisor disappearing must detach only its listener.  Without an
       // error handler ECONNRESET can terminate the whole coordinator process.
-      if (listener) detachEventListener(listener);
+      detachConnectionListeners(connection, listener);
     });
-    connection.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
-      let newline;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (!line.trim()) continue;
-        let request;
-        try {
-          request = JSON.parse(line);
-        } catch (error) {
-          writeMessage(connection, { ok: false, error: { code: 'invalid_request', message: error.message } });
-          connection.end();
-          return;
-        }
+
+    const handleRequest = (request) => {
+      activeRequestCount += 1;
+      let requestFinished = false;
+      const finishRequest = () => {
+        if (requestFinished) return;
+        requestFinished = true;
+        activeRequestCount = Math.max(0, activeRequestCount - 1);
+      };
+
+      try {
         if (listener) {
           handleEventListenerMessage(listener, request);
-          continue;
+          finishRequest();
+          return;
         }
-        if (handled) continue;
+        if (handled) {
+          finishRequest();
+          return;
+        }
         handled = true;
         if (request.type === 'event-listen') {
           listener = attachEventListener(connection, request);
-          continue;
+          finishRequest();
+          return;
         }
         let result;
-        try {
-          if (request.type === 'ping') {
-            result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
-          } else if (request.type === 'status') {
-            result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
-          } else if (request.type === 'shutdown') {
-            result = Promise.resolve({ ok: true });
-          } else if (request.type === 'cancellation-details') {
-            result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
-          } else if (request.type === 'confirm-cancellation') {
-            result = coordinator.confirmCancellation(request.requestId, request.confirmation);
-          } else if (request.type === 'events-subscribe') {
-            result = Promise.resolve(coordinator.eventSubscription(request.spec));
-          } else if (request.type === 'events-status') {
-            result = Promise.resolve(coordinator.eventSubscriptions(request.options || {}));
-          } else if (request.type === 'events-summary') {
-            result = Promise.resolve(coordinator.eventSubscriptionSummary(request.options || {}));
-          } else if (request.type === 'events-audit') {
-            result = Promise.resolve(coordinator.eventAudit(request.options || {}));
-          } else if (request.type === 'events-gc') {
-            result = Promise.resolve(coordinator.eventGarbageCollect(request.options || {}));
-          } else if (request.type === 'events-subscription') {
-            result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
-          } else if (request.type === 'events-subscription-target') {
-            result = Promise.resolve(coordinator.eventSubscriptionTarget(request.options || {}));
-          } else if (request.type === 'events-unsubscribe') {
-            result = Promise.resolve(coordinator.eventUnsubscribe(request.subscriptionId));
-          } else if (request.type === 'events-renew') {
-            result = Promise.resolve(coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
-          } else if (request.type === 'events-webhook') {
-            result = Promise.resolve(coordinator.ingestWebhook(request));
-          } else if (request.type === 'events-reconcile') {
-            result = coordinator.reconcileEvents(request.subscriptionId);
-          } else if (request.type === 'api' || request.type === 'exec') {
-            result = coordinator.submit(request);
-          } else {
-            result = Promise.resolve({ ok: false, error: { code: 'unsupported_request_type' } });
-          }
-        } catch (error) {
-          result = Promise.reject(error);
+        if (request.type === 'ping') {
+          result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
+        } else if (request.type === 'status') {
+          result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
+        } else if (request.type === 'shutdown') {
+          result = Promise.resolve({ ok: true });
+        } else if (request.type === 'cancellation-details') {
+          result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
+        } else if (request.type === 'confirm-cancellation') {
+          result = coordinator.confirmCancellation(request.requestId, request.confirmation);
+        } else if (request.type === 'events-subscribe') {
+          result = Promise.resolve(coordinator.eventSubscription(request.spec));
+        } else if (request.type === 'events-status') {
+          result = Promise.resolve(coordinator.eventSubscriptions(request.options || {}));
+        } else if (request.type === 'events-summary') {
+          result = Promise.resolve(coordinator.eventSubscriptionSummary(request.options || {}));
+        } else if (request.type === 'events-audit') {
+          result = Promise.resolve(coordinator.eventAudit(request.options || {}));
+        } else if (request.type === 'events-gc') {
+          result = Promise.resolve(coordinator.eventGarbageCollect(request.options || {}));
+        } else if (request.type === 'events-subscription') {
+          result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
+        } else if (request.type === 'events-subscription-target') {
+          result = Promise.resolve(coordinator.eventSubscriptionTarget(request.options || {}));
+        } else if (request.type === 'events-unsubscribe') {
+          result = Promise.resolve(coordinator.eventUnsubscribe(request.subscriptionId));
+        } else if (request.type === 'events-renew') {
+          result = Promise.resolve(coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
+        } else if (request.type === 'events-webhook') {
+          result = Promise.resolve(coordinator.ingestWebhook(request));
+        } else if (request.type === 'events-reconcile') {
+          result = coordinator.reconcileEvents(request.subscriptionId);
+        } else if (request.type === 'api' || request.type === 'exec') {
+          result = coordinator.submit(request);
+        } else {
+          result = Promise.resolve({ ok: false, error: { code: 'unsupported_request_type' } });
         }
         Promise.resolve(result).then((response) => {
-          writeMessage(connection, response);
-          connection.end();
-          if (request.type === 'shutdown') setTimeout(terminate, 10);
-        }).catch((error) => {
-          const errorDetails = {
-            code: error.code || 'coordinator_error',
-            message: error.message,
-          };
-          for (const field of ['requestId', 'existingSubscriptionId', 'existingSubscription', 'targetKey', 'sharedObserverRecommended', 'exitCode']) {
-            if (error[field] !== undefined) errorDetails[field] = error[field];
+          try {
+            writeMessage(connection, response);
+            connection.end();
+            if (request.type === 'shutdown') setTimeout(terminate, 10);
+          } catch (error) {
+            closeConnectionAfterError(connection, error, listener);
+          } finally {
+            finishRequest();
           }
-          writeMessage(connection, { ok: false, error: errorDetails });
-          connection.end();
+        }, (error) => {
+          try {
+            writeMessage(connection, { ok: false, error: clientErrorDetails(error) });
+            connection.end();
+          } catch (closeError) {
+            logStructuredError('client_connection_close_failed', closeError);
+            connection.destroy();
+          } finally {
+            finishRequest();
+          }
         });
+      } catch (error) {
+        finishRequest();
+        closeConnectionAfterError(connection, error, listener);
+      }
+    };
+
+    connection.on('data', (chunk) => {
+      try {
+        buffer += chunk.toString('utf8');
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          let request;
+          try {
+            request = JSON.parse(line);
+          } catch (error) {
+            writeMessage(connection, { ok: false, error: { code: 'invalid_request', message: error.message } });
+            connection.end();
+            return;
+          }
+          handleRequest(request);
+        }
+      } catch (error) {
+        closeConnectionAfterError(connection, error, listener);
       }
     });
     connection.on('close', () => {
       coordinator.metrics.socketDisconnects += 1;
-      if (listener) detachEventListener(listener);
+      detachConnectionListeners(connection, listener);
     });
   });
 
   let terminating = false;
   let stopSourceWatcher = () => {};
-  terminate = () => {
-    if (terminating) return;
+  terminate = (exitCode = 0) => {
+    if (terminating) {
+      if (exitCode !== 0) process.exitCode = exitCode;
+      return;
+    }
     terminating = true;
     if (expirationTimer) clearInterval(expirationTimer);
     if (listenerHeartbeatTimer) clearInterval(listenerHeartbeatTimer);
@@ -2041,8 +2225,8 @@ function readTokenAndStart(identity) {
     }
     eventListeners.clear();
     stopSourceWatcher();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1_000);
+    server.close(() => process.exit(exitCode));
+    setTimeout(() => process.exit(exitCode), 1_000);
   };
 
   const cleanUp = () => {
@@ -2082,7 +2266,9 @@ function readTokenAndStart(identity) {
   stopSourceWatcher = installSourceReloadWatcher(() => {
     coordinator.metrics.sourceReloads += 1;
     terminate();
-  });
+  }, { getActiveRequests: () => activeRequestCount });
+
+  installProcessSafetyHandlers(terminate);
 
   server.listen(socket);
 }
