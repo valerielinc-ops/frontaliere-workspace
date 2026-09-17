@@ -35,8 +35,20 @@ export const EVENT_LISTENER_HEARTBEAT_INTERVAL_MS = 60_000;
 export const DEFAULT_EVENT_RECONCILE_AFTER_MS = 5 * 60 * 1_000;
 const CONNECT_TIMEOUT_MS = 3_000;
 const EXEC_TIMEOUT_MS = 15 * 60 * 1_000;
+const NETWORK_REQUEST_TYPES = new Set([
+  'api',
+  'exec',
+  'events-subscribe',
+  'events-reconcile',
+]);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
+
+export function requestTimeoutMilliseconds(request) {
+  return NETWORK_REQUEST_TYPES.has(String(request?.type || ''))
+    ? EXEC_TIMEOUT_MS
+    : CONNECT_TIMEOUT_MS;
+}
 
 export function normalizeIdentity(value = process.env.FRONTALIERE_GH_IDENTITY || 'default') {
   const identity = String(value || 'default').trim();
@@ -322,7 +334,7 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
       requireWebhookSecret: request.type === 'events-subscribe' || request.type === 'events-webhook',
     });
   }
-  const timeoutMs = request?.type === 'exec' ? EXEC_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
+  const timeoutMs = requestTimeoutMilliseconds(request);
   const response = await connectOnce({ ...request, identity: normalized }, { identity: normalized, timeoutMs });
   if (response?.ok === false && response?.error) {
     const error = new Error(response.error.message || response.error.code || 'github_coordinator_error');

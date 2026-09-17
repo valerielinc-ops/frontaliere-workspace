@@ -93,6 +93,14 @@ export async function checkCoordinatorHealth(identity) {
       alerts.push({ code: 'webhook_secret_unconfigured', message: `${normalized}: webhook secret is not configured` });
     }
     const eventSummary = status.events || {};
+    if (Number(eventSummary.webhookSignatureFailures || 0) > 0) {
+      alerts.push({
+        code: 'webhook_signature_rejected',
+        count: Number(eventSummary.webhookSignatureFailures),
+        lastWebhookSignatureFailureAt: eventSummary.lastWebhookSignatureFailureAt || null,
+        message: `${normalized}: ${eventSummary.webhookSignatureFailures} webhook deliveries were rejected for invalid signatures`,
+      });
+    }
     if (Number(eventSummary.orphanedSubscriptions || 0) > 0) {
       warnings.push({
         code: 'orphaned_subscriptions',
@@ -152,6 +160,10 @@ export async function checkCoordinatorHealth(identity) {
         orphanedSubscriptions: status.events?.orphanedSubscriptions,
         duplicateSubscriptions: status.events?.duplicateSubscriptions,
         stalledSubscriptions: status.events?.stalledSubscriptions,
+        ...(Number(status.events?.webhookSignatureFailures || 0) > 0 ? {
+          webhookSignatureFailures: Number(status.events.webhookSignatureFailures),
+          lastWebhookSignatureFailureAt: status.events.lastWebhookSignatureFailureAt || null,
+        } : {}),
       },
     } : null,
   };

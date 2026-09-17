@@ -31,6 +31,7 @@ import {
   ingestGitHubWebhook,
   listenForEvent,
   normalizeIdentity,
+  requestTimeoutMilliseconds,
   sendRequest,
   socketPath,
   subscribeToEvents,
@@ -201,6 +202,42 @@ test('accorpa gli eventi source ravvicinati e aspetta la quiescenza', async () =
     assert.equal(reloads, 1);
   } finally {
     scheduler.stop();
+  }
+});
+
+test('mantiene i listener SIGTERM e SIGINT del coordinator su un exit code numerico', () => {
+  const coordinatorSource = readFileSync(join(ROOT, 'bin', 'github-coordinator.mjs'), 'utf8');
+  const receiverSource = readFileSync(join(ROOT, 'bin', 'github-webhook-receiver.mjs'), 'utf8');
+
+  assert.match(coordinatorSource, /process\.on\('SIGTERM', \(\) => terminate\(0\)\);/);
+  assert.match(coordinatorSource, /process\.on\('SIGINT', \(\) => terminate\(0\)\);/);
+  assert.doesNotMatch(coordinatorSource, /process\.on\(['"]SIG(?:TERM|INT)['"],\s*terminate\)/);
+  assert.doesNotMatch(receiverSource, /process\.on\(['"]SIG(?:TERM|INT)['"]/);
+});
+
+test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', () => {
+  const shortRequestTypes = [
+    'ping',
+    'status',
+    'shutdown',
+    'cancellation-details',
+    'confirm-cancellation',
+    'events-status',
+    'events-summary',
+    'events-audit',
+    'events-gc',
+    'events-subscription',
+    'events-subscription-target',
+    'events-unsubscribe',
+    'events-renew',
+    'events-webhook',
+    'event-listen',
+    'event-heartbeat',
+    'event-ack',
+  ];
+  for (const type of shortRequestTypes) assert.equal(requestTimeoutMilliseconds({ type }), 3_000, type);
+  for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile']) {
+    assert.equal(requestTimeoutMilliseconds({ type }), 15 * 60 * 1_000, type);
   }
 });
 
@@ -1692,6 +1729,9 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
       pull_request: { number: 42, merged: true, head: { sha: 'abc123' } },
     };
     const body = JSON.stringify(payload);
+    const cleanStatus = await sendRequest({ type: 'status', compact: true }, { identity });
+    assert.equal(Object.prototype.hasOwnProperty.call(cleanStatus.status.events, 'webhookSignatureFailures'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(cleanStatus.status.events.metrics, 'webhookSignatureFailures'), false);
     const rejectedWebhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
       method: 'POST',
       headers: {
@@ -1702,6 +1742,17 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
       body,
     });
     assert.equal(rejectedWebhookResponse.status, 401);
+    const rejectedStatus = await sendRequest({ type: 'status', compact: true }, { identity });
+    assert.equal(rejectedStatus.status.events.webhookSignatureFailures, 1);
+    assert.ok(rejectedStatus.status.events.lastWebhookSignatureFailureAt);
+    const fullStatus = await sendRequest({ type: 'status' }, { identity });
+    assert.equal(fullStatus.status.events.webhookSignatureFailures, 1);
+    const health = spawnSync(process.execPath, [join(ROOT, 'bin', 'github-coordinator-health.mjs'), '--identity', identity, '--alert-only'], {
+      cwd: ROOT,
+      env: { ...process.env },
+      encoding: 'utf8',
+    });
+    assert.match(health.stdout, /webhook_signature_rejected/);
     const webhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
       method: 'POST',
       headers: {

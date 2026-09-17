@@ -867,8 +867,21 @@ export class GitHubCoordinator {
   status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
-    const eventSummary = this.eventBroker
-      ? {
+    const eventSummary = this.eventBroker ? (() => {
+      const summary = this.eventBroker.summary({
+        listenerAttached: this.eventListenerInspector,
+        listenerInfo: this.eventListenerInfoInspector,
+      });
+      const signatureFailures = Number(this.eventBroker.metrics.webhookSignatureFailures || 0);
+      if (compact && signatureFailures === 0 && summary.metrics) {
+        const {
+          webhookSignatureFailures: _webhookSignatureFailures,
+          lastWebhookSignatureFailureAt: _lastWebhookSignatureFailureAt,
+          ...metrics
+        } = summary.metrics;
+        summary.metrics = metrics;
+      }
+      return {
         enabled: Boolean(this.eventBroker.webhookSecret),
         webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
         activeListeners: this.eventListenerCountInspector?.() ?? null,
@@ -876,12 +889,15 @@ export class GitHubCoordinator {
           heartbeats: this.metrics.eventListenerHeartbeats,
           timeouts: this.metrics.eventListenerTimeouts,
         },
-        ...this.eventBroker.summary({
-          listenerAttached: this.eventListenerInspector,
-          listenerInfo: this.eventListenerInfoInspector,
-        }),
-      }
-      : { enabled: false };
+        ...summary,
+        ...(compact && signatureFailures === 0
+          ? {}
+          : {
+            webhookSignatureFailures: signatureFailures,
+            lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
+          }),
+      };
+    })() : { enabled: false };
     if (compact) {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
@@ -933,6 +949,8 @@ export class GitHubCoordinator {
             listenerAttached: this.eventListenerInspector,
             listenerInfo: this.eventListenerInfoInspector,
           }),
+          webhookSignatureFailures: Number(this.eventBroker.metrics.webhookSignatureFailures || 0),
+          lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
         }
         : { enabled: false },
       pendingCancellations: [...this.pendingCancellations.values()]
@@ -2386,8 +2404,8 @@ function readTokenAndStart(identity) {
     try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
   });
   server.on('close', cleanUp);
-  process.on('SIGTERM', terminate);
-  process.on('SIGINT', terminate);
+  process.on('SIGTERM', () => terminate(0));
+  process.on('SIGINT', () => terminate(0));
 
   expirationTimer = setInterval(() => {
     try {
