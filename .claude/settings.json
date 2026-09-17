@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/bin/github-api-policy.mjs\" ] || d=\"$WORKSPACE/bin/github-api-policy.mjs\"; [ -f \"$d\" ] || exit 0; node \"$d\"'"
+            "command": "sh -c 'find_policy() { d=\"$1\"; [ -n \"$d\" ] || return 1; d=\"$(CDPATH= cd -- \"$d\" 2>/dev/null && pwd -P)\" || return 1; while :; do [ -f \"$d/bin/github-api-policy.mjs\" ] && { printf \"%s/bin/github-api-policy.mjs\\n\" \"$d\"; return 0; }; parent=\"$(dirname \"$d\")\"; [ \"$parent\" = \"$d\" ] && return 1; d=\"$parent\"; done; }; p=\"$(find_policy \"$PWD\" || find_policy \"${WORKSPACE:-}\" || find_policy \"${CODEX_PROJECT_DIR:-}\" || find_policy \"${CLAUDE_PROJECT_DIR:-}\")\" || exit 0; node \"$p\"'"
           },
           {
             "type": "command",
