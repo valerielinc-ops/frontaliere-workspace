@@ -44,6 +44,7 @@ const NETWORK_REQUEST_TYPES = new Set([
 ]);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
+const protocolChecks = new Map();
 
 export function requestTimeoutMilliseconds(request) {
   return NETWORK_REQUEST_TYPES.has(String(request?.type || ''))
@@ -105,6 +106,34 @@ async function persistentServiceLoadedEventually(identity) {
 
 function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+function statusFromResponse(response) {
+  return response?.status || response || null;
+}
+
+function rememberProtocolStatus(identity, response) {
+  const status = statusFromResponse(response);
+  const startedAt = status?.metrics?.startedAt;
+  const protocolVersion = Number(status?.protocolVersion || 0);
+  if (!startedAt || !Number.isFinite(protocolVersion)) return null;
+
+  const previous = protocolChecks.get(identity);
+  if (!previous || previous.startedAt !== startedAt || previous.protocolVersion !== protocolVersion) {
+    const current = {
+      startedAt,
+      protocolVersion,
+      webhookSecretConfigured: status?.events?.webhookSecretConfigured === true,
+      cancellationConfirmed: false,
+      eventProtocolConfirmed: false,
+    };
+    protocolChecks.set(identity, current);
+    return current;
+  }
+  if (status?.events?.webhookSecretConfigured !== undefined) {
+    previous.webhookSecretConfigured = status.events.webhookSecretConfigured === true;
+  }
+  return previous;
 }
 
 function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {}) {
@@ -216,8 +245,9 @@ async function startDaemon(identity) {
 export async function ensureCoordinator(identity = normalizeIdentity()) {
   const normalized = normalizeIdentity(identity);
   try {
-    await connectOnce({ type: 'ping' }, { identity: normalized });
-    return;
+    const response = await connectOnce({ type: 'ping', compact: true }, { identity: normalized });
+    rememberProtocolStatus(normalized, response);
+    return response;
   } catch {
     // A concurrent client may be starting the same daemon.  The server owns
     // the bind race; clients simply retry the same socket below.
@@ -228,8 +258,9 @@ export async function ensureCoordinator(identity = normalizeIdentity()) {
   let lastError;
   while (Date.now() < deadline) {
     try {
-      await connectOnce({ type: 'ping' }, { identity: normalized });
-      return;
+      const response = await connectOnce({ type: 'ping', compact: true }, { identity: normalized });
+      rememberProtocolStatus(normalized, response);
+      return response;
     } catch (error) {
       lastError = error;
       await sleep(100);
@@ -254,10 +285,12 @@ export async function waitForCoordinatorStop(identity = normalizeIdentity(), tim
 
 export async function probeCoordinator(identity = normalizeIdentity(), timeoutMs = CONNECT_TIMEOUT_MS) {
   const normalized = normalizeIdentity(identity);
-  return connectOnce(
+  const response = await connectOnce(
     { type: 'status', identity: normalized, compact: true },
     { identity: normalized, timeoutMs },
   );
+  rememberProtocolStatus(normalized, response);
+  return response;
 }
 
 function cancellationPath(pathname) {
@@ -285,13 +318,22 @@ function requestNeedsCancellationConfirmation(request) {
     || Boolean(repo && apiArgs.some((value) => /^\/?actions\/runs\/\d+\/cancel(?:\?.*)?$/.test(value)));
 }
 
-async function ensureCancellationConfirmationProtocol(identity) {
-  const response = await connectOnce(
-    { type: 'status', identity, compact: true },
-    { identity, timeoutMs: CONNECT_TIMEOUT_MS },
-  );
-  const version = Number(response?.status?.protocolVersion || 0);
-  if (version >= CANCELLATION_PROTOCOL_VERSION) return;
+async function ensureCancellationConfirmationProtocol(identity, status = null) {
+  let memo = rememberProtocolStatus(identity, status);
+  if (memo?.cancellationConfirmed) return;
+  const response = status
+    ? { status }
+    : await connectOnce(
+      { type: 'status', identity, compact: true },
+      { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+    );
+  const currentStatus = statusFromResponse(response);
+  memo = rememberProtocolStatus(identity, currentStatus);
+  const version = Number(currentStatus?.protocolVersion || 0);
+  if (version >= CANCELLATION_PROTOCOL_VERSION) {
+    if (memo) memo.cancellationConfirmed = true;
+    return;
+  }
   const error = new Error(
     'cancellazione GitHub bloccata: il coordinatore condiviso deve essere riavviato prima di inoltrare richieste di cancellazione',
   );
@@ -300,12 +342,19 @@ async function ensureCancellationConfirmationProtocol(identity) {
   throw error;
 }
 
-async function ensureEventProtocol(identity, { requireWebhookSecret = false } = {}) {
-  const response = await connectOnce(
-    { type: 'status', identity, compact: true },
-    { identity, timeoutMs: CONNECT_TIMEOUT_MS },
-  );
-  const version = Number(response?.status?.protocolVersion || 0);
+async function ensureEventProtocol(identity, { requireWebhookSecret = false, status = null } = {}) {
+  let memo = rememberProtocolStatus(identity, status);
+  if (memo?.eventProtocolConfirmed
+    && (!requireWebhookSecret || memo.webhookSecretConfigured)) return;
+  const response = status
+    ? { status }
+    : await connectOnce(
+      { type: 'status', identity, compact: true },
+      { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+    );
+  const currentStatus = statusFromResponse(response);
+  memo = rememberProtocolStatus(identity, currentStatus);
+  const version = Number(currentStatus?.protocolVersion || 0);
   if (version < EVENT_PROTOCOL_VERSION) {
     const error = new Error(
       'event subscriptions bloccate: il coordinatore condiviso deve essere riavviato per attivare il protocollo webhook',
@@ -314,7 +363,7 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false } = 
     error.exitCode = 2;
     throw error;
   }
-  if (requireWebhookSecret && response?.status?.events?.webhookSecretConfigured !== true) {
+  if (requireWebhookSecret && currentStatus?.events?.webhookSecretConfigured !== true) {
     const error = new Error(
       'event subscriptions bloccate: secret webhook non configurato nel coordinatore; carica Remote Config e riavvia il servizio',
     );
@@ -322,17 +371,20 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false } = 
     error.exitCode = 2;
     throw error;
   }
+  if (memo) memo.eventProtocolConfirmed = true;
 }
 
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
   const normalized = normalizeIdentity(identity);
-  await ensureCoordinator(normalized);
+  const coordinatorResponse = await ensureCoordinator(normalized);
+  const coordinatorStatus = statusFromResponse(coordinatorResponse);
   if (requestNeedsCancellationConfirmation(request)) {
-    await ensureCancellationConfirmationProtocol(normalized);
+    await ensureCancellationConfirmationProtocol(normalized, coordinatorStatus);
   }
   if (String(request?.type || '').startsWith('events-')) {
     await ensureEventProtocol(normalized, {
       requireWebhookSecret: request.type === 'events-subscribe' || request.type === 'events-webhook',
+      status: coordinatorStatus,
     });
   }
   const timeoutMs = requestTimeoutMilliseconds(request);
