@@ -84,6 +84,48 @@ La PR #8912 (`80048ca5…`) resta aperta con i veto `needs-human` e
 `collision-risk` e con finding tecnici successivi: non viene sbloccata
 artificialmente.
 
+### Feedback operativo sul coordinatore GitHub locale — verificato 2026-09-17, 06:28 UTC
+
+Il mio giudizio da agente client è positivo sul disegno, ma non ancora di
+“autonomia totale” sul piano operativo. Il coordinatore sta facendo bene il
+lavoro di confine: socket Unix separati per identità, token fuori dal
+protocollo, coda per le mutation, concorrenza bounded per le letture, cache e
+deduplicazione dei GET, backoff sui rate limit, webhook HMAC at-least-once e
+attese event-driven. La suite pulita sulla `main` del workspace passa 38/38
+test; la cancellazione di run Actions resta correttamente protetta dalla
+seconda conferma del proprietario.
+
+La misura live è però più istruttiva della suite: `default` e `nanako` sono
+attualmente gestiti da `launchd` con protocollo 5 e secret webhook configurato.
+`default` ha 13 subscription senza listener, 8 stalled e 4 eventi pending;
+`events gc` in dry-run trova zero candidati sicuri, quindi non rimuove
+subscription uniche o eventi che potrebbero ancora essere consegnati. È una
+scelta safety corretta, ma manca un reaper autonomo basato su lease/owner/TTL
+che riconcili o archivi in modo dimostrabile questi stati. L’ETA storica p90
+per le PR è circa 39,6 minuti: il percorso è event-driven, ma la latenza del
+ciclo remoto resta reale.
+
+Durante questa sessione una `gh pr create` ha superato il timeout del client,
+mentre la mutation remota è comunque andata a buon fine e ha creato la PR
+attesa. Il controllo successivo ha evitato un duplicato. Questo è il finding
+più concreto: le mutation devono avere receipt durevole/idempotency key e una
+riconciliazione automatica dopo timeout, perché “errore del client” oggi non
+significa “mutation non eseguita”. Inoltre il daemon deve partire da una
+checkout/release pin-nata e non da una checkout di workspace che gli agenti
+modificano continuamente; il debounce di #58/#59 attenua il problema ma non
+lo elimina.
+
+L’evoluzione che raccomando, in ordine, è: (1) receipt e retry idempotente per
+ogni mutation GitHub; (2) state machine persistente per subscription con lease,
+heartbeat, reclaim sicuro e distinzione tra listener morto, target stalled ed
+evento pending; (3) metriche a delta/rate per socket error, webhook rispetto a
+reconciliation e p50/p90 per resource; (4) test di caos per mutation completata
+con risposta persa, restart launchd, listener crash/replay, outage webhook e
+GC di duplicati. Non estenderei l’autonomia a deploy, corpus pubblicato,
+prezzi, revenue, advertising o cancellazioni: il coordinatore deve continuare
+a negare o deferire quelle mutation, mentre il percorso tecnico PR→test→LGTM→
+auto-merge resta automatico secondo la decisione del proprietario.
+
 ## Implementato
 
 - L’audit ledger post-merge [35183527873](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/35183527873), sulla main `832db50d…` dopo #8964, conta 1.039 observations, 1.039 decisions, 1.041 health-history e 3.232 lifecycle, per 6.351 record senza `recordId` duplicati e con copertura 12/12. Gli outcome indipendenti sono 4/12 nell’ultima fotografia e 6/12 almeno una volta nella storia; #8965 aggiorna solo la presentazione dello status, non questi dati.
