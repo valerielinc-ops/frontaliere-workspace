@@ -8,8 +8,10 @@
  */
 
 import { accessSync, constants as fsConstants, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { shellExecutableText } from './shell-command-scanner.mjs';
 
 function commandFromStdin() {
   try {
@@ -39,23 +41,25 @@ function resolvedGhShim() {
 }
 
 function hasPlainGhInvocation(command) {
-  return /(?:^|[;&|()]\s*)(?:command\s+)?gh\s+/.test(command);
+  return /(?:^|[;&|()\n]\s*)(?:command\s+)?gh\s+/.test(shellExecutableText(command));
 }
 
 function directNetworkCall(command) {
-  return /(?:curl|wget)\s+[^\n]*(?:api\.github\.com|github\.com\/[^\s]*\/actions)/.test(command);
+  return /(?:^|[;&|()\n]\s*)(?:command\s+)?(?:curl|wget)\s+[^\n]*(?:api\.github\.com|github\.com\/[^\s]*\/actions)/.test(
+    shellExecutableText(command),
+  );
 }
 
 function ghWatchInvocation(command) {
-  const ghPath = '(?:^|[;&|()]\\s*)(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
-  return new RegExp(`${ghPath}\\s+pr\\s+checks\\b[^\\n]*--watch`).test(command);
+  const ghPath = '(?:^|[;&|()\\n]\\s*)(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
+  return new RegExp(`${ghPath}\\s+pr\\s+checks\\b[^\\n]*--watch`).test(shellExecutableText(command));
 }
 
-function explicitGhApiInvocation(command) {
+export function explicitGhApiInvocation(command) {
   return new RegExp(
-    '(?:^|[;&|()]\\s*)(?:command\\s+)?[^\\s;&|()]+/gh\\s+'
+    '(?:^|[;&|()\\n]\\s*)(?:command\\s+)?[^\\s;&|()]+/gh\\s+'
       + '(?:api|graphql|pr|issue|run|workflow|search|release|repo|project|org|gist|label|auth)\\b',
-  ).test(command);
+  ).test(shellExecutableText(command));
 }
 
 function isAllowed(command) {
@@ -66,21 +70,24 @@ function isAllowed(command) {
     || (hasPlainGhInvocation(command) && resolvedGhShim());
 }
 
-function containsDirectCall(command) {
-  const ghPath = '(?:^|[;&|()]\\s*)(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
+export function containsDirectCall(command) {
+  const executableText = shellExecutableText(command);
+  const ghPath = '(?:^|[;&|()\\n]\\s*)(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
   const ghApi = new RegExp(`${ghPath}\\s+(?:api|graphql|pr|issue|run|workflow|search|release|repo|project|org|gist|label|auth)\\b`);
   const trustedPlainGh = hasPlainGhInvocation(command) && resolvedGhShim();
-  return directNetworkCall(command)
+  return directNetworkCall(executableText)
     || ghWatchInvocation(command)
     || explicitGhApiInvocation(command)
-    || (ghApi.test(command) && !trustedPlainGh);
+    || (ghApi.test(executableText) && !trustedPlainGh);
 }
 
-const command = commandFromStdin();
-if (!command || isAllowed(command) || !containsDirectCall(command)) process.exit(0);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const command = commandFromStdin();
+  if (!command || isAllowed(command) || !containsDirectCall(command)) process.exit(0);
 
-process.stderr.write(
-  'GitHub API diretto bloccato dal coordinatore condiviso. '
-  + 'Usa `bin/gh-frontaliere ...`; per lo stato PR non usare `--watch`.\n',
-);
-process.exit(2);
+  process.stderr.write(
+    'GitHub API diretto bloccato dal coordinatore condiviso. '
+    + 'Usa `bin/gh-frontaliere ...`; per lo stato PR non usare `--watch`.\n',
+  );
+  process.exit(2);
+}

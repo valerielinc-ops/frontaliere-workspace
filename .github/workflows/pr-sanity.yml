@@ -1,0 +1,76 @@
+name: PR sanity
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-sanity-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed shell scripts and plists
+        shell: bash --noprofile --norc -eo pipefail {0}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed_files=()
+          mapfile -t changed_files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA")
+
+          for path in "${changed_files[@]}"; do
+            [[ -f "$path" ]] || continue
+
+            if [[ "$path" == *.plist ]]; then
+              python3 - "$path" <<'PY'
+          import plistlib
+          import sys
+
+          path = sys.argv[1]
+          with open(path, 'rb') as handle:
+              plistlib.load(handle)
+          PY
+            fi
+
+            first_line=$(head -n 1 -- "$path" || true)
+            if grep -Eq '^#!.*(^|[[:space:]/])(bash|sh|dash|zsh|ksh)([[:space:]]|$)' <<<"$first_line"; then
+              shellcheck --severity=error -- "$path"
+            fi
+          done
+
+      - name: Validate PR body contract
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import re
+
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as handle:
+              body = json.load(handle)['pull_request'].get('body') or ''
+
+          headings = [
+              '## Implementato',
+              '## Non implementato (ancora)',
+          ]
+          for heading in headings:
+              if len(re.findall(rf'(?m)^{re.escape(heading)}[ \t]*$', body)) != 1:
+                  raise SystemExit(f'PR body must contain exactly one heading: {heading}')
+
+          for heading in headings:
+              section = body.split(heading, 1)[1]
+              section = re.split(r'(?m)^#{1,6}[ \t]+', section, maxsplit=1)[0]
+              if not re.search(r'(?m)^\s*[-*+]\s+\S+', section):
+                  raise SystemExit(f'PR section must contain a bullet: {heading}')
+          PY

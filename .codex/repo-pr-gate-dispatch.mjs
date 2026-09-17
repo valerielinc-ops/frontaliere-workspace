@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { shellExecutableText } from '../bin/shell-command-scanner.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -46,6 +47,16 @@ export function explicitRepository(command) {
  */
 export function hasExplicitRepositoryFlag(command) {
   return REPO_FLAG_TEST_RE.test(String(command ?? ''));
+}
+
+/**
+ * @param {string} command
+ * @returns {boolean}
+ */
+export function hasPullRequestCreationCommand(command) {
+  return /(?:^|[;&|()\n]\s*)(?:command\s+)?gh\s+pr\s+create\b/.test(
+    shellExecutableText(command),
+  );
 }
 
 /**
@@ -83,7 +94,7 @@ function main() {
   }
 
   const parsed = parsePayload(rawPayload.trim());
-  if (!parsed || !parsed.command.includes('gh pr create')) process.exit(0);
+  if (!parsed || !hasPullRequestCreationCommand(parsed.command)) process.exit(0);
 
   const workspaceRoot = process.env.WORKSPACE || ROOT;
   const repository = explicitRepository(parsed.command);
