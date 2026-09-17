@@ -575,6 +575,51 @@ test('conserva le subscription webhook, deduplica le delivery e consegna gli sta
   }
 });
 
+test('riconcilia subito una subscription per una PR già mergiata senza aspettare il webhook', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-initial-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return fakeResponse(200, JSON.stringify({
+      number: 42,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-17T01:43:19Z',
+      updated_at: '2026-09-17T01:43:19Z',
+      head: { sha: 'merged-before-subscribe' },
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'initial-reconcile-secret',
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const result = await coordinator.eventSubscription({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 42,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+    });
+    assert.deepEqual(calls, ['https://api.github.com/repos/owner/repo/pulls/42']);
+    assert.equal(result.reconciliation.source, 'reconciliation');
+    assert.equal(result.subscription.pendingEvents, 1);
+    assert.equal(broker.pendingEvent(result.subscription.id).state, 'merged');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('audita una delivery PR distinguendo target, stato logico e waitFor', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-audit-'));
   const stateFile = join(stateDirectory, 'events.json');
@@ -898,7 +943,10 @@ test('normalizza il filename del workflow nel nome visualizzato e mette in cache
   globalThis.fetch = async (url) => {
     const requestUrl = String(url);
     calls.push(requestUrl);
-    assert.equal(requestUrl, 'https://api.github.com/repos/owner/repo/actions/workflows?per_page=100');
+    if (requestUrl !== 'https://api.github.com/repos/owner/repo/actions/workflows?per_page=100') {
+      assert.match(requestUrl, /\/repos\/owner\/repo\/actions\/runs\?/);
+      return fakeResponse(200, JSON.stringify({ workflow_runs: [] }), { 'x-ratelimit-remaining': '100' });
+    }
     return fakeResponse(200, JSON.stringify({
       workflows: [{ name: 'Deploy production', path: '.github/workflows/deploy.yml' }],
     }), { 'x-ratelimit-remaining': '100' });
@@ -958,7 +1006,7 @@ test('normalizza il filename del workflow nel nome visualizzato e mette in cache
 
     const second = await coordinator.eventSubscription(spec);
     assert.equal(second.subscription.id, first.subscription.id);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(stateDirectory, { recursive: true, force: true });
@@ -993,6 +1041,7 @@ test('i comandi help delle subscription non avviano il coordinatore', () => {
   });
   assert.equal(eventsHelp.status, 0);
   assert.match(eventsHelp.stdout, /audit/);
+  assert.match(eventsHelp.stdout, /result/);
 });
 
 test('mantiene l ultima attività, segnala stalled e rinnova una subscription senza alterare gli interessi', () => {
@@ -1039,6 +1088,83 @@ test('mantiene l ultima attività, segnala stalled e rinnova una subscription se
     assert.equal(renewed.subscription.lastActivityState, 'in_progress');
     assert.equal(broker.metrics.subscriptionsRenewed, 1);
     assert.equal(DEFAULT_STALLED_AFTER_MS > 0, true);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('separa target stalled e listener vivo con heartbeat recente', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-listener-liveness-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-17T12:00:00Z');
+  const broker = new GitHubEventBroker({
+    stateFile,
+    webhookSecret: 'listener-liveness-secret',
+    now: () => nowMs,
+  });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9013',
+      waitFor: ['success'],
+      ttlSeconds: 300,
+      stalledAfterMs: 30_000,
+    });
+    nowMs += 31_000;
+    const status = broker.status({
+      listenerAttached: new Set([subscription.id]),
+      listenerInfo: () => [{ lastHeartbeatAt: new Date(nowMs - 1_000).toISOString() }],
+    });
+    const current = status.subscriptions[0];
+    assert.equal(current.stalled, true);
+    assert.equal(current.targetStalled, true);
+    assert.equal(current.listenerAlive, true);
+    assert.equal(current.listenerHeartbeatRecent, true);
+    assert.equal(current.listenerDead, false);
+    assert.equal(status.summary.stalledTargetSubscriptions, 1);
+    assert.equal(status.summary.listenerAliveSubscriptions, 1);
+    assert.equal(status.summary.listenerDeadSubscriptions, 0);
+    assert.match(current.compactLine, /listener vivo/);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('rimuove una subscription once dopo l ack di un evento terminale e conserva il result audit', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-once-terminal-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'once-terminal-secret' });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 44,
+      waitFor: ['merged'],
+      ttlSeconds: 300,
+      once: true,
+    });
+    const event = normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'once-terminal-44',
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 44, merged: true },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(event).matchedSubscriptionIds, [subscription.id]);
+    const acknowledgement = broker.acknowledge(subscription.id, event.id);
+    assert.equal(acknowledgement.ok, true);
+    assert.equal(acknowledgement.subscriptionRemoved, true);
+    assert.equal(broker.getSubscription(subscription.id), null);
+    assert.equal(broker.status().subscriptions.length, 0);
+    const result = broker.audit({ subscriptionId: subscription.id, limit: 1 });
+    assert.equal(result.eventCount, 1);
+    assert.equal(result.events[0].id, event.id);
+    assert.deepEqual(result.events[0].matchedSubscriptionIds, [subscription.id]);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

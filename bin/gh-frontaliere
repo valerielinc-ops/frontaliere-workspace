@@ -56,6 +56,7 @@ function printHelp(topic = '') {
       '  listen     attende l evento in modo event-driven e invia l ack',
       '  show       mostra una subscription o tutte quelle di --run-id/--repo',
       '  audit      mostra le ultime delivery normalizzate e il motivo del match',
+      '  result     mostra l ultimo evento consegnato a una subscription',
       '  unsubscribe rimuove una subscription',
       '  status     stato compatto (usa --full solo per il dettaglio completo)',
       '  summary    riepilogo compatto di listener, duplicati, pending ed ETA',
@@ -74,8 +75,8 @@ function printHelp(topic = '') {
         : [
           'Uso: bin/gh-frontaliere <comando gh...>',
           '     bin/gh-frontaliere status [--compact|--full]',
-          '     bin/gh-frontaliere events <wait|subscribe|listen|show|audit|health|unsubscribe|status|summary|gc|reconcile>',
-          '     bin/gh-frontaliere health [--identity default|nanako] [--alert-only]',
+          '     bin/gh-frontaliere events <wait|subscribe|listen|show|audit|result|health|unsubscribe|status|summary|gc|reconcile>',
+          '     bin/gh-frontaliere health [--identity default|nanako] [--alert-only] [--strict]',
           '     bin/gh-frontaliere confirm-cancel <request-id>',
           '',
           'Le richieste GitHub passano sempre dal coordinatore locale.',
@@ -128,13 +129,13 @@ function parseEventFilters(optionArgs) {
   assertNoUnknownOptions(optionArgs, new Set([
     '--repo', '--resource', '--run-id', '--run', '--number', '--agent-id', '--limit',
     '--mine', '--active', '--pending-only', '--stalled-only', '--compact', '--full', '--sha',
-    '--branch', '--workflow', '--environment', '--deployment-id',
+    '--branch', '--workflow', '--environment', '--deployment-id', '--subscription-id',
   ]));
   const filters = {};
   for (const [name, key] of [
     ['--repo', 'repo'], ['--resource', 'resource'], ['--number', 'number'], ['--sha', 'sha'],
     ['--branch', 'branch'], ['--workflow', 'workflow'], ['--environment', 'environment'],
-    ['--deployment-id', 'deploymentId'],
+    ['--deployment-id', 'deploymentId'], ['--subscription-id', 'subscriptionId'],
   ]) {
     const value = optionValue(optionArgs, name);
     if (value !== null) filters[key] = value;
@@ -342,15 +343,28 @@ async function runEventsCommand(args, identity) {
     printJson(await eventAudit(filters, { identity }), { pretty: full || !optionArgs.includes('--compact') });
     return;
   }
+  if (subcommand === 'result') {
+    if (!args[2] || args.length > 3) throw new Error('uso: bin/gh-frontaliere events result <subscription-id>');
+    printJson(await eventAudit({ subscriptionId: args[2], limit: 1 }, { identity }), { pretty: false });
+    return;
+  }
   if (subcommand === 'health') {
     const optionArgs = args.slice(2);
     for (const value of optionArgs) {
-      if (value !== '--alert-only') throw new Error('uso: bin/gh-frontaliere events health [--alert-only]');
+      if (value !== '--alert-only' && value !== '--strict') {
+        throw new Error('uso: bin/gh-frontaliere events health [--alert-only] [--strict]');
+      }
     }
     const { checkCoordinatorHealth } = await import('./github-coordinator-health.mjs');
     const result = await checkCoordinatorHealth(identity || 'default');
-    if (!optionArgs.includes('--alert-only') || !result.ok) printJson(result);
-    process.exitCode = result.ok ? 0 : 1;
+    const strict = optionArgs.includes('--strict');
+    const strictFindings = strict ? strictHealthFindings(result) : [];
+    const output = strict
+      ? { ...result, strict: { enabled: true, ok: strictFindings.length === 0, findings: strictFindings } }
+      : result;
+    const healthy = result.ok && (!strict || strictFindings.length === 0);
+    if (!optionArgs.includes('--alert-only') || !healthy) printJson(output);
+    process.exitCode = healthy ? 0 : 1;
     return;
   }
   if (subcommand === 'show') {
@@ -403,7 +417,25 @@ async function runEventsCommand(args, identity) {
     printJson(await reconcileEvents(args[2], { identity }));
     return;
   }
-  throw new Error('uso: bin/gh-frontaliere events {wait|subscribe|listen|show|audit|health|unsubscribe|status|summary|gc|reconcile}');
+  throw new Error('uso: bin/gh-frontaliere events {wait|subscribe|listen|show|audit|result|health|unsubscribe|status|summary|gc|reconcile}');
+}
+
+function strictHealthFindings(result) {
+  const identities = Array.isArray(result?.identities) ? result.identities : [result];
+  return identities.flatMap((identityResult) => {
+    const identity = identityResult?.identity || 'default';
+    const events = identityResult?.status?.events || {};
+    const findings = [];
+    for (const [field, code, label] of [
+      ['pendingEvents', 'pending_events', 'eventi pending'],
+      ['stalledSubscriptions', 'stalled_target_subscriptions', 'target stalled'],
+      ['orphanedSubscriptions', 'orphaned_subscriptions', 'subscription orfane'],
+    ]) {
+      const count = Number(events[field] || 0);
+      if (count > 0) findings.push({ identity, code, count, message: `${identity}: ${count} ${label}` });
+    }
+    return findings;
+  });
 }
 
 async function confirmCancellationFromOwner(requestId, identity) {
@@ -448,14 +480,20 @@ try {
   if (command === 'help' || command === undefined || (command === 'status' && args.includes('--help'))) {
     printHelp(command === 'help' && args[1] === 'events' ? 'events' : '');
   } else if (command === 'health') {
-    const allowed = new Set(['--alert-only']);
+    const allowed = new Set(['--alert-only', '--strict']);
     for (const value of args.slice(1)) {
-      if (!allowed.has(value)) throw new Error('uso: bin/gh-frontaliere health [--alert-only]');
+      if (!allowed.has(value)) throw new Error('uso: bin/gh-frontaliere health [--alert-only] [--strict]');
     }
     const { checkHealth } = await import('./github-coordinator-health.mjs');
     const result = await checkHealth(identity ? [identity] : undefined);
-    if (!args.includes('--alert-only') || !result.ok) printJson(result);
-    process.exitCode = result.ok ? 0 : 1;
+    const strict = args.includes('--strict');
+    const strictFindings = strict ? strictHealthFindings(result) : [];
+    const output = strict
+      ? { ...result, strict: { enabled: true, ok: strictFindings.length === 0, findings: strictFindings } }
+      : result;
+    const healthy = result.ok && (!strict || strictFindings.length === 0);
+    if (!args.includes('--alert-only') || !healthy) printJson(output);
+    process.exitCode = healthy ? 0 : 1;
   } else if (command === 'status' || command === 'ping') {
     const response = await sendRequest({
       type: command === 'status' ? 'status' : 'ping',
