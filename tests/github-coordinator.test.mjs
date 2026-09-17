@@ -117,7 +117,10 @@ import { appendFileSync, closeSync, openSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
-const mode = args[0] === 'pr' && args[1] === 'review' ? 'review' : args.includes('large') ? 'large' : 'read';
+const mode = args[0] === 'pr' && args[1] === 'review' ? 'review'
+  : args.includes('large') ? 'large'
+    : args.includes('stdin-eof') ? 'stdin-eof'
+      : 'read';
 const logFile = join(process.cwd(), 'invocations.jsonl');
 let record = { args };
 let lockFile;
@@ -139,6 +142,11 @@ if (mode === 'large') {
     try { unlinkSync(lockFile); } catch {}
     process.stdout.write('reviewed\\n');
   }, 20);
+} else if (mode === 'stdin-eof') {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { input += chunk; });
+  process.stdin.on('end', () => process.stdout.write('stdin-eof:' + input.length + '\\n'));
 } else {
   process.stdout.write('read\\n');
 }
@@ -401,6 +409,30 @@ test('esegue due gh pr review identici, li serializza e invalida la cache CLI', 
     assert.equal(invocations.length, 2);
     assert.deepEqual(invocations.map(({ args }) => args), [request.args, request.args]);
     assert.equal(invocations.every(({ overlapping }) => overlapping === false), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('chiude stdin per le CLI che lo usano come input', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-stdin-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const response = await coordinator.submit({
+    type: 'exec',
+    identity: 'test',
+    args: ['pr', 'comment', '42', '--body-file', '-', 'stdin-eof'],
+    cwd: directory,
+  });
+
+  try {
+    assert.equal(response.ok, true);
+    assert.match(response.stdout, /^stdin-eof:0\n$/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

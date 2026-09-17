@@ -1828,7 +1828,9 @@ export class GitHubCoordinator {
           GH_PAGER: 'cat',
           FRONTALIERE_GH_BROKER_ACTIVE: '1',
         },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // stdin is never fed by the client protocol: an open pipe makes any
+        // `--input -` / `--body-file -` hang forever and block the queue.
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       const stdout = [];
       const stderr = [];
