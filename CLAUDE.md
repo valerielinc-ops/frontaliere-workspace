@@ -75,7 +75,8 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   invocare solo `gh ...` tramite lo shim oppure `bin/gh-frontaliere ...`.
 - Per Actions usa `gh workflow run`, `gh run list` e `gh run view` attraverso il
   coordinatore; non trasferire dispatch o polling nel browser e non usare
-  `gh pr checks --watch`. Se una richiesta va in timeout o quota, controlla
+  `gh pr checks --watch` o `gh run watch`. Se una richiesta va in timeout o
+  quota, controlla
   `bin/gh-frontaliere status`, lascia applicare backoff/coda e ritenta tramite
   lo stesso processo; non cambiare canale.
 - Per attendere lo stato di una PR, workflow o deploy usa le subscription
@@ -128,8 +129,9 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   di rate limit), la deduplicazione GET, la cache breve e il backoff sono
   applicati prima del binario reale. Non invocare direttamente
   `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
-- `gh pr checks --watch` e' vietato: un solo osservatore condiviso deve seguire
-  una PR. Controlla il daemon con `bin/gh-frontaliere status` (oppure
+- `gh pr checks --watch` e `gh run watch` sono vietati: un solo osservatore
+  condiviso deve seguire una PR o una run. Controlla il daemon con
+  `bin/gh-frontaliere status` (oppure
   `--compact` esplicito).
 - I coordinatori `default` e `nanako` sono servizi launchd persistenti con label
   `ch.frontaliere.github-coordinator-default` e
@@ -253,6 +255,10 @@ Gli hook devono restare attivi dalla root in `.claude/settings.json` e in
 `.codex/hooks.json`; puntano agli script del sito per gate PR, pulizia worktree,
 registrazione e attesa delle PR. Un blocco del gate e' feedback da correggere,
 non un errore da aggirare.
+
+La guardia GitHub risale dalla directory corrente alla root: si applica anche
+dai checkout figli e dai worktree. Fuori dal workspace, se non trova lo script,
+resta fail-open per non bloccare sessioni legittime.
 
 Se modifichi gli hook nel sito, aggiorna anche entrambe le configurazioni della
 root. Per il contratto completo leggi la sezione `Hook: sollevati nella root`

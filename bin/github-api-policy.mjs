@@ -51,8 +51,32 @@ function directNetworkCall(command) {
 }
 
 function ghWatchInvocation(command) {
-  const ghPath = '(?:^|[;&|()\\n]\\s*)(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
-  return new RegExp(`${ghPath}\\s+pr\\s+checks\\b[^\\n]*--watch`).test(shellExecutableText(command));
+  const ghPath = '(?:^|[;&|()\\n])\\s*(?:(?:do|then)\\s+)?(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
+  return new RegExp(
+    `${ghPath}\\s+(?:pr\\s+checks\\b[^\\n]*--watch|run\\s+watch\\b)`,
+  ).test(shellExecutableText(command));
+}
+
+const GH_STATUS_COMMAND = '(?:pr\\s+(?:view|checks)\\b|run\\s+view\\b)';
+
+export function pollingGhInvocation(command) {
+  const executableText = shellExecutableText(command);
+  const ghPath = '(?:^|[;&|()\\n])\\s*(?:(?:do|then)\\s+)?(?:command\\s+)?(?:[^\\s;&|()]+/)?gh';
+  const statusInvocation = `${ghPath}\\s+${GH_STATUS_COMMAND}`;
+
+  if (!new RegExp(statusInvocation).test(executableText)) return false;
+
+  const followedBySleep = new RegExp(
+    `${statusInvocation}[^\\n]*?(?:[;&|]|\\n)\\s*sleep\\b`,
+  ).test(executableText);
+  if (followedBySleep) return true;
+
+  const loopPattern = /\b(?:while|until|for)\b[\s\S]*?\bdo\b([\s\S]*?)\bdone\b/g;
+  for (const [, loopBody] of executableText.matchAll(loopPattern)) {
+    if (new RegExp(`${ghPath}\\s+${GH_STATUS_COMMAND}`).test(loopBody)) return true;
+  }
+
+  return false;
 }
 
 export function explicitGhApiInvocation(command) {
@@ -63,7 +87,12 @@ export function explicitGhApiInvocation(command) {
 }
 
 function isAllowed(command) {
-  if (directNetworkCall(command) || ghWatchInvocation(command) || explicitGhApiInvocation(command)) return false;
+  if (
+    directNetworkCall(command)
+    || ghWatchInvocation(command)
+    || pollingGhInvocation(command)
+    || explicitGhApiInvocation(command)
+  ) return false;
   return command.includes('bin/gh-frontaliere')
     || command.includes('bin/gh-nanako')
     || command.includes('github-coordinator')
@@ -77,6 +106,7 @@ export function containsDirectCall(command) {
   const trustedPlainGh = hasPlainGhInvocation(command) && resolvedGhShim();
   return directNetworkCall(executableText)
     || ghWatchInvocation(command)
+    || pollingGhInvocation(executableText)
     || explicitGhApiInvocation(command)
     || (ghApi.test(executableText) && !trustedPlainGh);
 }
@@ -85,9 +115,22 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const command = commandFromStdin();
   if (!command || isAllowed(command) || !containsDirectCall(command)) process.exit(0);
 
-  process.stderr.write(
-    'GitHub API diretto bloccato dal coordinatore condiviso. '
-    + 'Usa `bin/gh-frontaliere ...`; per lo stato PR non usare `--watch`.\n',
-  );
+  if (ghWatchInvocation(command)) {
+    process.stderr.write(
+      'Osservazione GitHub bloccata: non usare `gh pr checks --watch` o `gh run watch`. '
+      + 'Usa `bin/gh-frontaliere events subscribe ... && bin/gh-frontaliere events listen <id>`.\n',
+    );
+  } else if (pollingGhInvocation(command)) {
+    process.stderr.write(
+      'Polling GitHub bloccato: non ripetere `gh pr view`, `gh run view` o `gh pr checks` '
+      + 'in loop o prima di `sleep`; usa `bin/gh-frontaliere events subscribe ... '
+      + '&& bin/gh-frontaliere events listen <id>`.\n',
+    );
+  } else {
+    process.stderr.write(
+      'GitHub API diretto bloccato dal coordinatore condiviso. '
+      + 'Usa `bin/gh-frontaliere ...`.\n',
+    );
+  }
   process.exit(2);
 }
