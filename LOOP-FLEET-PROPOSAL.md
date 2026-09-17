@@ -95,6 +95,29 @@ attese event-driven. La suite pulita sulla `main` del workspace passa 38/38
 test; la cancellazione di run Actions resta correttamente protetta dalla
 seconda conferma del proprietario.
 
+Rettifica verificata alle 06:57 UTC: il daemon `default` è operativo con 50
+subscription, 39 listener registrati e 45 listener attivi, ma segnala 11
+subscription senza listener, 4 eventi pending, 8 target stalled e 29 errori
+socket dall’avvio del processo. Il socket risponde e la coda è vuota, quindi
+non è un outage totale; il valore `ok=true` non va però letto come salute
+completa finché questi warning non hanno una gestione automatica dimostrabile.
+La `origin/main` del workspace è stata aggiornata da #60/#62 e la sua suite
+contiene 40/41 test: #63 corregge la sola fixture della subscription privata e
+passa 41/41 in locale.
+
+Rettifica verificata sul sito: il run [35192265398](https://github.com/valerielinc-ops/frontaliere-si-o-no/actions/runs/35192265398)
+di #8982 è fallito nello scaricamento dei trusted helper con HTTP 403
+`API rate limit exceeded for installation`, prima dell’esecuzione del codice
+della PR. Il retry esistente usa la stessa sorgente API e quindi non è ancora
+un recupero affidabile sotto quota esaurita; #8982 deve restare aperta per il
+retry automatico, senza merge manuale.
+
+Durante la stessa finestra `launchd` ha osservato la checkout root sporca e i
+log hanno registrato riavvii del supervisore, un marker di conflitto transitorio
+e un errore `ReferenceError` nel codice non ancora canonico. La checkout
+pulita è sintatticamente valida; questo conferma che il daemon non dovrebbe
+seguire direttamente file di lavoro modificabili dagli agenti.
+
 La misura live è però più istruttiva della suite: `default` e `nanako` sono
 attualmente gestiti da `launchd` con protocollo 5 e secret webhook configurato.
 `default` ha 13 subscription senza listener, 8 stalled e 4 eventi pending;
