@@ -812,6 +812,15 @@ function renderGhApiResponse(pages, parsed) {
   return { ok: true, output: parsed.silent ? '' : output };
 }
 
+function isPastRateLimitReset(observed, now = Date.now()) {
+  const reset = observed?.reset;
+  if (reset === null || reset === undefined) return false;
+  if (typeof reset !== 'number' && (typeof reset !== 'string' || reset.trim() === '')) return false;
+  const resetSeconds = Number(reset);
+  // GitHub reports reset as epoch seconds while Date.now() returns milliseconds.
+  return Number.isFinite(resetSeconds) && resetSeconds * 1_000 < now;
+}
+
 export class GitHubCoordinator {
   constructor({ identity, token, realGh, socket, eventBroker = null }) {
     this.identity = identity;
@@ -986,11 +995,15 @@ export class GitHubCoordinator {
 
   effectiveMaxInFlight() {
     let effective = MAX_IN_FLIGHT;
+    const now = Date.now();
     for (const [bucket, observed] of this.buckets.entries()) {
       if (bucket.endsWith('-anonymous')) continue;
       const remaining = Number(observed.remaining);
       if (!Number.isFinite(remaining)) continue;
-      if (remaining <= 0) return 1;
+      if (remaining <= 0) {
+        if (isPastRateLimitReset(observed, now)) continue;
+        return 1;
+      }
 
       const limit = Number(observed.limit);
       if (!Number.isFinite(limit) || limit <= 0) continue;
@@ -1007,7 +1020,9 @@ export class GitHubCoordinator {
     const details = requestApiDetails(request);
     const bucket = request.bucket || classifyBucket(details.path, details.method);
     const observed = this.buckets.get(bucket);
-    return observed?.remaining === '0' && this.anonymousBudgetAvailable();
+    return observed?.remaining === '0'
+      && !isPastRateLimitReset(observed)
+      && this.anonymousBudgetAvailable();
   }
 
   setEventNotifier(notifier) {

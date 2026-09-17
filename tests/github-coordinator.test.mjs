@@ -1653,6 +1653,37 @@ test('adatta la concorrenza delle letture al margine del rate limit', () => {
   assert.equal(coordinator.effectiveMaxInFlight(), 1);
 });
 
+test('ignora un remaining azzerato solo dopo la scadenza del reset', () => {
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: process.execPath,
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+
+  coordinator.buckets.set('core', {
+    remaining: '0',
+    limit: '5000',
+    reset: String(nowSeconds - 60),
+  });
+  assert.equal(coordinator.effectiveMaxInFlight(), 8);
+
+  coordinator.buckets.set('core', {
+    remaining: '0',
+    limit: '5000',
+    reset: String(nowSeconds + 60),
+  });
+  assert.equal(coordinator.effectiveMaxInFlight(), 1);
+
+  coordinator.buckets.set('core', {
+    remaining: '0',
+    limit: '5000',
+    reset: 'not-a-number',
+  });
+  assert.equal(coordinator.effectiveMaxInFlight(), 1);
+});
+
 test('usa la corsia anonima solo come fallback per una lettura REST pubblica esaurita', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
