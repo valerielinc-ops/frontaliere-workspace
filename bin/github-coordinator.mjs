@@ -26,6 +26,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   normalizeIdentity,
@@ -201,6 +202,19 @@ export function retryDelayMilliseconds({ headers = {}, remaining, resetAt, attem
 
   const base = Math.min(5 * 60 * 1_000, 60 * 1_000 * (2 ** Math.max(0, attempt - 1)));
   return base + Math.floor(Math.max(0, Math.min(1, random())) * 1_000);
+}
+
+function spillCliOutput(buffer) {
+  const dir = join(tmpdir(), 'frontaliere-gh-cli-output');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = join(dir, `${randomUUID()}.out`);
+  const fd = openSync(file, 'w', 0o600);
+  try {
+    writeSync(fd, buffer);
+  } finally {
+    closeSync(fd);
+  }
+  return file;
 }
 
 function trimOutput(value, maxBytes = MAX_BODY_BYTES) {
@@ -1226,7 +1240,7 @@ export class GitHubCoordinator {
         if (this.pendingCli.get(cliKey) === promise) this.pendingCli.delete(cliKey);
       }).catch(() => {});
       promise.then((response) => {
-        if (response?.ok) {
+        if (response?.ok && !response.stdoutFile) {
           this.cliCache.set(cliKey, {
             response,
             expiresAt: Date.now() + CLI_CACHE_TTL_MS,
@@ -1538,15 +1552,20 @@ export class GitHubCoordinator {
         stderr: `${error.message}\n`,
       }));
       child.on('close', (exitCode, signal) => {
-        const out = Buffer.concat(stdout).toString('utf8');
+        const outBuffer = Buffer.concat(stdout);
+        const out = outBuffer.toString('utf8');
         const err = Buffer.concat(stderr).toString('utf8');
         const combined = `${out}\n${err}`;
         const looksLimited = exitCode !== 0 && bodyLooksRateLimited(combined);
+        // Output oltre il cap del protocollo (log di job da centinaia di MB):
+        // spill su file 0600, il client lo riversa su stdout e lo cancella.
+        const stdoutFile = outBuffer.length > MAX_BODY_BYTES ? spillCliOutput(outBuffer) : null;
         resolvePromise({
           ok: exitCode === 0,
           exitCode: exitCode ?? 1,
           signal: signal || null,
-          stdout: trimOutput(out),
+          stdout: stdoutFile ? '' : trimOutput(out),
+          stdoutFile,
           stderr: trimOutput(err),
           rateLimited: looksLimited,
           retryAfterMs: looksLimited ? 60_000 : undefined,
@@ -1618,8 +1637,8 @@ function cliCommandIsMutation(args) {
     return parsed ? !isSafeRead(parsed.method) : args.some((value) => value === '--method' || value === '-X' || value.startsWith('--method='));
   }
   if (args[0] === 'graphql') return args.includes('--field') || args.includes('-f') || args.includes('--raw-field');
-  const mutating = new Set(['create', 'comment', 'close', 'reopen', 'merge', 'edit', 'delete', 'rerun', 'cancel', 'enable', 'disable', 'dispatch']);
-  return mutating.has(args[1]);
+  const readOnly = new Set(['list', 'view', 'status', 'diff', 'checks', 'log']);
+  return !readOnly.has(args[1]);
 }
 
 function readTokenAndStart(identity) {

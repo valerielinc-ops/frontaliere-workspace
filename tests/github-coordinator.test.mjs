@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -70,6 +78,43 @@ function fakeResponse(status, body, headers = {}) {
   };
 }
 
+function createFakeGh(directory) {
+  const script = join(directory, 'fake-gh.mjs');
+  writeFileSync(script, `#!/usr/bin/env node
+import { appendFileSync, closeSync, openSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+
+const args = process.argv.slice(2);
+const mode = args[0] === 'pr' && args[1] === 'review' ? 'review' : args.includes('large') ? 'large' : 'read';
+const logFile = join(process.cwd(), 'invocations.jsonl');
+let record = { args };
+let lockFile;
+if (mode === 'review') {
+  lockFile = join(process.cwd(), 'review.lock');
+  try {
+    const fd = openSync(lockFile, 'wx');
+    closeSync(fd);
+    record = { ...record, overlapping: false };
+  } catch {
+    record = { ...record, overlapping: true };
+  }
+}
+appendFileSync(logFile, JSON.stringify(record) + '\\n');
+if (mode === 'large') {
+  process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1));
+} else if (mode === 'review') {
+  setTimeout(() => {
+    try { unlinkSync(lockFile); } catch {}
+    process.stdout.write('reviewed\\n');
+  }, 20);
+} else {
+  process.stdout.write('read\\n');
+}
+`);
+  chmodSync(script, 0o700);
+  return script;
+}
+
 test('classifica i bucket GitHub senza confondere search e GraphQL', () => {
   assert.equal(classifyBucket('/graphql'), 'graphql');
   assert.equal(classifyBucket('/search/issues'), 'search');
@@ -83,6 +128,134 @@ test('considera sicure solo le letture', () => {
   assert.equal(isSafeRead('HEAD'), true);
   assert.equal(isSafeRead('POST'), false);
   assert.equal(isSafeRead('PATCH'), false);
+});
+
+test('classifica le letture CLI note e tratta i verbi sconosciuti come mutation', () => {
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: process.execPath,
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+  const isMutation = (args) => coordinator.jobIsMutation({ request: { type: 'exec', args } });
+
+  for (const [noun, verb] of [
+    ['pr', 'list'],
+    ['pr', 'view'],
+    ['pr', 'checks'],
+    ['run', 'list'],
+    ['run', 'view'],
+    ['workflow', 'list'],
+    ['workflow', 'view'],
+    ['issue', 'list'],
+    ['issue', 'view'],
+  ]) {
+    assert.equal(isMutation([noun, verb]), false, `gh ${noun} ${verb}`);
+  }
+  assert.equal(isMutation(['pr', 'review']), true);
+  assert.equal(isMutation(['workflow', 'run']), true);
+  assert.equal(isMutation(['future', 'verb']), true);
+});
+
+test('esegue due gh pr review identici, li serializza e invalida la cache CLI', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-review-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  coordinator.cliCache.set('stale-entry', { response: { ok: true }, expiresAt: Date.now() + 10_000 });
+  const request = {
+    type: 'exec',
+    identity: 'test',
+    args: ['pr', 'review', '42', '--approve', '--repo', 'owner/repo'],
+    cwd: directory,
+  };
+
+  try {
+    const [first, second] = await Promise.all([coordinator.submit(request), coordinator.submit(request)]);
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(coordinator.metrics.cliCacheHits, 0);
+    assert.equal(coordinator.cliCache.size, 0);
+    const invocations = readFileSync(join(directory, 'invocations.jsonl'), 'utf8')
+      .trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(invocations.length, 2);
+    assert.deepEqual(invocations.map(({ args }) => args), [request.args, request.args]);
+    assert.equal(invocations.every(({ overlapping }) => overlapping === false), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('mantiene la cache per le letture CLI piccole e deduplica gh pr view', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-read-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const request = {
+    type: 'exec',
+    identity: 'test',
+    args: ['pr', 'view', '42', '--repo', 'owner/repo'],
+    cwd: directory,
+  };
+
+  try {
+    const first = await coordinator.submit(request);
+    const second = await coordinator.submit(request);
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.fromCache, true);
+    assert.equal(coordinator.metrics.cliCacheHits, 1);
+    const invocations = readFileSync(join(directory, 'invocations.jsonl'), 'utf8').trim().split('\n');
+    assert.equal(invocations.length, 1);
+    assert.equal(coordinator.cliCache.size, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('non mette in cache l output CLI spillato e non riusa il file del primo consumer', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-spill-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const request = {
+    type: 'exec',
+    identity: 'test',
+    args: ['run', 'view', 'large'],
+    cwd: directory,
+  };
+
+  try {
+    const first = await coordinator.submit(request);
+    assert.equal(first.ok, true);
+    assert.ok(first.stdoutFile);
+    assert.equal(coordinator.cliCache.size, 0);
+    assert.equal(existsSync(first.stdoutFile), true);
+    unlinkSync(first.stdoutFile);
+
+    const second = await coordinator.submit(request);
+    assert.equal(second.ok, true);
+    assert.ok(second.stdoutFile);
+    assert.notEqual(second.stdoutFile, first.stdoutFile);
+    assert.equal(existsSync(second.stdoutFile), true);
+    assert.equal(second.fromCache, undefined);
+    assert.equal(coordinator.cliCache.size, 0);
+    unlinkSync(second.stdoutFile);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('sospende ogni cancellazione Actions fino alla conferma separata del proprietario', async () => {
