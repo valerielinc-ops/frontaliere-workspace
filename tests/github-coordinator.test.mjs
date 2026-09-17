@@ -221,7 +221,6 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
     'status',
     'shutdown',
     'cancellation-details',
-    'confirm-cancellation',
     'events-status',
     'events-summary',
     'events-audit',
@@ -236,7 +235,7 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
     'event-ack',
   ];
   for (const type of shortRequestTypes) assert.equal(requestTimeoutMilliseconds({ type }), 3_000, type);
-  for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile']) {
+  for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile', 'confirm-cancellation']) {
     assert.equal(requestTimeoutMilliseconds({ type }), 15 * 60 * 1_000, type);
   }
 });

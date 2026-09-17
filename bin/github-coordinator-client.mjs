@@ -40,6 +40,7 @@ const NETWORK_REQUEST_TYPES = new Set([
   'exec',
   'events-subscribe',
   'events-reconcile',
+  'confirm-cancellation',
 ]);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
