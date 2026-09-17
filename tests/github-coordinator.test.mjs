@@ -1145,6 +1145,7 @@ test('rimuove una subscription once dopo l ack di un evento terminale e conserva
       waitFor: ['merged'],
       ttlSeconds: 300,
       once: true,
+      allowDuplicate: true,
     });
     const event = normalizeWebhookEvent({
       eventName: 'pull_request',
