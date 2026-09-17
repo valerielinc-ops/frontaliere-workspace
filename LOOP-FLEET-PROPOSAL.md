@@ -92,8 +92,8 @@ lavoro di confine: socket Unix separati per identità, token fuori dal
 protocollo, coda per le mutation, concorrenza bounded per le letture, cache e
 deduplicazione dei GET, backoff sui rate limit, webhook HMAC at-least-once e
 attese event-driven. La suite pulita sulla `main` del workspace passa 38/38
-test; la cancellazione di run Actions resta correttamente protetta dalla
-seconda conferma del proprietario.
+test nella prima verifica; la cancellazione di run Actions resta correttamente
+protetta dalla seconda conferma del proprietario.
 
 Rettifica verificata alle 06:57 UTC: il daemon `default` è operativo con 50
 subscription, 39 listener registrati e 45 listener attivi, ma segnala 11
@@ -120,7 +120,9 @@ seguire direttamente file di lavoro modificabili dagli agenti.
 
 La misura live è però più istruttiva della suite: `default` e `nanako` sono
 attualmente gestiti da `launchd` con protocollo 5 e secret webhook configurato.
-`default` ha 13 subscription senza listener, 8 stalled e 4 eventi pending;
+Alla verifica iniziale delle 06:28 UTC `default` aveva 13 subscription senza
+listener, 8 stalled e 4 eventi pending; la rettifica corrente sopra riporta il
+conteggio aggiornato a 11 senza listener e 8 target stalled.
 `events gc` in dry-run trova zero candidati sicuri, quindi non rimuove
 subscription uniche o eventi che potrebbero ancora essere consegnati. È una
 scelta safety corretta, ma manca un reaper autonomo basato su lease/owner/TTL
