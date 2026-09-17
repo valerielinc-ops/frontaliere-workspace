@@ -1041,7 +1041,34 @@ export class GitHubCoordinator {
       ? await this.resolveWorkflowFilename(spec?.repo, spec?.workflow)
       : spec?.workflow;
     const normalizedSpec = workflow === spec?.workflow ? spec : { ...spec, workflow };
-    return { ok: true, subscription: this.eventBroker.subscribe(normalizedSpec) };
+    const createdSubscription = this.eventBroker.subscribe(normalizedSpec);
+    let reconciliation = null;
+    if (!createdSubscription.sharedJoin && createdSubscription.remainingMs > 1_000) {
+      try {
+        reconciliation = await this.reconcileEvents(createdSubscription.id);
+      } catch (error) {
+        reconciliation = {
+          ok: false,
+          source: 'reconciliation',
+          error: {
+            code: error.code || 'event_reconcile_failed',
+            message: error.message,
+          },
+        };
+      }
+    }
+    const record = this.eventBroker.getSubscriptionRecord(createdSubscription.id);
+    return {
+      ok: true,
+      subscription: record
+        ? this.eventBroker.publicSubscription(record, {
+          listenerAttached: this.eventListenerInspector?.(record.id) ?? null,
+          listenerInfo: this.eventListenerInfoInspector?.(record.id) ?? [],
+          sharedJoin: createdSubscription.sharedJoin === true,
+        })
+        : createdSubscription,
+      ...(reconciliation ? { reconciliation } : {}),
+    };
   }
 
   eventSubscriptions(options = {}) {
@@ -1173,7 +1200,10 @@ export class GitHubCoordinator {
 
   acknowledgeEvent(subscriptionId, eventId) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
-    return this.eventBroker.acknowledge(subscriptionId, eventId);
+    const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
+    return this.eventBroker.acknowledge(subscriptionId, eventId, {
+      deferOnceRemoval: subscription?.shared === true,
+    });
   }
 
   renewEventSubscription(subscriptionId, options = {}) {
@@ -2101,7 +2131,8 @@ function readTokenAndStart(identity) {
       }
       const eventKey = `${listener.subscriptionId}:${request.eventId}`;
       const acknowledgement = coordinator.acknowledgeEvent(listener.subscriptionId, request.eventId);
-      const currentSubscription = coordinator.eventSubscriptionDetails(listener.subscriptionId).subscription;
+      const details = coordinator.eventSubscriptionDetails(listener.subscriptionId);
+      const currentSubscription = details.ok ? details.subscription : null;
       if (currentSubscription?.shared) listener.shared = true;
       const sharedDuplicateAcknowledgement = listener.shared
         && !acknowledgement.ok

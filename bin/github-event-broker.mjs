@@ -31,8 +31,9 @@ const MAX_EVENT_AUDIT = 256;
 const SEEN_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_LATENCY_SAMPLES = 200;
 const MIN_ESTIMATE_SAMPLES = 3;
+const LISTENER_HEARTBEAT_TIMEOUT_MS = 3 * 60 * 1_000;
 const TERMINAL_STATES = new Set([
-  'cancelled', 'completed', 'failed', 'merged', 'neutral', 'skipped', 'success',
+  'cancelled', 'closed', 'completed', 'failed', 'inactive', 'merged', 'neutral', 'skipped', 'success',
 ]);
 
 function brokerError(code, message) {
@@ -206,7 +207,28 @@ function listenerInfoValue(listenerInfo, subscriptionId) {
   return [];
 }
 
+function listenerLiveness(listenerAttached, listenerInfo, nowMs) {
+  const heartbeatAtMs = listenerInfo
+    .map((info) => Date.parse(info.lastHeartbeatAt || ''))
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0] ?? null;
+  const heartbeatAgeMs = heartbeatAtMs === null ? null : Math.max(0, nowMs - heartbeatAtMs);
+  const heartbeatRecent = listenerAttached === null
+    ? null
+    : listenerAttached === true
+      && (heartbeatAtMs === null || heartbeatAgeMs <= LISTENER_HEARTBEAT_TIMEOUT_MS);
+  const alive = listenerAttached === null ? null : listenerAttached === true && heartbeatRecent === true;
+  return {
+    heartbeatAt: heartbeatAtMs === null ? null : new Date(heartbeatAtMs).toISOString(),
+    heartbeatAgeMs,
+    heartbeatRecent,
+    alive,
+    dead: alive === null ? null : !alive,
+  };
+}
+
 function targetMatchesFilter(subscription, filters = {}) {
+  if (filters.subscriptionId && subscription.id !== String(filters.subscriptionId)) return false;
   if (filters.repo && subscription.repo !== filters.repo) return false;
   if (filters.resource && subscription.resource !== canonicalResource(filters.resource)) return false;
   if (filters.runId && String(subscription.runId) !== String(filters.runId)) return false;
@@ -237,14 +259,10 @@ function compactSubscriptionLine(subscription) {
       ? `PR #${subscription.number}`
       : subscription.repo;
   const state = subscription.stalled ? 'stalled' : subscription.waitState;
-  const latestHeartbeat = (subscription.listenerInfo || [])
-    .map((listenerInfo) => Date.parse(listenerInfo.lastHeartbeatAt || ''))
-    .filter(Number.isFinite)
-    .sort((left, right) => right - left)[0];
-  const listener = subscription.listenerAttached === true
-    ? `listener OK · heartbeat ${latestHeartbeat ? formatAge(Date.now() - latestHeartbeat) : 'n/d'}`
-    : subscription.listenerAttached === false
-      ? 'listener assente'
+  const listener = subscription.listenerAlive === true
+    ? `listener vivo · heartbeat ${subscription.listenerHeartbeatAgeMs === null ? 'n/d' : formatAge(subscription.listenerHeartbeatAgeMs)}`
+    : subscription.listenerAlive === false
+      ? 'listener morto/assente'
       : 'listener n/d';
   const last = Number.isFinite(subscription.staleSinceMs)
     ? formatAge(subscription.staleSinceMs)
@@ -261,6 +279,28 @@ function subscriptionIsStalled(subscription, nowMs) {
     && staleSinceMs !== null
     && staleSinceMs >= subscription.stalledAfterMs
     && !TERMINAL_STATES.has(subscription.lastActivityState);
+}
+
+function eventIsTerminal(event) {
+  return [event?.state, event?.conclusion, ...(event?.states || [])]
+    .map(normalizedState)
+    .some((state) => TERMINAL_STATES.has(state));
+}
+
+function pendingEventDetails(subscriptions, nowMs) {
+  return subscriptions.flatMap((subscription) => subscription.pending.map((event) => {
+    const receivedAtMs = Date.parse(event.receivedAt || '');
+    return {
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      receivedAt: event.receivedAt || null,
+      ageMs: Number.isFinite(receivedAtMs) ? Math.max(0, nowMs - receivedAtMs) : null,
+      remainingMs: Math.max(0, subscription.expiresAtMs - nowMs),
+      deadlineAt: subscription.expiresAt,
+      state: event.state || null,
+      action: event.action || null,
+    };
+  }));
 }
 
 function selectedSubscription(subscription, filters, listenerAttached, nowMs) {
@@ -375,6 +415,7 @@ function subscriptionPublic(
     ? Math.max(0, nowMs - lastActivityMs)
     : null;
   const stalled = subscriptionIsStalled(subscription, nowMs);
+  const liveness = listenerLiveness(listenerAttached, listenerInfo, nowMs);
   const waitState = subscription.pending.length > 0
     ? 'event_pending'
     : stalled
@@ -417,6 +458,7 @@ function subscriptionPublic(
     staleSinceMs,
     stalledAfterMs: subscription.stalledAfterMs,
     stalled,
+    targetStalled: stalled,
     remainingMs,
     waitBudgetMs,
     deadlineAt: subscription.expiresAt,
@@ -434,10 +476,17 @@ function subscriptionPublic(
     sharedObserverRecommended: duplicateTargetCount > 1,
     listenerAttached,
     listenerInfo,
+    listenerAlive: liveness.alive,
+    listenerDead: liveness.dead,
+    listenerHeartbeatAt: liveness.heartbeatAt,
+    listenerHeartbeatAgeMs: liveness.heartbeatAgeMs,
+    listenerHeartbeatRecent: liveness.heartbeatRecent,
     compactLine: compactSubscriptionLine({
       ...subscription,
       waitState,
       stalled,
+      listenerAlive: liveness.alive,
+      listenerHeartbeatAgeMs: liveness.heartbeatAgeMs,
       lastActivityAt: subscription.lastActivityAt,
       staleSinceMs,
       listenerAttached,
@@ -1182,9 +1231,12 @@ export class GitHubEventBroker {
     const listenerCount = listenerAttached === null
       ? null
       : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
-    const stalledSubscriptions = publicSubscriptions.filter(({ stalled }) => stalled);
+    const stalledSubscriptions = publicSubscriptions.filter(({ targetStalled }) => targetStalled);
     const pendingEvents = subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0);
+    const pendingEventDetailsList = pendingEventDetails(subscriptions, nowMs);
     const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
+    const listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
+    const listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
     const duplicateSubscriptions = duplicateGroups.reduce((total, group) => total + group.count - 1, 0);
     const alerts = [];
     if (pendingEvents > 0) alerts.push({ code: 'pending_events', count: pendingEvents });
@@ -1193,7 +1245,7 @@ export class GitHubEventBroker {
     }
     if (duplicateSubscriptions > 0) alerts.push({ code: 'duplicate_subscriptions', count: duplicateSubscriptions });
     if (stalledSubscriptions.length > 0) {
-      alerts.push({ code: 'stalled_subscriptions', count: stalledSubscriptions.length });
+      alerts.push({ code: 'stalled_subscriptions', scope: 'target', count: stalledSubscriptions.length });
     }
     const summaryLine = publicSubscriptions.length === 1
       ? publicSubscriptions[0].compactLine
@@ -1207,9 +1259,13 @@ export class GitHubEventBroker {
         ? subscription.sharedAgentIds
         : [subscription.agentId])).length,
       pendingEvents,
+      pendingEventDetails: pendingEventDetailsList,
       listenerCount,
+      listenerAliveSubscriptions: listenerAttached === null ? null : listenerAliveSubscriptions,
+      listenerDeadSubscriptions: listenerAttached === null ? null : listenerDeadSubscriptions,
       orphanedSubscriptions: listenerAttached === null ? null : orphanedSubscriptions,
       stalledSubscriptions: stalledSubscriptions.length,
+      stalledTargetSubscriptions: stalledSubscriptions.length,
       duplicateGroups,
       duplicateSubscriptions,
       alerts,
@@ -1246,6 +1302,7 @@ export class GitHubEventBroker {
         listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
       })),
       pendingEvents: subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
+      pendingEventDetails: pendingEventDetails(subscriptions, nowMs),
       metrics: { ...this.metrics },
       summary: this.summary({ ...filters, listenerAttached, listenerInfo }),
     };
@@ -1418,7 +1475,7 @@ export class GitHubEventBroker {
     return subscription?.pending[0] || null;
   }
 
-  acknowledge(subscriptionId, eventId) {
+  acknowledge(subscriptionId, eventId, { deferOnceRemoval = false } = {}) {
     const subscription = this.getSubscriptionRecord(subscriptionId);
     if (!subscription) {
       return { ok: false, error: { code: 'event_subscription_not_found', message: 'event subscription not found' } };
@@ -1447,8 +1504,14 @@ export class GitHubEventBroker {
       this.metrics.latencySamplesRecorded += 1;
     }
     this.metrics.subscriptionsAcknowledged += 1;
+    const subscriptionRemoved = subscription.once
+      && !deferOnceRemoval
+      && eventIsTerminal(event);
+    if (subscriptionRemoved) {
+      this.state.subscriptions = this.state.subscriptions.filter(({ id }) => id !== subscription.id);
+    }
     this.persist();
-    return { ok: true, event };
+    return { ok: true, event, subscriptionRemoved };
   }
 
   appendEventAudit(options) {
@@ -1471,6 +1534,8 @@ export class GitHubEventBroker {
       : 20;
     const events = this.state.eventAudit
       .filter((event) => {
+        if (filters.subscriptionId
+          && !event.matchedSubscriptionIds.includes(String(filters.subscriptionId))) return false;
         if (filters.repo && event.repo !== filters.repo) return false;
         if (filters.resource && event.resource !== canonicalResource(filters.resource)) return false;
         if (filters.runId && String(event.runId) !== String(filters.runId)) return false;
