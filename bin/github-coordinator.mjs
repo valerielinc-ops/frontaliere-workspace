@@ -1240,7 +1240,7 @@ export class GitHubCoordinator {
         if (this.pendingCli.get(cliKey) === promise) this.pendingCli.delete(cliKey);
       }).catch(() => {});
       promise.then((response) => {
-        if (response?.ok) {
+        if (response?.ok && !response.stdoutFile) {
           this.cliCache.set(cliKey, {
             response,
             expiresAt: Date.now() + CLI_CACHE_TTL_MS,
@@ -1637,8 +1637,8 @@ function cliCommandIsMutation(args) {
     return parsed ? !isSafeRead(parsed.method) : args.some((value) => value === '--method' || value === '-X' || value.startsWith('--method='));
   }
   if (args[0] === 'graphql') return args.includes('--field') || args.includes('-f') || args.includes('--raw-field');
-  const mutating = new Set(['create', 'comment', 'close', 'reopen', 'merge', 'edit', 'delete', 'rerun', 'cancel', 'enable', 'disable', 'dispatch']);
-  return mutating.has(args[1]);
+  const readOnly = new Set(['list', 'view', 'status', 'diff', 'checks', 'log']);
+  return !readOnly.has(args[1]);
 }
 
 function readTokenAndStart(identity) {

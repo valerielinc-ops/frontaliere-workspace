@@ -28,7 +28,13 @@ function printStatus(status) {
 function printResponse(response) {
   if (response?.stdoutFile) {
     // Output spillato dal daemon oltre il cap del protocollo: riversa e cancella.
-    process.stdout.write(readFileSync(response.stdoutFile));
+    try {
+      process.stdout.write(readFileSync(response.stdoutFile));
+    } catch (error) {
+      process.stderr.write(`github-coordinator: impossibile leggere l'output spillato ${response.stdoutFile}: ${error.message}\n`);
+      process.exitCode = 1;
+      return;
+    }
     try { unlinkSync(response.stdoutFile); } catch { /* best effort */ }
   } else if (response?.stdout) process.stdout.write(response.stdout);
   if (response?.stderr) process.stderr.write(response.stderr);
