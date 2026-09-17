@@ -999,6 +999,8 @@ export class GitHubEventBroker {
       webhookEvents: 0,
       webhookDuplicates: 0,
       webhookIgnored: 0,
+      webhookSignatureFailures: 0,
+      lastWebhookSignatureFailureAt: null,
       matchedEvents: 0,
       pendingOverflow: 0,
       latencySamplesRecorded: 0,
@@ -1623,6 +1625,8 @@ export class GitHubEventBroker {
     if (!normalizedDeliveryId) throw brokerError('event_delivery_id_required', 'X-GitHub-Delivery is required');
     const body = typeof rawBody === 'string' ? rawBody : JSON.stringify(payload ?? {});
     if (!verifyWebhookSignature(body, signature, this.webhookSecret)) {
+      this.metrics.webhookSignatureFailures += 1;
+      this.metrics.lastWebhookSignatureFailureAt = new Date(this.now()).toISOString();
       throw brokerError('event_webhook_signature_invalid', 'GitHub webhook signature is invalid');
     }
     let webhookPayload = payload;
