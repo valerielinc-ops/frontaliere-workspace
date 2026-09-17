@@ -79,6 +79,31 @@ function fakeResponse(status, body, headers = {}) {
   };
 }
 
+function fakeStreamingResponse(status, chunks, headers = {}) {
+  const normalized = Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [name.toLowerCase(), String(value)]),
+  );
+  let index = 0;
+  let cancelled = false;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get(name) { return normalized[String(name).toLowerCase()] ?? null; } },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: Buffer.from(chunks[index++]) };
+          },
+          async cancel() { cancelled = true; },
+        };
+      },
+    },
+    get cancelled() { return cancelled; },
+  };
+}
+
 function createFakeGh(directory) {
   const script = join(directory, 'fake-gh.mjs');
   writeFileSync(script, `#!/usr/bin/env node
@@ -319,6 +344,105 @@ test('non mette in cache l output CLI spillato e non riusa il file del primo con
     unlinkSync(second.stdoutFile);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('segue i redirect esterni dei log senza inoltrare il token del coordinator', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (calls.length === 1) {
+      return fakeResponse(302, '', { location: 'https://blob.example.test/job-log?sig=signed' });
+    }
+    return fakeResponse(200, 'log del job in corso\n');
+  };
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+
+  try {
+    const response = await coordinator.submit({
+      type: 'api',
+      identity: 'test',
+      method: 'GET',
+      path: '/repos/owner/repo/actions/jobs/123/logs',
+      cacheTtlMs: 0,
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.status, 200);
+    assert.equal(response.body, 'log del job in corso\n');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].options.headers.authorization, 'Bearer secret-for-test');
+    assert.equal(calls[1].url, 'https://blob.example.test/job-log?sig=signed');
+    assert.equal(calls[1].options.method, 'GET');
+    assert.equal(calls[1].options.redirect, 'manual');
+    assert.equal(Object.keys(calls[1].options.headers)
+      .some((name) => name.toLowerCase() === 'authorization'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('non segue i redirect che restano su github.com o api.github.com', async () => {
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return fakeResponse(302, 'redirect GitHub', { location: 'https://github.com/owner/repo' });
+  };
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+
+  try {
+    const response = await coordinator.submit({
+      type: 'api',
+      identity: 'test',
+      method: 'GET',
+      path: '/repos/owner/repo/actions/jobs/123/logs',
+      cacheTtlMs: 0,
+    });
+    assert.equal(response.status, 302);
+    assert.equal(response.body, 'redirect GitHub');
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('limita a MAX_BODY_BYTES la risposta API ricevuta via stream', async () => {
+  const maxBodyBytes = 8 * 1024 * 1024;
+  const responseBody = fakeStreamingResponse(200, ['x'.repeat(maxBodyBytes), 'oltre il cap']);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => responseBody;
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+
+  try {
+    const response = await coordinator.submit({
+      type: 'api',
+      identity: 'test',
+      method: 'GET',
+      path: '/repos/owner/repo/actions/jobs/123/logs',
+      cacheTtlMs: 0,
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.body.length, maxBodyBytes + '\n[truncated]'.length);
+    assert.match(response.body, /\n\[truncated\]$/);
+    assert.equal(responseBody.cancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -760,6 +884,87 @@ test('espone deadline, ETA storica e duplicati senza richiedere polling', () => 
   }
 });
 
+test('normalizza il filename del workflow nel nome visualizzato e mette in cache il lookup', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-workflow-name-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({
+    stateFile,
+    webhookSecret: 'workflow-name-secret',
+    now: () => nowMs,
+  });
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = String(url);
+    calls.push(requestUrl);
+    assert.equal(requestUrl, 'https://api.github.com/repos/owner/repo/actions/workflows?per_page=100');
+    return fakeResponse(200, JSON.stringify({
+      workflows: [{ name: 'Deploy production', path: '.github/workflows/deploy.yml' }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+
+  try {
+    for (const [runId, waitMs] of [['9101', 10_000], ['9102', 20_000], ['9103', 30_000]]) {
+      const historical = broker.subscribe({
+        repo: 'owner/repo',
+        resource: 'workflow_run',
+        workflow: 'Deploy production',
+        branch: 'main',
+        runId,
+        waitFor: ['success'],
+        ttlSeconds: 300,
+      });
+      nowMs += waitMs;
+      const event = normalizeWebhookEvent({
+        eventName: 'workflow_run',
+        deliveryId: `workflow-name-${runId}`,
+        receivedAt: new Date(nowMs).toISOString(),
+        payload: {
+          action: 'completed',
+          repository: { full_name: 'owner/repo' },
+          workflow_run: {
+            id: runId,
+            name: 'Deploy production',
+            status: 'completed',
+            conclusion: 'success',
+            head_branch: 'main',
+          },
+        },
+      });
+      assert.deepEqual(broker.recordEvent(event).matchedSubscriptionIds, [historical.id]);
+      assert.equal(broker.acknowledge(historical.id, event.id).ok, true);
+    }
+
+    const coordinator = new GitHubCoordinator({
+      identity: 'test',
+      token: 'secret-for-test',
+      realGh: '/bin/echo',
+      socket: join(stateDirectory, 'coordinator.sock'),
+      eventBroker: broker,
+    });
+    const spec = {
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      workflow: 'deploy.yml',
+      branch: 'main',
+      waitFor: ['completed'],
+      ttlSeconds: 300,
+    };
+    const first = await coordinator.eventSubscription(spec);
+    assert.equal(first.subscription.workflow, 'Deploy production');
+    assert.equal(first.subscription.estimateSource, 'same_repo_workflow');
+    assert.equal(first.subscription.estimatedWaitMs, 20_000);
+
+    const second = await coordinator.eventSubscription(spec);
+    assert.equal(second.subscription.id, first.subscription.id);
+    assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('i comandi help delle subscription non avviano il coordinatore', () => {
   const listenHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'listen', '--help'], {
     cwd: ROOT,
@@ -774,6 +979,7 @@ test('i comandi help delle subscription non avviano il coordinatore', () => {
   });
   assert.equal(subscribeHelp.status, 0);
   assert.match(subscribeHelp.stdout, /--wait-for/);
+  assert.match(subscribeHelp.stdout, /--follow-latest/);
   const waitHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'wait', '--help'], {
     cwd: ROOT,
     encoding: 'utf8',
