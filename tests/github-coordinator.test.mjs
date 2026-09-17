@@ -11,7 +11,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
@@ -38,8 +38,13 @@ import {
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
+  EVENT_HEALTH_ALERT_THRESHOLD,
+  eventLifecycleHealth,
+} from '../bin/github-coordinator-health.mjs';
+import {
   GitHubEventBroker,
   DEFAULT_STALLED_AFTER_MS,
+  DEFAULT_ORPHAN_GRACE_MS,
   eventMatchesSubscription,
   MAX_SUBSCRIPTION_TTL_MS,
   normalizeWebhookEvent,
@@ -237,6 +242,92 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
   for (const type of shortRequestTypes) assert.equal(requestTimeoutMilliseconds({ type }), 3_000, type);
   for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile', 'confirm-cancellation']) {
     assert.equal(requestTimeoutMilliseconds({ type }), 15 * 60 * 1_000, type);
+  }
+});
+
+test('health segnala lifecycle solo oltre la soglia di persistenza', () => {
+  const below = eventLifecycleHealth({
+    orphanedSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD - 1,
+    stalledSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD - 1,
+  }, 'default');
+  assert.deepEqual(below.alerts, []);
+  assert.deepEqual(below.warnings.map(({ code }) => code), [
+    'orphaned_subscriptions',
+    'stalled_subscriptions',
+  ]);
+
+  const above = eventLifecycleHealth({
+    orphanedSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD,
+    stalledSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD,
+  }, 'default');
+  assert.deepEqual(above.alerts.map(({ code }) => code), [
+    'orphaned_subscriptions',
+    'stalled_subscriptions',
+  ]);
+  assert.deepEqual(above.warnings, []);
+});
+
+test('invalida i check di protocollo quando cambia il daemon', async () => {
+  const stateDirectory = mkdtempSync('/tmp/pm-');
+  const identity = `pm-${process.pid}`;
+  const previousStateDirectory = process.env.FRONTALIERE_GH_STATE_DIR;
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  let protocolVersion = 5;
+  let startedAt = 'daemon-start-1';
+  let server;
+  let requests = 0;
+
+  const startFakeCoordinator = async () => {
+    server = createServer((connection) => {
+      let buffer = '';
+      connection.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline));
+        requests += 1;
+        const status = {
+          protocolVersion,
+          metrics: { startedAt },
+          events: { webhookSecretConfigured: true },
+        };
+        const response = request.type === 'ping' || request.type === 'status'
+          ? { ok: true, status }
+          : { ok: true, subscriptions: [], pendingEvents: 0 };
+        connection.end(`${JSON.stringify(response)}\n`);
+      });
+    });
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.once('error', rejectPromise);
+      server.listen(socketPath(identity), resolvePromise);
+    });
+  };
+
+  try {
+    await startFakeCoordinator();
+    const first = await eventSubscriptions({}, { identity });
+    assert.equal(first.ok, true);
+    const requestsAfterFirst = requests;
+    const second = await eventSubscriptions({}, { identity });
+    assert.equal(second.ok, true);
+    assert.equal(requests - requestsAfterFirst, 2, 'la seconda chiamata usa il ping e la richiesta, senza probe status');
+
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    try { unlinkSync(socketPath(identity)); } catch { /* socket già rimosso */ }
+    protocolVersion = 4;
+    startedAt = 'daemon-start-2';
+    await startFakeCoordinator();
+
+    await assert.rejects(
+      eventSubscriptions({}, { identity }),
+      (error) => error.code === 'event_protocol_unavailable',
+    );
+  } finally {
+    if (server) await new Promise((resolvePromise) => server.close(resolvePromise));
+    try { unlinkSync(socketPath(identity)); } catch { /* socket già rimosso */ }
+    if (previousStateDirectory === undefined) delete process.env.FRONTALIERE_GH_STATE_DIR;
+    else process.env.FRONTALIERE_GH_STATE_DIR = previousStateDirectory;
+    rmSync(stateDirectory, { recursive: true, force: true });
   }
 });
 
@@ -1322,6 +1413,56 @@ test('il garbage collector rimuove solo duplicati orfani dopo una grace period e
     });
     assert.deepEqual(orphanApplied.removedIds, [orphanDuplicate.id]);
     assert.ok(broker.getSubscription(orphanPrimary.id));
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('il ciclo di expiry raccoglie i duplicati sicuri e protegge l unico pending', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-auto-gc-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'auto-gc-secret', now: () => nowMs });
+  const coordinator = new GitHubCoordinator({
+    identity: 'auto-gc',
+    token: 'test-token',
+    realGh: process.execPath,
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+  coordinator.setEventListenerInspector(() => false);
+
+  try {
+    const primary = broker.subscribe({
+      repo: 'owner/repo', resource: 'workflow_run', runId: '9001', waitFor: ['success'], ttlSeconds: 21_600,
+    });
+    const duplicate = broker.subscribe({
+      repo: 'owner/repo', resource: 'workflow_run', runId: '9001', waitFor: ['success'],
+      ttlSeconds: 21_600, allowDuplicate: true,
+    });
+    const protectedUnique = broker.subscribe({
+      repo: 'owner/repo', resource: 'workflow_run', runId: '9002', waitFor: ['success'], ttlSeconds: 21_600,
+    });
+    const event = normalizeWebhookEvent({
+      eventName: 'workflow_run',
+      deliveryId: 'auto-gc-protected',
+      receivedAt: new Date(nowMs).toISOString(),
+      payload: {
+        action: 'completed',
+        repository: { full_name: 'owner/repo' },
+        workflow_run: { id: 9002, name: 'CI', conclusion: 'success', head_branch: 'main' },
+      },
+    });
+    broker.recordEvent(event);
+    nowMs += DEFAULT_ORPHAN_GRACE_MS + 1_000;
+
+    coordinator.expireEventSubscriptions();
+
+    assert.equal(broker.getSubscription(duplicate.id), null);
+    assert.ok(broker.getSubscription(primary.id));
+    assert.ok(broker.getSubscription(protectedUnique.id));
+    assert.equal(broker.pendingEvent(protectedUnique.id).id, event.id);
+    assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

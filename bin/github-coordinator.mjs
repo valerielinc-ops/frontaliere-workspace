@@ -1272,6 +1272,15 @@ export class GitHubCoordinator {
     for (const subscriptionId of expiredIds) {
       this.eventNotifier?.(subscriptionId, { expired: true });
     }
+    if (this.eventListenerInspector) {
+      const garbageCollection = this.eventBroker.garbageCollect({
+        listenerAttached: this.eventListenerInspector,
+        apply: true,
+      });
+      for (const subscriptionId of garbageCollection.removedIds || []) {
+        this.eventNotifier?.(subscriptionId, { removed: true });
+      }
+    }
     return expiredIds;
   }
 

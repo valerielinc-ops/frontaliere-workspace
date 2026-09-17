@@ -11,7 +11,30 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordinator-client.mjs';
 
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
+export const EVENT_HEALTH_ALERT_THRESHOLD = 2;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
+
+export function eventLifecycleHealth(eventSummary, identity) {
+  const alerts = [];
+  const warnings = [];
+  const checks = [
+    {
+      code: 'orphaned_subscriptions',
+      count: Number(eventSummary?.orphanedSubscriptions || 0),
+      message: `${identity}: ${eventSummary?.orphanedSubscriptions || 0} subscriptions have no attached listener`,
+    },
+    {
+      code: 'stalled_subscriptions',
+      count: Number(eventSummary?.stalledSubscriptions || 0),
+      message: `${identity}: ${eventSummary?.stalledSubscriptions || 0} subscriptions have no recent target update`,
+    },
+  ];
+  for (const check of checks) {
+    if (check.count <= 0) continue;
+    (check.count >= EVENT_HEALTH_ALERT_THRESHOLD ? alerts : warnings).push(check);
+  }
+  return { alerts, warnings };
+}
 
 function serviceLabel(identity) {
   return `ch.frontaliere.github-coordinator-${normalizeIdentity(identity)}`;
@@ -101,13 +124,9 @@ export async function checkCoordinatorHealth(identity) {
         message: `${normalized}: ${eventSummary.webhookSignatureFailures} webhook deliveries were rejected for invalid signatures`,
       });
     }
-    if (Number(eventSummary.orphanedSubscriptions || 0) > 0) {
-      warnings.push({
-        code: 'orphaned_subscriptions',
-        count: Number(eventSummary.orphanedSubscriptions),
-        message: `${normalized}: ${eventSummary.orphanedSubscriptions} subscriptions have no attached listener`,
-      });
-    }
+    const lifecycleHealth = eventLifecycleHealth(eventSummary, normalized);
+    alerts.push(...lifecycleHealth.alerts);
+    warnings.push(...lifecycleHealth.warnings);
     if (Number(eventSummary.duplicateSubscriptions || 0) > 0) {
       warnings.push({
         code: 'duplicate_subscriptions',
@@ -120,13 +139,6 @@ export async function checkCoordinatorHealth(identity) {
         code: 'pending_events',
         count: Number(eventSummary.pendingEvents),
         message: `${normalized}: ${eventSummary.pendingEvents} webhook events await acknowledgement`,
-      });
-    }
-    if (Number(eventSummary.stalledSubscriptions || 0) > 0) {
-      warnings.push({
-        code: 'stalled_subscriptions',
-        count: Number(eventSummary.stalledSubscriptions),
-        message: `${normalized}: ${eventSummary.stalledSubscriptions} subscriptions have no recent target update`,
       });
     }
     if (Number(status.metrics?.socketErrors || 0) > 0) {
