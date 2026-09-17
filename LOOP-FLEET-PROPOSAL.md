@@ -1,6 +1,6 @@
 # Frontaliere Ticino — proposta di flotta di loop automatici
 
-## Stato operativo corrente — verificato 2026-09-17, 07:12:02 UTC (post-#8983/#8984/#8985; coordinator live; main `5a9dbcbd…`)
+## Stato operativo corrente — verificato 2026-09-17, 07:43:24 UTC (post-#8991; coordinator live; main `d8a52e3c…`)
 
 ### Goal e distinzione di stato
 
@@ -140,6 +140,20 @@ alta. #8983, #8984 e #8985 sono state mergiate automaticamente; #8981 è
 attualmente `CONFLICTING` con auto-merge attivo e #8982 è `BLOCKED` mentre la
 nuova HEAD attraversa test e review. Questi stati sono eventi di liveness da
 riconciliare automaticamente, non richieste di intervento umano.
+
+Rettifica live verificata alle 07:43:24 UTC: dopo un riavvio del daemon il
+socket è tornato raggiungibile, ma il coordinatore è in auto-degrado: coda 6,
+un job attivo, concorrenza effettiva 1/8, 47 subscription, 29 listener attivi,
+18 subscription senza listener, 13 target stalled e 6 eventi pending. Gli
+errori socket dall’avvio del processo sono 42; `sourceReloads` è 0 nella
+sessione corrente e `node --check` sul sorgente corrente è pulito. Il p90
+osservato per le PR è 2.557.826 ms (circa 42,6 minuti), con p50 969.332 ms e
+99 campioni PR. Il probe `health` precedente aveva registrato un timeout del
+socket, quindi `processo vivo` e `servizio sano` non sono ancora distinti in
+modo sufficiente. La suite indipendente del workspace passa ora 41/41 test.
+Questa è una degradazione recuperata automaticamente, ma la coda di stati
+orfani/stalled dimostra che manca ancora il reaper persistente con lease,
+reclaim e replay bounded.
 
 Durante questa sessione una `gh pr create` ha superato il timeout del client,
 mentre la mutation remota è comunque andata a buon fine e ha creato la PR
