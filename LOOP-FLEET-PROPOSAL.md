@@ -1,6 +1,6 @@
 # Frontaliere Ticino — proposta di flotta di loop automatici
 
-## Stato operativo corrente — verificato 2026-09-17, 05:09:05 UTC (post-#8965; audit ledger 35183527873; main `38d929e9…`)
+## Stato operativo corrente — verificato 2026-09-17, 07:12:02 UTC (post-#8983/#8984/#8985; coordinator live; main `5a9dbcbd…`)
 
 ### Goal e distinzione di stato
 
@@ -129,6 +129,17 @@ scelta safety corretta, ma manca un reaper autonomo basato su lease/owner/TTL
 che riconcili o archivi in modo dimostrabile questi stati. L’ETA storica p90
 per le PR è circa 39,6 minuti: il percorso è event-driven, ma la latenza del
 ciclo remoto resta reale.
+
+Rettifica live verificata alle 07:12 UTC: il daemon `default` è ancora
+operativo, con quota autenticata 4.719/5.000, coda vuota, 46 subscription,
+33 listener registrati e 35 listener attivi. Restano 13 subscription senza
+listener, 5 eventi pending, 8 target stalled e 29 errori socket dall’avvio;
+`health` risponde `ok: true` ma conserva questi warning. L’ETA p90 osservata
+per le PR è 2.646.843 ms (circa 44,1 minuti), con 94 campioni PR e confidenza
+alta. #8983, #8984 e #8985 sono state mergiate automaticamente; #8981 è
+attualmente `CONFLICTING` con auto-merge attivo e #8982 è `BLOCKED` mentre la
+nuova HEAD attraversa test e review. Questi stati sono eventi di liveness da
+riconciliare automaticamente, non richieste di intervento umano.
 
 Durante questa sessione una `gh pr create` ha superato il timeout del client,
 mentre la mutation remota è comunque andata a buon fine e ha creato la PR
