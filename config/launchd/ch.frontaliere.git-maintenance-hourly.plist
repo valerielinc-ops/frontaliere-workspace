@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ch.frontaliere.git-maintenance-hourly</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/saggesel/Projects/frontaliere/bin/git-maintenance-wrapper</string>
+		<string>hourly</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>55</integer></dict>
+		<dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>55</integer></dict>
+	</array>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/saggesel/Projects/frontaliere</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key><string>/Users/saggesel</string>
+		<key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/saggesel/Library/Logs/frontaliere/git-maintenance-hourly.launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/saggesel/Library/Logs/frontaliere/git-maintenance-hourly.launchd.err.log</string>
+</dict>
+</plist>

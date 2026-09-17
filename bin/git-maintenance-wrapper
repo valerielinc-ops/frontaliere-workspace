@@ -1,0 +1,92 @@
+#!/bin/sh
+
+# Guarded background maintenance for the workspace's large site repository.
+#
+# On this macOS, `ulimit -v` rejects a finite address-space limit
+# (setrlimit: invalid argument), so it is deliberately not used here. The
+# macOS taskpolicy memory limit is enforced for the git process tree instead;
+# /usr/bin/time -l records the observed peak RSS in the same log entry stream.
+
+set -u
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
+workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
+repo="$workspace_root/frontaliere-si-o-no"
+
+git_bin=/usr/bin/git
+df_bin=/bin/df
+time_bin=/usr/bin/time
+taskpolicy_bin=/usr/sbin/taskpolicy
+min_free_gib=20
+min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
+memory_limit_mib=10240
+
+schedule=${1:-}
+case "$schedule" in
+  hourly|daily|weekly) ;;
+  *)
+    printf '%s invalid schedule: expected hourly, daily, or weekly\n' "git-maintenance-wrapper:" >&2
+    exit 64
+    ;;
+esac
+
+home_dir=${HOME:-/Users/saggesel}
+log_dir=${FRONTALIERE_LOG_DIR:-$home_dir/Library/Logs/frontaliere}
+log_file=${FRONTALIERE_MAINTENANCE_LOG:-$log_dir/git-maintenance.log}
+
+if ! /bin/mkdir -p "$log_dir"; then
+  printf '%s cannot create log directory: %s\n' "git-maintenance-wrapper:" "$log_dir" >&2
+  exit 74
+fi
+
+if ! exec >>"$log_file" 2>&1; then
+  printf '%s cannot open log file: %s\n' "git-maintenance-wrapper:" "$log_file" >&2
+  exit 74
+fi
+
+timestamp() {
+  /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+log() {
+  printf '%s git-maintenance-wrapper %s\n' "$(timestamp)" "$*"
+}
+
+if [ ! -d "$repo/.git" ]; then
+  log "action=abort reason=missing_repo repo=$repo schedule=$schedule exit_code=78"
+  exit 78
+fi
+
+if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ]; then
+  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin exit_code=69"
+  exit 69
+fi
+
+free_kib=$($df_bin -Pk "$repo" | /usr/bin/awk 'NR == 2 { print $4 }')
+case "$free_kib" in
+  ''|*[!0-9]*)
+    log "action=abort reason=disk_probe_failed repo=$repo schedule=$schedule raw_free_kib=$free_kib exit_code=74"
+    exit 74
+    ;;
+esac
+
+free_bytes=$((free_kib * 1024))
+if [ "$free_bytes" -lt "$min_free_bytes" ]; then
+  log "action=skip reason=low_disk repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes available_gib=$((free_bytes / 1024 / 1024 / 1024)) minimum_gib=$min_free_gib exit_code=0"
+  exit 0
+fi
+
+started_at=$(timestamp)
+started_epoch=$(/bin/date +%s)
+log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes memory_limit_mib=$memory_limit_mib runner=taskpolicy started_at=$started_at"
+
+# taskpolicy applies the memory limit to /usr/bin/time and all of its children,
+# including git and any maintenance subprocesses. Keep time -l in the limited
+# tree so its maximum resident set size line is part of the same log.
+$taskpolicy_bin -m "$memory_limit_mib" "$time_bin" -l "$git_bin" -C "$repo" maintenance run "--schedule=$schedule"
+exit_code=$?
+
+finished_at=$(timestamp)
+finished_epoch=$(/bin/date +%s)
+log "action=finish repo=$repo schedule=$schedule exit_code=$exit_code duration_seconds=$((finished_epoch - started_epoch)) finished_at=$finished_at"
+exit "$exit_code"
