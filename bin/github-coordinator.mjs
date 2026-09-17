@@ -334,6 +334,39 @@ function trimOutput(value, maxBytes = MAX_BODY_BYTES) {
     : `${Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8')}\n[truncated]`;
 }
 
+async function readResponseBody(response) {
+  const reader = response?.body?.getReader?.();
+  if (!reader) return trimOutput(await response.text());
+
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    const chunk = Buffer.from(value);
+    const remaining = MAX_BODY_BYTES - bytes;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    if (chunk.length > remaining) {
+      chunks.push(chunk.subarray(0, remaining));
+      bytes += remaining;
+      truncated = true;
+      break;
+    }
+    chunks.push(chunk);
+    bytes += chunk.length;
+  }
+  if (truncated) {
+    try { await reader.cancel(); } catch { /* best effort */ }
+  }
+  const body = Buffer.concat(chunks).toString('utf8');
+  return truncated ? `${body}\n[truncated]` : body;
+}
+
 function observedHeaders(headers) {
   const result = {};
   for (const name of OBSERVED_HEADERS) {
@@ -425,6 +458,40 @@ function apiUrl(pathname) {
     throw new Error('invalid_github_api_path');
   }
   return `https://api.github.com${pathname}`;
+}
+
+function externalRedirectTarget(response, sourceUrl) {
+  if (response.status !== 301 && response.status !== 302) return null;
+  const location = response.headers.get('location');
+  if (!location) return null;
+  let target;
+  try {
+    target = new URL(location, sourceUrl);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(target.protocol)) return null;
+  if (['api.github.com', 'github.com'].includes(target.hostname.toLowerCase())) return null;
+  return target.toString();
+}
+
+function workflowFilename(value) {
+  if (typeof value !== 'string') return null;
+  const filename = value.trim().split('/').pop();
+  return /\.ya?ml$/i.test(filename) ? filename.toLowerCase() : null;
+}
+
+function workflowFilenameMap(data) {
+  const result = new Map();
+  for (const workflow of Array.isArray(data?.workflows) ? data.workflows : []) {
+    const name = typeof workflow?.name === 'string' ? workflow.name.trim() : '';
+    if (!name) continue;
+    for (const candidate of [workflow.path, workflow.file_name, workflow.filename]) {
+      const filename = workflowFilename(candidate);
+      if (filename) result.set(filename, name);
+    }
+  }
+  return result;
 }
 
 function cacheKeyFor(request) {
@@ -764,6 +831,7 @@ export class GitHubCoordinator {
     this.pendingCli = new Map();
     this.cache = new Map();
     this.cliCache = new Map();
+    this.workflowFilenameCache = new Map();
     this.bucketPausedUntil = new Map();
     this.buckets = new Map();
     this.pendingCancellations = new Map();
@@ -940,14 +1008,40 @@ export class GitHubCoordinator {
     this.eventListenerInfoInspector = typeof inspector === 'function' ? inspector : null;
   }
 
-  eventSubscription(spec) {
+  async resolveWorkflowFilename(repo, workflow) {
+    const filename = workflowFilename(workflow);
+    if (!filename || typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return workflow;
+    let cached = this.workflowFilenameCache.get(repo);
+    if (!cached) {
+      cached = this.submit({
+        type: 'api',
+        identity: this.identity,
+        method: 'GET',
+        path: `/repos/${repo}/actions/workflows?per_page=100`,
+        cacheTtlMs: 0,
+      }).then((response) => {
+        if (!response.ok) return new Map();
+        try { return workflowFilenameMap(JSON.parse(response.body || 'null')); } catch { return new Map(); }
+      }).catch(() => new Map());
+      this.workflowFilenameCache.set(repo, cached);
+    }
+    const names = await cached;
+    return names.get(filename) || workflow;
+  }
+
+  async eventSubscription(spec) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     if (!this.eventBroker.webhookSecret) {
       const error = new Error('event subscriptions require a configured webhook secret');
       error.code = 'event_webhook_secret_unconfigured';
       throw error;
     }
-    return { ok: true, subscription: this.eventBroker.subscribe(spec) };
+    const resource = String(spec?.resource || '').trim().toLowerCase().replace(/-/g, '_');
+    const workflow = resource === 'workflow_run' || resource === 'workflow' || resource === 'ci'
+      ? await this.resolveWorkflowFilename(spec?.repo, spec?.workflow)
+      : spec?.workflow;
+    const normalizedSpec = workflow === spec?.workflow ? spec : { ...spec, workflow };
+    return { ok: true, subscription: this.eventBroker.subscribe(normalizedSpec) };
   }
 
   eventSubscriptions(options = {}) {
@@ -1558,8 +1652,9 @@ export class GitHubCoordinator {
     let response;
     this.metrics.networkRequests += 1;
     if (request.anonymous) this.metrics.anonymousRequests += 1;
+    const sourceUrl = apiUrl(request.path);
     try {
-      response = await fetch(apiUrl(request.path), {
+      response = await fetch(sourceUrl, {
         method,
         headers,
         body: request.body === undefined || request.body === null
@@ -1568,6 +1663,18 @@ export class GitHubCoordinator {
         redirect: 'manual',
         signal: controller.signal,
       });
+      const redirectTarget = externalRedirectTarget(response, sourceUrl);
+      if (redirectTarget) {
+        response = await fetch(redirectTarget, {
+          method: 'GET',
+          headers: {
+            accept: 'application/octet-stream',
+            'user-agent': 'frontaliere-github-coordinator',
+          },
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+      }
     } finally {
       clearTimeout(timer);
     }
@@ -1577,7 +1684,7 @@ export class GitHubCoordinator {
     const renderedHeaders = request.anonymous
       ? { ...responseHeaders, 'x-frontaliere-auth-mode': 'anonymous' }
       : responseHeaders;
-    const body = trimOutput(await response.text());
+    const body = await readResponseBody(response);
     if (response.status === 304 && cached) {
       this.metrics.cacheRevalidations += 1;
       cached.expiresAt = Date.now() + ttl;

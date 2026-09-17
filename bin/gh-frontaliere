@@ -68,7 +68,7 @@ function printHelp(topic = '') {
     : topic === 'wait'
       ? 'Uso: bin/gh-frontaliere events wait --repo owner/repo --run-id ID --until completed\n     Per branch/workflow: aggiungi --workflow, --branch e --follow-latest; --reuse/--attach riusano l observer condiviso.'
     : topic === 'subscribe'
-      ? 'Uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource workflow_run --run-id ID --wait-for completed [--sha SHA] [--workflow NAME] [--branch BRANCH] [--ttl secondi] [--agent-id id]'
+      ? 'Uso: bin/gh-frontaliere events subscribe --repo owner/repo --resource workflow_run --run-id ID --wait-for completed [--sha SHA] [--workflow NAME] [--branch BRANCH] [--follow-latest] [--ttl secondi] [--agent-id id]'
       : topic === 'listen'
         ? 'Uso: bin/gh-frontaliere events listen <subscription-id>\nIl comando resta in ascolto fino all evento o alla scadenza della subscription.'
         : [
