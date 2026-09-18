@@ -1367,6 +1367,7 @@ test('segue il run successivo quando il run precedente viene cancellato', () => 
       resource: 'workflow_run',
       workflow: 'Deploy',
       branch: 'main',
+      sha: 'initial-sha',
       waitFor: ['completed'],
       followLatest: true,
       ttlSeconds: 300,
@@ -1382,6 +1383,7 @@ test('segue il run successivo quando il run precedente viene cancellato', () => 
           name: 'Deploy',
           conclusion: 'cancelled',
           head_branch: 'main',
+          head_sha: 'next-sha',
         },
       },
     });
@@ -1400,6 +1402,7 @@ test('segue il run successivo quando il run precedente viene cancellato', () => 
           name: 'Deploy',
           conclusion: 'success',
           head_branch: 'main',
+          head_sha: 'latest-sha',
         },
       },
     });
