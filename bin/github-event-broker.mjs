@@ -897,7 +897,12 @@ export function eventMatchesSubscriptionTarget(event, subscription) {
     if (!numbers.includes(subscription.number)) return false;
   }
   if (subscription.runId && String(event.runId) !== String(subscription.runId)) return false;
-  if (subscription.sha && event.sha !== subscription.sha) return false;
+  // A follow-latest workflow observer may have been created with the SHA of
+  // the run that was current at subscription time. That SHA is only the
+  // initial reconciliation hint; retaining it as a hard filter would make the
+  // observer silently ignore every later run on the same branch.
+  const followsLatestWorkflow = subscription.followLatest && subscription.resource === 'workflow_run';
+  if (subscription.sha && !followsLatestWorkflow && event.sha !== subscription.sha) return false;
   if (subscription.branch && event.branch !== subscription.branch) return false;
   if (subscription.environment && event.environment !== subscription.environment) return false;
   if (subscription.workflow && event.workflow !== subscription.workflow) return false;
