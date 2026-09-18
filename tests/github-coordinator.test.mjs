@@ -805,6 +805,81 @@ test('riconcilia subito una subscription per una PR già mergiata senza aspettar
   }
 });
 
+test('recupera un fallimento Actions dopo un webhook mancato della PR', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-pr-failure-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (calls.length === 1) {
+      return fakeResponse(200, JSON.stringify({
+        number: 1559,
+        state: 'open',
+        head: { sha: 'current-head-1559', ref: 'feature-1559' },
+        html_url: 'https://github.com/owner/repo/pull/1559',
+      }), { 'x-ratelimit-remaining': '100' });
+    }
+    return fakeResponse(200, JSON.stringify({
+      workflow_runs: [
+        {
+          id: 35321692570,
+          name: 'Generator CI',
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: 'old-head-1559',
+          head_branch: 'feature-1559',
+          pull_requests: [{ number: 1559 }],
+          updated_at: '2026-09-18T07:58:00Z',
+        },
+        {
+          id: 35321692674,
+          name: 'tests',
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: 'old-head-1559',
+          head_branch: 'feature-1559',
+          pull_requests: [{ number: 1559 }],
+          updated_at: '2026-09-18T07:58:17Z',
+        },
+      ],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'pr-failure-reconcile-secret',
+    now: () => Date.parse('2026-09-18T07:56:47Z'),
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'pull_request',
+    number: 1559,
+    waitFor: ['merged', 'failed'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+  const notified = [];
+  coordinator.setEventNotifier((subscriptionId) => notified.push(subscriptionId));
+
+  try {
+    const result = await coordinator.reconcileEvents(subscription.id);
+    assert.equal(calls.length, 2);
+    assert.match(calls[1], /\/actions\/runs\?branch=feature-1559&per_page=100$/);
+    assert.equal(result.event.state, 'failed');
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.deepEqual(notified, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).runId, '35321692674');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('audita una delivery PR distinguendo target, stato logico e waitFor', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-audit-'));
   const stateFile = join(stateDirectory, 'events.json');

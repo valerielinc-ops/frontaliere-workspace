@@ -1361,13 +1361,104 @@ export class GitHubCoordinator {
       )) || null;
     }
     if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
+    const events = [];
+    const results = [];
+    const record = (event) => {
+      if (!event) return;
+      const result = this.eventBroker.recordEvent(event);
+      events.push(result.event);
+      results.push(result);
+      for (const matchedSubscriptionId of result.matchedSubscriptionIds || []) {
+        this.eventNotifier?.(matchedSubscriptionId);
+      }
+    };
+
     const event = normalizeReconciliationEvent({ subscription, data });
-    if (!event) return { ok: true, source: 'reconciliation', event: null, matchedSubscriptionIds: [] };
-    const result = this.eventBroker.recordEvent(event);
-    for (const matchedSubscriptionId of result.matchedSubscriptionIds || []) {
-      this.eventNotifier?.(matchedSubscriptionId);
+    record(event);
+
+    // A pull-request GET exposes the PR lifecycle, not the result of its
+    // Actions checks. When a PR observer also waits for `failed`, a missed
+    // workflow_run webhook must be recoverable from the current head SHA.
+    if (subscription.resource === 'pull_request'
+      && subscription.waitFor.includes('failed')
+      && data?.head?.sha) {
+      const headBranch = data.head?.ref || null;
+      const query = new URLSearchParams({
+        ...(headBranch ? { branch: headBranch } : { head_sha: data.head.sha }),
+        per_page: '100',
+      });
+      const runsResponse = await this.submit({
+        type: 'api',
+        identity: this.identity,
+        method: 'GET',
+        path: `/repos/${subscription.repo}/actions/runs?${query.toString()}`,
+        cacheTtlMs: 0,
+      });
+      if (!runsResponse.ok) {
+        return {
+          ...(results[0] || { ok: false, event: null, matchedSubscriptionIds: [] }),
+          ok: false,
+          source: 'reconciliation',
+          workflowRuns: { ok: false, response: runsResponse },
+        };
+      }
+      let runsData;
+      try {
+        runsData = JSON.parse(runsResponse.body || 'null');
+      } catch (error) {
+        return {
+          ...(results[0] || { ok: false, event: null, matchedSubscriptionIds: [] }),
+          ok: false,
+          source: 'reconciliation',
+          workflowRuns: {
+            ok: false,
+            error: { code: 'event_reconcile_workflow_runs_invalid', message: error.message },
+          },
+        };
+      }
+      const failedRuns = (Array.isArray(runsData?.workflow_runs) ? runsData.workflow_runs : [])
+        .filter((run) => {
+          if (String(run.status).toLowerCase() !== 'completed') return false;
+          if (!headBranch && run?.head_sha !== data.head.sha) return false;
+          if (headBranch && run?.head_branch && run.head_branch !== headBranch) return false;
+          if (!['failure', 'startup_failure', 'timed_out'].includes(String(run.conclusion).toLowerCase())) return false;
+          const runUpdatedAtMs = Date.parse(run.updated_at || run.completed_at || run.created_at || '');
+          const subscriptionCreatedAtMs = Date.parse(subscription.createdAt || '');
+          if (Number.isFinite(runUpdatedAtMs)
+            && Number.isFinite(subscriptionCreatedAtMs)
+            && runUpdatedAtMs < subscriptionCreatedAtMs) return false;
+          const pullRequests = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+          return pullRequests.length === 0
+            || pullRequests.some((pullRequest) => Number(pullRequest?.number) === subscription.number);
+        })
+        .sort((left, right) => Date.parse(right.updated_at || right.completed_at || right.created_at || '')
+          - Date.parse(left.updated_at || left.completed_at || left.created_at || ''));
+      const latestFailedRun = failedRuns[0];
+      if (latestFailedRun) {
+        const workflowSubscription = { ...subscription, resource: 'workflow_run', runId: null };
+        const workflowData = Array.isArray(latestFailedRun.pull_requests)
+          && latestFailedRun.pull_requests.length > 0
+          ? latestFailedRun
+          : { ...latestFailedRun, pull_requests: [{ number: subscription.number }] };
+        record(normalizeReconciliationEvent({
+          subscription: workflowSubscription,
+          data: workflowData,
+        }));
+      }
     }
-    return { ...result, source: 'reconciliation' };
+
+    if (results.length === 0) {
+      return { ok: true, source: 'reconciliation', event: null, matchedSubscriptionIds: [] };
+    }
+    if (results.length === 1) return { ...results[0], source: 'reconciliation' };
+    return {
+      ...results.at(-1),
+      source: 'reconciliation',
+      events,
+      targetMatchedSubscriptionIds: [...new Set(results.flatMap((result) => result.targetMatchedSubscriptionIds || []))],
+      matchedSubscriptionIds: [...new Set(results.flatMap((result) => result.matchedSubscriptionIds || []))],
+      subscriptionRemoved: results.some((result) => result.subscriptionRemoved),
+    };
   }
 
   publicCancellationDetails(pending) {
