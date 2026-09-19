@@ -51,7 +51,7 @@ const HEADROOM_CONCURRENCY_STEPS = [
 ];
 const MAX_API_ATTEMPTS = 3;
 const MUTATION_GAP_MS = 1_000;
-const CLI_CACHE_TTL_MS = 2_000;
+const CLI_CACHE_TTL_MS = 15_000;
 const ANONYMOUS_BUDGET = 45;
 const ANONYMOUS_WINDOW_MS = 60 * 60 * 1_000;
 const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
@@ -558,7 +558,11 @@ function scopedCacheKeyFor(request) {
 }
 
 function cliCacheKeyFor(request) {
-  return `${request.identity || 'default'}|${request.anonymous ? 'anonymous' : 'authenticated'}|${request.cwd || ''}|${JSON.stringify(request.args || [])}`;
+  // An explicit --repo makes the command independent of where it ran, so the same
+  // status read issued from different worktrees shares one entry. Without it gh
+  // resolves the repo from the working directory, which then stays in the key.
+  const repo = repoFromCliArguments(request.args || []);
+  return `${request.identity || 'default'}|${request.anonymous ? 'anonymous' : 'authenticated'}|${repo || request.cwd || ''}|${JSON.stringify(request.args || [])}`;
 }
 
 function isEmergencyPublicRestPath(pathname) {

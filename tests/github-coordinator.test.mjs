@@ -5,6 +5,7 @@ import { createHmac } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -523,6 +524,47 @@ test('mantiene la cache per le letture CLI piccole e deduplica gh pr view', asyn
     const invocations = readFileSync(join(directory, 'invocations.jsonl'), 'utf8').trim().split('\n');
     assert.equal(invocations.length, 1);
     assert.equal(coordinator.cliCache.size, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('condivide la cache di una lettura --repo fra worktree diversi', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-worktree-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const worktreeA = join(directory, 'wt-a');
+  const worktreeB = join(directory, 'wt-b');
+  mkdirSync(worktreeA);
+  mkdirSync(worktreeB);
+  const args = ['run', 'view', '123', '--repo', 'owner/repo'];
+
+  try {
+    // Two agents polling the same run from their own worktrees must collapse onto
+    // one invocation; keying by cwd made every fleet member miss the cache. The
+    // fake gh logs into its cwd, so an untouched wt-b proves the second was served
+    // from the cache rather than re-executed.
+    const first = await coordinator.submit({ type: 'exec', identity: 'test', args, cwd: worktreeA });
+    const second = await coordinator.submit({ type: 'exec', identity: 'test', args, cwd: worktreeB });
+    assert.equal(first.ok, true);
+    assert.equal(second.fromCache, true);
+    assert.equal(coordinator.metrics.cliCacheHits, 1);
+    assert.equal(existsSync(join(worktreeA, 'invocations.jsonl')), true);
+    assert.equal(existsSync(join(worktreeB, 'invocations.jsonl')), false);
+
+    // Without --repo the command resolves the repo from the working directory,
+    // so two worktrees must stay on separate entries and both really run.
+    const bare = ['pr', 'list'];
+    await coordinator.submit({ type: 'exec', identity: 'test', args: bare, cwd: worktreeA });
+    const bareSecond = await coordinator.submit({ type: 'exec', identity: 'test', args: bare, cwd: worktreeB });
+    assert.notEqual(bareSecond.fromCache, true);
+    assert.equal(coordinator.metrics.cliCacheHits, 1);
+    assert.equal(existsSync(join(worktreeB, 'invocations.jsonl')), true);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -2102,6 +2144,14 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
       encoding: 'utf8',
     });
     assert.match(health.stdout, /webhook_signature_rejected/);
+    // A public ingress collects stray unsigned POSTs, so a single rejection is a
+    // warning and must not turn the daemon red; only a sustained run of them,
+    // which is what a real secret mismatch produces, is an alert.
+    const healthReport = JSON.parse(health.stdout);
+    const rejectionEntry = healthReport.warnings.find((entry) => entry.code === 'webhook_signature_rejected');
+    assert.ok(rejectionEntry, 'a single invalid signature is reported as a warning');
+    assert.equal(rejectionEntry.count, 1);
+    assert.equal(healthReport.alerts.some((entry) => entry.code === 'webhook_signature_rejected'), false);
     const webhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
       method: 'POST',
       headers: {
