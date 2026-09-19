@@ -1,0 +1,63 @@
+#!/bin/sh
+# Mantiene un worktree pulito del sito che segue origin/main, da cui gli hook
+# della root eseguono gli script (bin/site-hook).
+#
+# Perche'. Gli hook lanciavano gli script dal checkout principale del sito,
+# che resta su un branch di lavoro anche per giorni: il 2026-09-19 era su un
+# branch fermo da 9 giorni con modifiche non committate, e lo Stop hook
+# continuava a filtrare le review per `claude[bot]` ore dopo il merge della
+# fix (#9272). Una fix mergiata agli hook non arrivava mai alle sessioni.
+#
+# Il worktree e' detached, sparse (solo scripts/ e package.json), condivide
+# node_modules col checkout principale e non si modifica a mano: questo script
+# lo ricrea o lo riallinea con fetch + checkout --detach. Non tocca mai il
+# checkout principale ne' il suo branch.
+#
+# Uso: bin/site-hooks-refresh [--force]   (throttle 15 min senza --force)
+# POSIX sh: gira da /bin/sh negli hook, niente bash-ismi.
+set -u
+
+ws="${WORKSPACE:-}"
+if [ -z "$ws" ] || [ ! -d "$ws/frontaliere-si-o-no" ]; then
+  ws="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)" || exit 0
+fi
+site="$ws/frontaliere-si-o-no"
+[ -d "$site/.git" ] || exit 0
+wt="${FRONTALIERE_SITE_HOOKS_DIR:-$site/.claude/worktrees/hooks-main}"
+gitdir="$(git -C "$site" rev-parse --git-common-dir 2>/dev/null)" || exit 0
+case "$gitdir" in /*) ;; *) gitdir="$site/$gitdir" ;; esac
+stamp="$gitdir/hooks-main.stamp"
+lock="$gitdir/hooks-main.lock"
+
+if [ "${1:-}" != "--force" ] && [ -f "$stamp" ] && [ -e "$wt/.git" ] \
+   && [ -n "$(find "$stamp" -mmin -15 2>/dev/null)" ]; then
+  exit 0
+fi
+
+# Un solo refresh per volta: piu' sessioni partono insieme.
+if ! mkdir "$lock" 2>/dev/null; then
+  if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null
+    mkdir "$lock" 2>/dev/null || exit 0
+  else
+    exit 0
+  fi
+fi
+trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
+
+git -C "$site" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' </dev/null || exit 0
+
+if [ ! -e "$wt/.git" ]; then
+  git -C "$site" worktree prune 2>/dev/null
+  git -C "$site" worktree add -q --detach --no-checkout "$wt" origin/main || exit 0
+  printf '%s\n' '/scripts/' '/package.json' | git -C "$wt" sparse-checkout set --no-cone --stdin || exit 0
+fi
+
+git -C "$wt" checkout -q --detach origin/main || exit 0
+
+if [ -d "$site/node_modules" ] && [ ! -e "$wt/node_modules" ]; then
+  ln -s "$site/node_modules" "$wt/node_modules"
+fi
+
+touch "$stamp"
+exit 0
