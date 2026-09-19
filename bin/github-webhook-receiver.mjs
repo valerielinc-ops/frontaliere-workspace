@@ -265,7 +265,14 @@ export function createGitHubWebhookReceiver({
       jsonResponse(response, 202, result);
     } catch (error) {
       const status = webhookErrorStatus(error);
-      jsonResponse(response, status, { ok: false, error: error.code || error.message });
+      const details = {
+        ok: false,
+        error: error.code || error.message,
+      };
+      for (const field of ['repo', 'actualIdentity', 'expectedIdentity', 'exitCode', 'nextAction']) {
+        if (error?.[field] !== undefined) details[field] = error[field];
+      }
+      jsonResponse(response, status, details);
     } finally {
       onRequestEnd();
     }
