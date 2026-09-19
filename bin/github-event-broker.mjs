@@ -1622,7 +1622,10 @@ export class GitHubEventBroker {
     };
   }
 
-  ingestWebhook({ eventName, deliveryId, signature, rawBody, payload, receivedAt = new Date(this.now()).toISOString() }) {
+  ingestWebhook(
+    { eventName, deliveryId, signature, rawBody, payload, receivedAt = new Date(this.now()).toISOString() },
+    { beforePersist = null } = {},
+  ) {
     if (!this.webhookSecret) {
       throw brokerError('event_webhook_secret_unconfigured', 'webhook secret is not configured');
     }
@@ -1634,11 +1637,21 @@ export class GitHubEventBroker {
       this.metrics.lastWebhookSignatureFailureAt = new Date(this.now()).toISOString();
       throw brokerError('event_webhook_signature_invalid', 'GitHub webhook signature is invalid');
     }
-    let webhookPayload = payload;
-    if (!webhookPayload) {
+    // When rawBody is present, the signature covers this JSON; any separately
+    // supplied parsed payload is untrusted and must not override it.
+    let webhookPayload;
+    if (typeof rawBody === 'string' || !payload) {
       try { webhookPayload = JSON.parse(body); } catch (error) {
         throw brokerError('event_webhook_payload_invalid', `webhook payload is not valid JSON: ${error.message}`);
       }
+    } else {
+      webhookPayload = payload;
+    }
+    // Coordinators authorize the payload here: the signature and JSON have
+    // passed validation, while no delivery/state/audit record exists yet.
+    if (beforePersist !== null) {
+      if (typeof beforePersist !== 'function') throw brokerError('event_webhook_preflight_invalid', 'webhook preflight must be a function');
+      beforePersist(webhookPayload);
     }
     if (this.prune()) this.persist();
     const seen = this.state.seenDeliveries.some(({ id }) => id === normalizedDeliveryId);

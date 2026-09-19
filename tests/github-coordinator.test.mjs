@@ -26,6 +26,7 @@ import {
   RESPONSE_TRUNCATED_CODE,
   RESPONSE_TRUNCATED_EXIT_CODE,
   retryDelayMilliseconds,
+  WATCHED_SOURCE_NAMES,
 } from '../bin/github-coordinator.mjs';
 import {
   ensureCoordinator,
@@ -204,6 +205,7 @@ function sendRawCoordinatorLine(identity, line) {
 }
 
 test('accorpa gli eventi source ravvicinati e aspetta la quiescenza', async () => {
+  assert.equal(WATCHED_SOURCE_NAMES.has('github-event-routing.mjs'), true);
   let activeRequests = 1;
   let reloads = 0;
   const scheduler = createDebouncedReloadScheduler({

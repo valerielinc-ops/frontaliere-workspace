@@ -36,6 +36,7 @@ import {
   stateDirectory,
 } from './github-coordinator-client.mjs';
 import { GitHubEventBroker, normalizeReconciliationEvent } from './github-event-broker.mjs';
+import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const COORDINATOR_PROTOCOL_VERSION = 5;
@@ -61,6 +62,14 @@ const configuredMaxBodyBytes = Number(process.env.FRONTALIERE_GH_MAX_BODY_BYTES 
 const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxBodyBytes >= 1024
   ? Math.floor(configuredMaxBodyBytes)
   : 8 * 1024 * 1024;
+// The persistent services have exactly these two identities.  Other names are
+// used by isolated coordinator unit fixtures and do not represent a production
+// receiver/token route; they remain deliberately unbound here.
+const EVENT_ROUTING_IDENTITIES = new Set(['default', 'nanako']);
+
+function eventRoutingRequired(identity, spec) {
+  return EVENT_ROUTING_IDENTITIES.has(identity) || hasEventRoute(spec?.repo);
+}
 export const RESPONSE_TRUNCATED_CODE = 'response_body_truncated';
 // Exit code dedicato (sysexits EX_DATAERR): distingue «risposta tagliata dal
 // nostro cap» da 1 (errore HTTP/rete) e da 0 (risposta completa).
@@ -101,10 +110,11 @@ function legacyEventStatePath(identity) {
   return directory ? join(directory, `github-events-${normalizeIdentity(identity)}.json`) : null;
 }
 
-const WATCHED_SOURCE_NAMES = new Set([
+export const WATCHED_SOURCE_NAMES = new Set([
   'github-coordinator-client.mjs',
   'github-coordinator.mjs',
   'github-event-broker.mjs',
+  'github-event-routing.mjs',
   'github-coordinator-launcher',
 ]);
 
@@ -881,7 +891,7 @@ function isPastRateLimitReset(observed, now = Date.now()) {
 
 export class GitHubCoordinator {
   constructor({ identity, token, realGh, socket, eventBroker = null }) {
-    this.identity = identity;
+    this.identity = normalizeIdentity(identity);
     this.token = token;
     this.realGh = realGh;
     this.socket = socket;
@@ -1122,6 +1132,9 @@ export class GitHubCoordinator {
 
   async eventSubscription(spec) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    if (eventRoutingRequired(this.identity, spec)) {
+      assertEventIdentity({ spec, actualIdentity: this.identity, operation: 'subscribe' });
+    }
     if (!this.eventBroker.webhookSecret) {
       const error = new Error('event subscriptions require a configured webhook secret');
       error.code = 'event_webhook_secret_unconfigured';
@@ -1270,7 +1283,14 @@ export class GitHubCoordinator {
 
   ingestWebhook(request) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
-    const result = this.eventBroker.ingestWebhook(request);
+    const result = this.eventBroker.ingestWebhook(request, {
+      beforePersist: (payload) => {
+        const spec = { repo: payload?.repository?.full_name };
+        if (eventRoutingRequired(this.identity, spec)) {
+          assertEventIdentity({ spec, actualIdentity: this.identity, operation: 'webhook' });
+        }
+      },
+    });
     for (const subscriptionId of result.matchedSubscriptionIds || []) {
       this.eventNotifier?.(subscriptionId);
     }
@@ -1365,6 +1385,13 @@ export class GitHubCoordinator {
         ok: false,
         error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
       };
+    }
+    if (eventRoutingRequired(this.identity, subscription)) {
+      assertEventIdentity({
+        spec: subscription,
+        actualIdentity: this.identity,
+        operation: 'reconcile',
+      });
     }
     let path;
     let listWorkflowRuns = false;
@@ -2159,6 +2186,10 @@ function readTokenAndStart(identity) {
       'existingSubscription',
       'targetKey',
       'sharedObserverRecommended',
+      'repo',
+      'actualIdentity',
+      'expectedIdentity',
+      'nextAction',
       'exitCode',
     ]) {
       if (error?.[field] !== undefined) details[field] = error[field];

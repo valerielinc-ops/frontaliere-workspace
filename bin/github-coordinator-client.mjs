@@ -53,7 +53,7 @@ export function requestTimeoutMilliseconds(request) {
 }
 
 export function normalizeIdentity(value = process.env.FRONTALIERE_GH_IDENTITY || 'default') {
-  const identity = String(value || 'default').trim();
+  const identity = String(value || 'default').trim().toLowerCase();
   if (!/^[A-Za-z0-9._-]+$/.test(identity)) {
     throw new Error(`invalid_github_identity: ${identity}`);
   }
