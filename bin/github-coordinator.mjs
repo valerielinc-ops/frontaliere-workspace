@@ -1636,7 +1636,9 @@ export class GitHubCoordinator {
       : request;
     const isGet = queuedRequest.type === 'api' && isSafeRead(queuedRequest.method);
     const key = isGet ? scopedCacheKeyFor(queuedRequest) : null;
-    const isReadCli = queuedRequest.type === 'exec' && !cliCommandIsMutation(queuedRequest.args || []);
+    const isReadCli = queuedRequest.type === 'exec'
+      && !cliCommandIsMutation(queuedRequest.args || [])
+      && !cliCommandWritesLocalOutput(queuedRequest.args || []);
     const cliKey = isReadCli ? cliCacheKeyFor(queuedRequest) : null;
     const cachedCli = cliKey ? this.cliCache.get(cliKey) : null;
     if (cachedCli && cachedCli.expiresAt > Date.now()) {
@@ -2115,7 +2117,17 @@ function cliCommandIsMutation(args) {
   }
   if (args[0] === 'graphql') return args.includes('--field') || args.includes('-f') || args.includes('--raw-field');
   const readOnly = new Set(['list', 'view', 'status', 'diff', 'checks', 'log']);
-  return !readOnly.has(args[1]);
+  return !readOnly.has(args[1]) && !cliCommandWritesLocalOutput(args);
+}
+
+// `gh run download` / `gh release download` only READ from GitHub, but their
+// result is the files they write under the caller's cwd. Treating them as a
+// mutation parked every write of the workspace behind a 240 MB artifact for
+// ~19.5 minutes (nextRunnableJob skips mutations while one is active). They
+// are not cacheable either: a cached `ok` would report a download that wrote
+// nothing, so they bypass the CLI cache and the in-flight dedup.
+function cliCommandWritesLocalOutput(args) {
+  return args[1] === 'download' && (args[0] === 'run' || args[0] === 'release');
 }
 
 function readTokenAndStart(identity) {

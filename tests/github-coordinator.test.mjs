@@ -410,8 +410,11 @@ test('classifica le letture CLI note e tratta i verbi sconosciuti come mutation'
   ]) {
     assert.equal(isMutation([noun, verb]), false, `gh ${noun} ${verb}`);
   }
+  assert.equal(isMutation(['run', 'download', '123', '--dir', 'out']), false, 'gh run download');
+  assert.equal(isMutation(['release', 'download', 'v1']), false, 'gh release download');
   assert.equal(isMutation(['pr', 'review']), true);
   assert.equal(isMutation(['workflow', 'run']), true);
+  assert.equal(isMutation(['future', 'download']), true);
   assert.equal(isMutation(['future', 'verb']), true);
 });
 
@@ -493,6 +496,37 @@ test('blocca gh run watch prima di avviare un subprocess', async () => {
     assert.equal(response.exitCode, 2);
     assert.match(response.stderr, /gh run watch è vietato/);
     assert.equal(existsSync(join(directory, 'invocations.jsonl')), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('gh run download non entra in cache: ogni richiesta riesegue il download', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-cli-download-'));
+  const realGh = createFakeGh(directory);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+  const request = {
+    type: 'exec',
+    identity: 'test',
+    args: ['run', 'download', '42', '--repo', 'owner/repo', '--dir', 'out'],
+    cwd: directory,
+  };
+
+  try {
+    const first = await coordinator.submit(request);
+    const second = await coordinator.submit(request);
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.notEqual(second.fromCache, true);
+    assert.equal(coordinator.metrics.cliCacheHits, 0);
+    assert.equal(coordinator.cliCache.size, 0);
+    const invocations = readFileSync(join(directory, 'invocations.jsonl'), 'utf8').trim().split('\n');
+    assert.equal(invocations.length, 2);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
