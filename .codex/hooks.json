@@ -29,6 +29,12 @@
             "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-body-check-gate.mjs'",
             "statusMessage": "Controllo del contratto del body PR"
+          },
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-collision-precheck.mjs\" || true'",
+            "timeout": 25,
+            "statusMessage": "Avviso collisioni con PR aperte"
           }
         ]
       },
