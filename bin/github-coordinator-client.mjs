@@ -10,6 +10,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createConnection } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import {
   mkdirSync,
   openSync,
@@ -136,11 +137,20 @@ function rememberProtocolStatus(identity, response) {
   return previous;
 }
 
+// Socket chunks split at arbitrary byte offsets. Decoding each chunk on its own
+// turns a multi-byte character cut in two into U+FFFD, which silently alters
+// webhook bodies (HMAC mismatch) and gh output. Keep one decoder per stream.
+export function createUtf8ChunkDecoder() {
+  const decoder = new StringDecoder('utf8');
+  return (chunk) => (typeof chunk === 'string' ? chunk : decoder.write(chunk));
+}
+
 function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {}) {
   const targetSocket = socketPath(identity);
   return new Promise((resolvePromise, reject) => {
     let settled = false;
     let buffer = '';
+    const decodeChunk = createUtf8ChunkDecoder();
     const socket = createConnection(targetSocket);
     const timer = setTimeout(() => {
       socket.destroy();
@@ -167,7 +177,7 @@ function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {})
       socket.write(`${JSON.stringify(request)}\n`);
     });
     socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
+      buffer += decodeChunk(chunk);
       const newline = buffer.indexOf('\n');
       if (newline < 0) return;
       const line = buffer.slice(0, newline);
@@ -618,6 +628,7 @@ export async function listenForEvent(subscriptionId, {
     const openSocket = () => {
       if (settled) return;
       const candidate = createConnection(socketPath(normalized));
+      const decodeCandidateChunk = createUtf8ChunkDecoder();
       socket = candidate;
       let buffer = '';
       let disconnected = false;
@@ -645,7 +656,7 @@ export async function listenForEvent(subscriptionId, {
         })}\n`);
       });
       candidate.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
+        buffer += decodeCandidateChunk(chunk);
         let newline;
         while ((newline = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, newline);
