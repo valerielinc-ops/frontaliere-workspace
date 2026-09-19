@@ -22,6 +22,8 @@ import {
   GitHubCoordinator,
   isSafeRead,
   parseGhApiArguments,
+  RESPONSE_TRUNCATED_CODE,
+  RESPONSE_TRUNCATED_EXIT_CODE,
   retryDelayMilliseconds,
 } from '../bin/github-coordinator.mjs';
 import {
@@ -602,7 +604,7 @@ test('non segue i redirect che restano su github.com o api.github.com', async ()
   }
 });
 
-test('limita a MAX_BODY_BYTES la risposta API ricevuta via stream', async () => {
+test('segnala invece di consegnare la risposta API tagliata a MAX_BODY_BYTES', async () => {
   const maxBodyBytes = 8 * 1024 * 1024;
   const responseBody = fakeStreamingResponse(200, ['x'.repeat(maxBodyBytes), 'oltre il cap']);
   const originalFetch = globalThis.fetch;
@@ -622,9 +624,13 @@ test('limita a MAX_BODY_BYTES la risposta API ricevuta via stream', async () => 
       path: '/repos/owner/repo/actions/jobs/123/logs',
       cacheTtlMs: 0,
     });
-    assert.equal(response.ok, true);
-    assert.equal(response.body.length, maxBodyBytes + '\n[truncated]'.length);
-    assert.match(response.body, /\n\[truncated\]$/);
+    // Il body mutilato non viene consegnato: uscirebbe come successo e
+    // farebbe esplodere il JSON.parse del chiamante.
+    assert.equal(response.ok, false);
+    assert.equal(response.truncated, true);
+    assert.equal(response.body, '');
+    assert.equal(response.error.code, RESPONSE_TRUNCATED_CODE);
+    assert.ok(response.error.message.includes(String(maxBodyBytes)), response.error.message);
     assert.equal(responseBody.cancelled, true);
   } finally {
     globalThis.fetch = originalFetch;
@@ -2355,4 +2361,50 @@ test('riaggancia il listener dopo il riavvio, rinnova la lease e recupera il rep
     }
     rmSync(stateDirectory, { recursive: true, force: true });
   }
+});
+
+test('un body oltre il cap locale non esce piu 0 con JSON mutilato', async () => {
+  const oversized = `{"sha":"deadbeef","truncated":false,"tree":[{"path":"${'a'.repeat(9 * 1024 * 1024)}"}]}`;
+  const bytes = Buffer.byteLength(oversized, 'utf8');
+  assert.ok(bytes > 8 * 1024 * 1024, 'il body sintetico deve superare il cap');
+
+  const coordinator = {
+    identity: 'default',
+    token: 'test-token',
+    cache: new Map(),
+    metrics: {
+      requests: 0,
+      cacheHits: 0,
+      cacheRevalidations: 0,
+      networkRequests: 0,
+      anonymousRequests: 0,
+    },
+    observeBucket() {},
+    executeApi: GitHubCoordinator.prototype.executeApi,
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(oversized, {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'content-length': String(bytes) },
+  });
+
+  let result;
+  try {
+    result = await GitHubCoordinator.prototype.executeParsedApi.call(
+      coordinator,
+      parseGhApiArguments(['api', 'repos/valerielinc-ops/frontaliere-si-o-no/git/trees/deadbeef?recursive=1']),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // Prima della fix: exitCode 0 e stdout con il JSON tagliato a meta' stringa.
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.exitCode, RESPONSE_TRUNCATED_EXIT_CODE);
+  assert.equal(result.stdout, '');
+  assert.ok(result.stderr.includes(RESPONSE_TRUNCATED_CODE), result.stderr);
+  assert.ok(result.stderr.includes(String(bytes)), result.stderr);
+  assert.ok(result.stderr.includes(String(8 * 1024 * 1024)), result.stderr);
+  assert.equal(coordinator.cache.size, 0, 'un body troncato non va messo in cache');
 });

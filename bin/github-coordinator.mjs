@@ -57,7 +57,21 @@ const ANONYMOUS_WINDOW_MS = 60 * 60 * 1_000;
 const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_CACHE_TTL_MS = 5_000;
 const MAX_CACHE_TTL_MS = 60_000;
-const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const configuredMaxBodyBytes = Number(process.env.FRONTALIERE_GH_MAX_BODY_BYTES || 0);
+const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxBodyBytes >= 1024
+  ? Math.floor(configuredMaxBodyBytes)
+  : 8 * 1024 * 1024;
+export const RESPONSE_TRUNCATED_CODE = 'response_body_truncated';
+// Exit code dedicato (sysexits EX_DATAERR): distingue «risposta tagliata dal
+// nostro cap» da 1 (errore HTTP/rete) e da 0 (risposta completa).
+export const RESPONSE_TRUNCATED_EXIT_CODE = 65;
+
+export function describeTruncation(method, path, bytes) {
+  const actual = Number.isFinite(bytes) && bytes !== null
+    ? `${bytes} byte`
+    : 'dimensione non dichiarata da GitHub';
+  return `${RESPONSE_TRUNCATED_CODE}: ${method} ${path} ha un body di ${actual}, oltre il cap locale di ${MAX_BODY_BYTES} byte; il body NON viene consegnato (sarebbe JSON invalido). Alza FRONTALIERE_GH_MAX_BODY_BYTES o pagina la richiesta.`;
+}
 export const SOURCE_RELOAD_DEBOUNCE_MS = 3_000;
 export const SOURCE_RELOAD_QUIESCENCE_MS = 250;
 const OBSERVED_HEADERS = [
@@ -334,9 +348,28 @@ function trimOutput(value, maxBytes = MAX_BODY_BYTES) {
     : `${Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8')}\n[truncated]`;
 }
 
+function declaredBodyBytes(response) {
+  const raw = Number(response?.headers?.get?.('content-length'));
+  return Number.isFinite(raw) && raw >= 0 ? raw : null;
+}
+
+/**
+ * Restituisce sempre { body, truncated, bytes }.  `truncated: true` significa
+ * che il body e' stato tagliato dal NOSTRO cap: il chiamante non deve
+ * consegnarlo come risposta valida, perche' un JSON tagliato a meta' stringa
+ * esce da JSON.parse come errore di sintassi e non come errore di trasporto.
+ * `bytes` e' la dimensione reale quando GitHub manda `content-length`.
+ */
 async function readResponseBody(response) {
+  const declaredBytes = declaredBodyBytes(response);
   const reader = response?.body?.getReader?.();
-  if (!reader) return trimOutput(await response.text());
+  if (!reader) {
+    const text = String((await response.text()) || '');
+    const bytes = Buffer.byteLength(text, 'utf8');
+    return bytes <= MAX_BODY_BYTES
+      ? { body: text, truncated: false, bytes }
+      : { body: trimOutput(text), truncated: true, bytes };
+  }
 
   const chunks = [];
   let bytes = 0;
@@ -364,7 +397,8 @@ async function readResponseBody(response) {
     try { await reader.cancel(); } catch { /* best effort */ }
   }
   const body = Buffer.concat(chunks).toString('utf8');
-  return truncated ? `${body}\n[truncated]` : body;
+  if (!truncated) return { body, truncated: false, bytes };
+  return { body: `${body}\n[truncated]`, truncated: true, bytes: declaredBytes ?? null };
 }
 
 function observedHeaders(headers) {
@@ -1847,7 +1881,7 @@ export class GitHubCoordinator {
     const renderedHeaders = request.anonymous
       ? { ...responseHeaders, 'x-frontaliere-auth-mode': 'anonymous' }
       : responseHeaders;
-    const body = await readResponseBody(response);
+    const { body, truncated: bodyTruncated, bytes: bodyBytes } = await readResponseBody(response);
     if (response.status === 304 && cached) {
       this.metrics.cacheRevalidations += 1;
       cached.expiresAt = Date.now() + ttl;
@@ -1873,6 +1907,25 @@ export class GitHubCoordinator {
           message: body || `HTTP ${response.status}`,
           status: response.status,
           headers: responseHeaders,
+        },
+      };
+    }
+
+    // Un body tagliato dal nostro cap non e' una risposta: uscirebbe 0 con un
+    // JSON invalido e il chiamante diagnosticherebbe un limite di GitHub.
+    if (bodyTruncated) {
+      return {
+        ok: false,
+        status: response.status,
+        headers: renderedHeaders,
+        body: '',
+        truncated: true,
+        bodyBytes,
+        error: {
+          code: RESPONSE_TRUNCATED_CODE,
+          message: describeTruncation(request.method || 'GET', request.path, bodyBytes),
+          status: response.status,
+          headers: renderedHeaders,
         },
       };
     }
@@ -1977,6 +2030,17 @@ export class GitHubCoordinator {
           exitCode: 1,
           stdout: '',
           stderr: `${response.body || response.error?.message || 'GitHub rate limit'}\n`,
+        };
+      }
+      if (response.truncated) {
+        return {
+          ok: false,
+          exitCode: RESPONSE_TRUNCATED_EXIT_CODE,
+          truncated: true,
+          stdout: '',
+          stderr: `${response.error?.message || describeTruncation(parsed.method, path, response.bodyBytes)}\n`,
+          status: response.status,
+          headers: response.headers,
         };
       }
       if (!response.ok) {
