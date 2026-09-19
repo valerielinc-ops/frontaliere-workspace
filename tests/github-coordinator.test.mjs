@@ -51,7 +51,11 @@ import {
   normalizeReconciliationEvent,
   verifyWebhookSignature,
 } from '../bin/github-event-broker.mjs';
-import { createGitHubWebhookReceiver, webhookErrorStatus } from '../bin/github-webhook-receiver.mjs';
+import {
+  createGitHubWebhookReceiver,
+  createWorkerRotationController,
+  webhookErrorStatus,
+} from '../bin/github-webhook-receiver.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 const POLICY = join(ROOT, 'bin', 'github-api-policy.mjs');
@@ -216,6 +220,33 @@ test('accorpa gli eventi source ravvicinati e aspetta la quiescenza', async () =
   } finally {
     scheduler.stop();
   }
+});
+
+test('promuove il worker sostitutivo solo dopo che il listener condiviso è pronto', () => {
+  const workers = [];
+  const disconnected = [];
+  const rotation = createWorkerRotationController({
+    forkWorker: () => {
+      const worker = { id: workers.length + 1 };
+      workers.push(worker);
+      return worker;
+    },
+    disconnectWorker: (worker) => disconnected.push(worker.id),
+  });
+
+  const first = rotation.start();
+  assert.equal(first.id, 1);
+  assert.equal(rotation.reload(), false);
+  assert.equal(rotation.markListening(first), true);
+
+  assert.equal(rotation.reload(), true);
+  const second = workers[1];
+  assert.deepEqual(disconnected, []);
+  assert.equal(rotation.markListening(second), true);
+  assert.deepEqual(disconnected, [1]);
+  assert.equal(rotation.snapshot().activeWorker, second);
+  rotation.stop();
+  assert.deepEqual(disconnected, [1, 2]);
 });
 
 test('mantiene i listener SIGTERM e SIGINT del coordinator su un exit code numerico', () => {
@@ -1633,6 +1664,7 @@ test('fan-out shared riusa una subscription canonica', () => {
 
 test('classifica il timeout del coordinatore webhook come errore transitorio 503', () => {
   assert.equal(webhookErrorStatus({ code: 'GITHUB_COORDINATOR_TIMEOUT' }), 503);
+  assert.equal(webhookErrorStatus({ code: 'ENOSPC' }), 503);
   assert.equal(webhookErrorStatus({ code: 'event_webhook_signature_invalid' }), 401);
   assert.equal(webhookErrorStatus({ code: 'event_webhook_payload_invalid' }), 400);
 });
