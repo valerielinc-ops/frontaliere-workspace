@@ -274,3 +274,26 @@ test('il daemon accetta un webhook firmato con caratteri multibyte spezzati sul 
     rmSync(stateDirectory, { recursive: true, force: true });
   }
 });
+
+test('una lettura lenta del token viene ritentata invece di far morire il daemon', async () => {
+  const { resolveToken } = await import('../bin/github-coordinator.mjs');
+  const saved = { FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN, GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN };
+  delete process.env.FRONTALIERE_GH_TOKEN; delete process.env.GH_TOKEN; delete process.env.GITHUB_TOKEN;
+  try {
+    let calls = 0;
+    const token = resolveToken('default', '/bin/false', {
+      exec: (_bin, _args, options) => {
+        calls += 1;
+        assert.equal(options.timeout, 30_000);
+        if (calls < 3) throw Object.assign(new Error('spawnSync ETIMEDOUT'), { code: 'ETIMEDOUT' });
+        return 'token-value\n';
+      },
+    });
+    assert.equal(token, 'token-value');
+    assert.equal(calls, 3);
+    assert.throws(() => resolveToken('default', '/bin/false', { exec: () => { throw new Error('x'); } }),
+      /github_token_unavailable_for_identity: default/);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) if (value !== undefined) process.env[name] = value;
+  }
+});

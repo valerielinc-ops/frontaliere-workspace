@@ -524,18 +524,32 @@ function tokenFromEnvironment(identity) {
   return candidates.find((value) => typeof value === 'string' && value.length > 0) || null;
 }
 
-function resolveToken(identity, realGh) {
+// 19-09 20:00: with the machine at load average 72 the keychain read behind
+// `gh auth token` exceeded the old 10 s timeout, the daemon exited and launchd
+// restarted it in a loop, leaving every agent without the default coordinator
+// for minutes. A slow keychain is not a missing token: allow more time and
+// retry before giving up.
+export const TOKEN_READ_TIMEOUT_MS = 30_000;
+export const TOKEN_READ_ATTEMPTS = 3;
+
+export function resolveToken(identity, realGh, {
+  exec = execFileSync,
+  timeoutMs = TOKEN_READ_TIMEOUT_MS,
+  attempts = TOKEN_READ_ATTEMPTS,
+} = {}) {
   const fromEnvironment = tokenFromEnvironment(identity);
   if (fromEnvironment) return fromEnvironment;
-  try {
-    const token = execFileSync(realGh, ['auth', 'token', '--hostname', 'github.com'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 10_000,
-    }).trim();
-    if (token) return token;
-  } catch {
-    // Report a redacted, actionable error below.
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const token = String(exec(realGh, ['auth', 'token', '--hostname', 'github.com'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: timeoutMs,
+      })).trim();
+      if (token) return token;
+    } catch {
+      // Report a redacted, actionable error below after the last attempt.
+    }
   }
   throw new Error(`github_token_unavailable_for_identity: ${identity}`);
 }
