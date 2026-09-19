@@ -87,12 +87,23 @@ function entryPaths(entry) {
   return { corpusPath: manifestPath, sitePath };
 }
 
+function fixRepoOf(entry) {
+  return FIX_REPO_BY_MODE[entry?.mode] || null;
+}
+
+// A site file may legitimately fan out to several corpus copies (for example the
+// observer workflows that the corpus keeps both under .github/workflows/ and
+// .github/workflows/observers/). A duplicate is therefore never fatal: the index
+// keeps every entry and records a warning only when the entries disagree on where
+// to fix, or when the same corpus path is declared twice.
 export function createManifestIndex(entries) {
   if (!Array.isArray(entries)) {
     throw new WhereToFixError('MANIFEST_SHAPE', 'Il manifest non contiene un array files valido.');
   }
 
   const byRepo = { site: new Map(), corpus: new Map() };
+  const allByRepo = { site: new Map(), corpus: new Map() };
+  const warnings = [];
   for (const entry of entries) {
     const paths = entryPaths(entry);
     if (!paths || typeof entry.mode !== 'string') {
@@ -102,14 +113,23 @@ export function createManifestIndex(entries) {
     const pathsByRepo = { corpus: paths.corpusPath, site: paths.sitePath };
     for (const [repo, relativePath] of Object.entries(pathsByRepo)) {
       if (!relativePath) continue;
-      if (byRepo[repo].has(relativePath)) {
-        throw new WhereToFixError('MANIFEST_SHAPE', `Il manifest contiene path duplicato sul lato ${repo}: ${relativePath}`);
+      const bucket = allByRepo[repo].get(relativePath);
+      if (!bucket) {
+        allByRepo[repo].set(relativePath, [entry]);
+        byRepo[repo].set(relativePath, entry);
+        continue;
       }
-      byRepo[repo].set(relativePath, entry);
+      bucket.push(entry);
+      const fixRepos = new Set(bucket.map(fixRepoOf));
+      if (repo === 'corpus') {
+        warnings.push(`Path duplicato sul lato corpus (vale la prima voce): ${relativePath}`);
+      } else if (fixRepos.size > 1) {
+        warnings.push(`Voci in conflitto sul lato site (${bucket.map((item) => item.mode).join(' vs ')}): ${relativePath}`);
+      }
     }
   }
 
-  return { byRepo };
+  return { byRepo, allByRepo, warnings };
 }
 
 export function loadManifest({ workspaceRoot = findWorkspaceRoot(), manifestPath } = {}) {
@@ -245,12 +265,28 @@ export function resolvePath(inputPath, {
 } = {}) {
   const manifestIndex = index || createManifestIndex(entries || []);
   const resolved = resolveInputPath(inputPath, { cwd, workspaceRoot, index: manifestIndex, fsImpl });
-  const entry = manifestIndex.byRepo[resolved.repo].get(resolved.relativePath) || null;
-  const mode = entry?.mode || null;
-  const fixRepo = mode ? FIX_REPO_BY_MODE[mode] || null : null;
-  const paths = entryPaths(entry);
+  const matched = manifestIndex.allByRepo?.[resolved.repo]?.get(resolved.relativePath)
+    || [manifestIndex.byRepo[resolved.repo].get(resolved.relativePath)].filter(Boolean);
+  const entry = matched[0] || null;
+  const fixRepos = [...new Set(matched.map(fixRepoOf))];
+  const conflicting = fixRepos.length > 1;
+  const mode = conflicting ? matched.map((item) => item.mode).join('|') : entry?.mode || null;
+  const fixRepo = conflicting ? null : entry ? fixRepoOf(entry) : null;
   const otherRepo = resolved.repo === 'site' ? 'corpus' : 'site';
-  const correspondingPath = paths ? paths[otherRepo === 'site' ? 'sitePath' : 'corpusPath'] : null;
+  const otherKey = otherRepo === 'site' ? 'sitePath' : 'corpusPath';
+  const correspondingAll = [...new Set(matched.map((item) => entryPaths(item)?.[otherKey]).filter(Boolean))]
+    .map((correspondingPath) => ({ repo: otherRepo, repoName: REPO_NAMES[otherRepo], path: correspondingPath }));
+  const warnings = [];
+  if (conflicting) {
+    warnings.push(`Il manifest dichiara ${matched.length} voci con destinazioni diverse (${fixRepos.map((repo) => repo || 'nessuna').join(', ')}): verifica a mano.`);
+  } else if (resolved.repo === 'corpus' && matched.length > 1) {
+    warnings.push(`Il manifest dichiara ${matched.length} volte questo path corpus: vale la prima voce.`);
+  }
+
+  let reason;
+  if (conflicting) reason = 'Voci del manifest in conflitto: nessuna destinazione automatica.';
+  else if (mode) reason = MODE_REASONS[mode] || `Mode ${mode} non riconosciuto: nessuna destinazione automatica.`;
+  else reason = 'Nessuna entry nel manifest: nessun vincolo di mirror.';
 
   return {
     input: inputPath,
@@ -260,13 +296,11 @@ export function resolvePath(inputPath, {
     mode,
     fixRepo,
     fixRepoName: fixRepo ? REPO_NAMES[fixRepo] : null,
-    corresponding: correspondingPath
-      ? { repo: otherRepo, repoName: REPO_NAMES[otherRepo], path: correspondingPath }
-      : null,
-    reason: mode
-      ? MODE_REASONS[mode] || `Mode ${mode} non riconosciuto: nessuna destinazione automatica.`
-      : 'Nessuna entry nel manifest: nessun vincolo di mirror.',
+    corresponding: correspondingAll[0] || null,
+    correspondingAll,
+    reason,
     manifestReason: entry?.reason || null,
+    warnings,
     repoMatchesFix: !fixRepo || fixRepo === resolved.repo,
   };
 }
@@ -275,8 +309,11 @@ export function formatHuman(report) {
   const status = report.repoMatchesFix ? '✓' : '⚠️';
   const mode = report.mode || 'assente (nessuna entry)';
   const fixRepo = report.fixRepo ? `${report.fixRepo.toUpperCase()} (${report.fixRepoName})` : 'nessun vincolo';
-  const corresponding = report.corresponding
-    ? `${report.corresponding.repoName}/${report.corresponding.path}`
+  const correspondingList = report.correspondingAll?.length
+    ? report.correspondingAll
+    : report.corresponding ? [report.corresponding] : [];
+  const corresponding = correspondingList.length
+    ? correspondingList.map((item) => `${item.repoName}/${item.path}`).join(', ')
     : 'nessuno';
 
   return [
@@ -286,5 +323,6 @@ export function formatHuman(report) {
     `  correggere in: ${fixRepo}`,
     `  path corrispondente: ${corresponding}`,
     `  motivo: ${report.reason}`,
+    ...(report.warnings || []).map((warning) => `  avviso: ${warning}`),
   ].join('\n');
 }

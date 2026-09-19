@@ -3,6 +3,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  createManifestIndex,
   findWorkspaceRoot,
   loadManifest,
   resolvePath,
@@ -68,4 +69,45 @@ test('un path non dichiarato è esplicitamente senza vincolo', () => {
   assert.equal(report.fixRepo, null);
   assert.equal(report.corresponding, null);
   assert.equal(report.repoMatchesFix, true);
+});
+
+test('un sitePath condiviso da piu voci corpus non blocca i lookup', () => {
+  const sitePath = '.github/corpus-workflows/observers/workflows/shadow.yml';
+  const entries = [
+    { path: '.github/workflows/shadow.yml', sitePath, mode: 'identical' },
+    { path: '.github/workflows/observers/workflows/shadow.yml', sitePath, mode: 'identical' },
+    { path: 'scripts/ci/other.mjs', mode: 'adapted' },
+  ];
+  const index = createManifestIndex(entries);
+  assert.deepEqual(index.warnings, []);
+
+  const fromSite = resolvePath(absolute('site', sitePath), { workspaceRoot, index });
+  assert.equal(fromSite.fixRepo, 'site');
+  assert.equal(fromSite.repoMatchesFix, true);
+  assert.deepEqual(fromSite.correspondingAll.map((item) => item.path), [entries[0].path, entries[1].path]);
+  assert.deepEqual(fromSite.warnings, []);
+
+  const unrelated = resolvePath(absolute('corpus', 'scripts/ci/other.mjs'), { workspaceRoot, index });
+  assert.equal(unrelated.fixRepo, 'corpus');
+});
+
+test('voci in conflitto o path corpus duplicato avvisano senza lanciare', () => {
+  const sitePath = 'scripts/ci/shared.mjs';
+  const entries = [
+    { path: 'scripts/ci/shared.mjs', mode: 'identical' },
+    { path: 'scripts/ci/shared-copy.mjs', sitePath, mode: 'adapted' },
+    { path: 'scripts/ci/dup.mjs', mode: 'adapted' },
+    { path: 'scripts/ci/dup.mjs', mode: 'corpus-only' },
+  ];
+  const index = createManifestIndex(entries);
+  assert.equal(index.warnings.length, 2);
+
+  const conflict = resolvePath(absolute('site', sitePath), { workspaceRoot, index });
+  assert.equal(conflict.fixRepo, null);
+  assert.equal(conflict.repoMatchesFix, true);
+  assert.equal(conflict.warnings.length, 1);
+
+  const dup = resolvePath(absolute('corpus', 'scripts/ci/dup.mjs'), { workspaceRoot, index });
+  assert.equal(dup.mode, 'adapted');
+  assert.equal(dup.warnings.length, 1);
 });

@@ -21,6 +21,9 @@ if (!paths.length) {
 try {
   const workspaceRoot = findWorkspaceRoot(fileURLToPath(import.meta.url));
   const manifest = loadManifest({ workspaceRoot });
+  for (const warning of manifest.index.warnings || []) {
+    console.error(`⚠️ manifest: ${warning}`);
+  }
   const reports = paths.map((inputPath) => resolvePath(inputPath, {
     workspaceRoot,
     index: manifest.index,
