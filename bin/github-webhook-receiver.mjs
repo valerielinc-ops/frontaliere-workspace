@@ -9,6 +9,7 @@
 
 import { createServer } from 'node:http';
 import { watch } from 'node:fs';
+import cluster from 'node:cluster';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,6 +37,7 @@ const TRANSIENT_COORDINATOR_ERRORS = new Set([
   'github_coordinator_timeout',
   'github_coordinator_unavailable',
   'github_coordinator_start_timeout',
+  'ENOSPC',
 ]);
 
 export function webhookErrorStatus(error) {
@@ -116,6 +118,57 @@ function createDebouncedReloadScheduler({ onReload, getActiveRequests = () => 0 
   };
 }
 
+export function createWorkerRotationController({ forkWorker, disconnectWorker = (worker) => worker.disconnect() } = {}) {
+  if (typeof forkWorker !== 'function') throw new TypeError('fork_worker_required');
+
+  let activeWorker = null;
+  let pendingWorker = null;
+  let stopped = false;
+
+  const spawn = () => {
+    if (stopped) return null;
+    pendingWorker = forkWorker();
+    return pendingWorker;
+  };
+
+  return {
+    start() {
+      if (activeWorker || pendingWorker) return null;
+      return spawn();
+    },
+    reload() {
+      if (stopped || pendingWorker) return false;
+      spawn();
+      return true;
+    },
+    markListening(worker) {
+      if (stopped || worker !== pendingWorker) return false;
+      const previousWorker = activeWorker;
+      activeWorker = worker;
+      pendingWorker = null;
+      if (previousWorker && previousWorker !== worker) disconnectWorker(previousWorker);
+      return true;
+    },
+    markExit(worker) {
+      if (worker === pendingWorker) pendingWorker = null;
+      if (worker === activeWorker) activeWorker = null;
+      if (!stopped && !activeWorker && !pendingWorker) return spawn();
+      return null;
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      const workers = [activeWorker, pendingWorker].filter(Boolean);
+      activeWorker = null;
+      pendingWorker = null;
+      for (const worker of workers) disconnectWorker(worker);
+    },
+    snapshot() {
+      return { activeWorker, pendingWorker, stopped };
+    },
+  };
+}
+
 function installProcessSafetyHandlers(terminate) {
   let handlingFailure = false;
   const handleFailure = (event, error) => {
@@ -131,15 +184,17 @@ function installProcessSafetyHandlers(terminate) {
   process.on('unhandledRejection', (reason) => handleFailure('unhandled_rejection', reason));
 }
 
-function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = {}) {
+function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0, continuous = false } = {}) {
   let triggered = false;
   let watcher;
   let scheduler;
   const triggerReload = () => {
     if (triggered) return;
-    triggered = true;
-    scheduler.stop();
-    try { watcher?.close(); } catch { /* watcher already closed */ }
+    if (!continuous) {
+      triggered = true;
+      scheduler.stop();
+      try { watcher?.close(); } catch { /* watcher already closed */ }
+    }
     process.stderr.write('github-webhook-receiver: source quiescent; restarting under supervisor\n');
     onReload();
   };
@@ -223,15 +278,17 @@ function optionValue(args, name, fallback) {
   return args[index].startsWith(`${name}=`) ? args[index].slice(name.length + 1) : args[index + 1] || fallback;
 }
 
-function main() {
-  const args = process.argv.slice(2);
+function receiverOptions(args = process.argv.slice(2)) {
   const identity = optionValue(args, '--identity', process.env.FRONTALIERE_GH_IDENTITY);
   const host = optionValue(args, '--host', process.env.FRONTALIERE_WEBHOOK_HOST || DEFAULT_HOST);
   const port = Number(optionValue(args, '--port', process.env.FRONTALIERE_WEBHOOK_PORT || DEFAULT_PORT));
   const path = optionValue(args, '--path', process.env.FRONTALIERE_WEBHOOK_PATH || DEFAULT_PATH);
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) throw new Error('webhook_port_invalid');
+  return { identity, host, port, path };
+}
+
+function startReceiverWorker({ identity, host, port, path }) {
   let activeRequestCount = 0;
-  let stopSourceWatcher = () => {};
   let terminating = false;
   const server = createGitHubWebhookReceiver({
     identity,
@@ -245,7 +302,6 @@ function main() {
       return;
     }
     terminating = true;
-    stopSourceWatcher();
     server.close(() => process.exit(exitCode));
     setTimeout(() => process.exit(exitCode), 1_000);
   };
@@ -254,12 +310,57 @@ function main() {
     terminate(1);
   });
   installProcessSafetyHandlers(terminate);
+  process.once('disconnect', () => terminate(0));
   server.listen(port, host, () => {
-    stopSourceWatcher = installSourceReloadWatcher(terminate, {
-      getActiveRequests: () => activeRequestCount,
-    });
     process.stdout.write(`github-webhook-receiver listening on http://${host}:${port}${path}\n`);
   });
+}
+
+function startReceiverSupervisor(options) {
+  cluster.setupPrimary({ exec: fileURLToPath(import.meta.url) });
+  let stopSourceWatcher = () => {};
+  let terminating = false;
+  const rotation = createWorkerRotationController({
+    forkWorker: () => {
+      const worker = cluster.fork();
+      worker.on('error', (error) => logStructuredError('worker_error', error, { workerId: worker.id }));
+      return worker;
+    },
+    disconnectWorker: (worker) => worker.disconnect(),
+  });
+  const terminate = (exitCode = 0) => {
+    if (terminating) {
+      if (exitCode !== 0) process.exitCode = exitCode;
+      return;
+    }
+    terminating = true;
+    stopSourceWatcher();
+    rotation.stop();
+    process.exit(exitCode);
+  };
+  installProcessSafetyHandlers(terminate);
+  cluster.on('listening', (worker) => {
+    if (rotation.markListening(worker)) {
+      process.stderr.write(`github-webhook-receiver: worker ${worker.id} ready; previous worker drained\n`);
+    }
+  });
+  cluster.on('exit', (worker, code, signal) => {
+    const replacement = rotation.markExit(worker);
+    if (replacement) {
+      process.stderr.write(`github-webhook-receiver: worker ${worker.id} exited (${code ?? 'null'}/${signal ?? 'none'}); replacement forked\n`);
+    }
+  });
+  stopSourceWatcher = installSourceReloadWatcher(() => {
+    if (rotation.reload()) process.stderr.write('github-webhook-receiver: replacement worker forked\n');
+  }, { continuous: true });
+  rotation.start();
+  process.stdout.write(`github-webhook-receiver supervisor active for http://${options.host}:${options.port}${options.path}\n`);
+}
+
+function main() {
+  const options = receiverOptions();
+  if (cluster.isPrimary) startReceiverSupervisor(options);
+  else startReceiverWorker(options);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
