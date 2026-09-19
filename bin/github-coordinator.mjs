@@ -520,7 +520,7 @@ function resolveRealGh() {
 function tokenFromEnvironment(identity) {
   const candidates = identity === 'nanako'
     ? [process.env.GITHUB_PAT_NANAKO, process.env.FRONTALIERE_GH_TOKEN_NANAKO, process.env.GH_TOKEN]
-    : [process.env.FRONTALIERE_GH_TOKEN, process.env.GH_TOKEN, process.env.GITHUB_TOKEN];
+    : [process.env.FRONTALIERE_GH_TOKEN, process.env.GITHUB_PAT, process.env.GH_TOKEN, process.env.GITHUB_TOKEN];
   return candidates.find((value) => typeof value === 'string' && value.length > 0) || null;
 }
 
