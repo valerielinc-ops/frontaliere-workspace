@@ -6,8 +6,23 @@ script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 # Client auto-starts must load the same Remote Config secret as the persistent
 # launch agent.  Keep an explicit test/workflow override when one is present.
-if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ]; then
+# The webhook secret alone is not an authenticated GitHub API credential.  A
+# launchd environment can retain the former while losing the Remote Config
+# token, so hydrate RC whenever no GitHub token is present.
+if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ] || {
+  [ -z "${FRONTALIERE_GH_TOKEN:-}" ] &&
+  [ -z "${GH_TOKEN:-}" ] &&
+  [ -z "${GITHUB_TOKEN:-}" ] &&
+  [ -z "${GITHUB_PAT:-}" ];
+}; then
   . "$script_dir/rc-env.sh" >/dev/null 2>&1
+fi
+
+# Remote Config names the default owner's credential GITHUB_PAT.  Keep the
+# coordinator's process contract explicit without persisting or printing the
+# secret.
+if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -n "${GITHUB_PAT:-}" ]; then
+  export FRONTALIERE_GH_TOKEN="$GITHUB_PAT"
 fi
 
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
