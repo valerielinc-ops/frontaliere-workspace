@@ -2,6 +2,7 @@
   "version": 1,
   "routes": {
     "valerielinc-ops/frontaliere-si-o-no": "default",
-    "nanakokyobashi-rgb/frontaliere-articles": "nanako"
+    "nanakokyobashi-rgb/frontaliere-articles": "nanako",
+    "valerielinc-ops/frontaliere-workspace": "default"
   }
 }

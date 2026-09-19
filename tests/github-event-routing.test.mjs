@@ -15,6 +15,7 @@ import {
 
 const SITE_REPO = 'valerielinc-ops/frontaliere-si-o-no';
 const CORPUS_REPO = 'nanakokyobashi-rgb/frontaliere-articles';
+const WORKSPACE_REPO = 'valerielinc-ops/frontaliere-workspace';
 
 function fakeResponse(body) {
   return {
@@ -51,7 +52,8 @@ test('la configurazione versionata espone solo le route production attese', () =
   assert.equal(routing.version, 1);
   assert.equal(routing.routes.get(SITE_REPO), 'default');
   assert.equal(routing.routes.get(CORPUS_REPO), 'nanako');
-  assert.equal(routing.routes.size, 2);
+  assert.equal(routing.routes.get(WORKSPACE_REPO), 'default');
+  assert.equal(routing.routes.size, 3);
 });
 
 test('canonicalizza le identità prima della selezione del coordinatore', () => {
@@ -278,6 +280,43 @@ test('accetta una subscription sito sul coordinatore default e riconcilia via fi
     assert.equal(result.ok, true);
     assert.equal(calls.length, 1);
     assert.match(calls[0], /repos\/valerielinc-ops\/frontaliere-si-o-no\/pulls\/9215$/);
+    assert.equal(broker.state.subscriptions.length, 1);
+  } finally {
+    restoreFetch();
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('accetta una subscription workspace sul coordinatore default e riconcilia via fixture', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-event-routing-workspace-'));
+  const calls = [];
+  const { broker, coordinator, restoreFetch } = coordinatorFixture({
+    identity: 'default',
+    stateDirectory,
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return fakeResponse({
+        number: 78,
+        state: 'closed',
+        merged: true,
+        merged_at: '2026-09-19T10:12:57Z',
+        updated_at: '2026-09-19T10:12:57Z',
+        head: { sha: 'routing-workspace-head' },
+      });
+    },
+  });
+
+  try {
+    const result = await coordinator.eventSubscription({
+      repo: WORKSPACE_REPO,
+      resource: 'pull_request',
+      number: 78,
+      waitFor: ['merged'],
+      ttlSeconds: 60,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /repos\/valerielinc-ops\/frontaliere-workspace\/pulls\/78$/);
     assert.equal(broker.state.subscriptions.length, 1);
   } finally {
     restoreFetch();
