@@ -40,6 +40,11 @@
           {
             "type": "command",
             "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-body-check-gate.mjs\"'"
+          },
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-collision-precheck.mjs\" || true'",
+            "timeout": 25
           }
         ]
       },
