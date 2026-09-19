@@ -34,6 +34,20 @@ export function eventLifecycleHealth(eventSummary, identity) {
     if (check.count <= 0) continue;
     (check.count >= EVENT_HEALTH_ALERT_THRESHOLD ? alerts : warnings).push(check);
   }
+  // The daemon's hourly dry-run GC: an event delivered to nobody for over an
+  // hour means an agent died waiting (e.g. a `merged` pending for 5 h), which
+  // is always worth an alarm, not a warning.
+  const orphanedWithPending = Array.isArray(eventSummary?.scheduledGc?.orphanedWithPending)
+    ? eventSummary.scheduledGc.orphanedWithPending
+    : [];
+  if (orphanedWithPending.length > 0) {
+    alerts.push({
+      code: 'orphaned_pending_events',
+      count: orphanedWithPending.length,
+      subscriptions: orphanedWithPending,
+      message: `${identity}: ${orphanedWithPending.length} delivered events have had no listener for over an hour`,
+    });
+  }
   return { alerts, warnings };
 }
 

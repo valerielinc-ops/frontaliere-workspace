@@ -29,13 +29,14 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
+  createUtf8ChunkDecoder,
   normalizeIdentity,
   coordinatorOwnerLockPath,
   legacyStateDirectory,
   socketPath,
   stateDirectory,
 } from './github-coordinator-client.mjs';
-import { GitHubEventBroker, normalizeReconciliationEvent } from './github-event-broker.mjs';
+import { GitHubEventBroker, normalizeReconciliationEvent, shaMatches } from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -66,6 +67,28 @@ const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxB
 // used by isolated coordinator unit fixtures and do not represent a production
 // receiver/token route; they remain deliberately unbound here.
 const EVENT_ROUTING_IDENTITIES = new Set(['default', 'nanako']);
+
+export const EVENT_SWEEP_INTERVAL_MS = 2 * 60 * 1_000;
+export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
+export const EVENT_SWEEP_MAX_PER_RUN = 10;
+export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
+export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
+
+function reconcilableSubscription(subscription) {
+  if (subscription.resource === 'pull_request') return Boolean(subscription.number);
+  if (subscription.resource === 'workflow_run') return Boolean(subscription.runId);
+  if (subscription.resource === 'deployment') return Boolean(subscription.deploymentId);
+  return false;
+}
+
+function routeAllowsIdentity(subscription, identity) {
+  try {
+    assertEventIdentity({ spec: subscription, actualIdentity: identity, operation: 'reconcile' });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function eventRoutingRequired(identity, spec) {
   return EVENT_ROUTING_IDENTITIES.has(identity) || hasEventRoute(spec?.repo);
@@ -938,7 +961,13 @@ export class GitHubCoordinator {
       eventListenerHeartbeats: 0,
       eventListenerTimeouts: 0,
       sourceReloads: 0,
+      eventSweepReconciliations: 0,
+      eventSweepDeliveries: 0,
+      eventSweepErrors: 0,
+      eventScheduledGcRuns: 0,
     };
+    this.sweepReconciledAt = new Map();
+    this.lastScheduledGc = null;
   }
 
   status({ compact = false } = {}) {
@@ -967,6 +996,7 @@ export class GitHubCoordinator {
           timeouts: this.metrics.eventListenerTimeouts,
         },
         ...summary,
+        scheduledGc: this.lastScheduledGc,
         ...(compact && signatureFailures === 0
           ? {}
           : {
@@ -1028,6 +1058,7 @@ export class GitHubCoordinator {
           }),
           webhookSignatureFailures: Number(this.eventBroker.metrics.webhookSignatureFailures || 0),
           lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
+          scheduledGc: this.lastScheduledGc,
         }
         : { enabled: false },
       pendingCancellations: [...this.pendingCancellations.values()]
@@ -1150,6 +1181,7 @@ export class GitHubCoordinator {
     if (!createdSubscription.sharedJoin && createdSubscription.remainingMs > 1_000) {
       try {
         reconciliation = await this.reconcileEvents(createdSubscription.id);
+        this.sweepReconciledAt.set(createdSubscription.id, Date.now());
       } catch (error) {
         reconciliation = {
           ok: false,
@@ -1377,6 +1409,91 @@ export class GitHubCoordinator {
     return expiredIds;
   }
 
+  // Webhook deliveries are lost whenever the tunnel or a receiver is down
+  // (GitHub answers 502/530 and never retries), and a restart of this daemon
+  // loses whatever arrived meanwhile. Without a server-side sweep an observer
+  // then waits until its TTL for a PR merged hours earlier. The sweep re-reads
+  // each targeted subscription at most once per interval; on startup the map is
+  // empty, so every persisted subscription is caught up first.
+  async reconcileStaleSubscriptions({
+    nowMs = Date.now(),
+    minIntervalMs = EVENT_SWEEP_MIN_INTERVAL_MS,
+    maxPerSweep = EVENT_SWEEP_MAX_PER_RUN,
+  } = {}) {
+    if (!this.eventBroker) return { ok: false, reconciled: [] };
+    const liveIds = new Set(this.eventBroker.state.subscriptions.map(({ id }) => id));
+    for (const id of this.sweepReconciledAt.keys()) {
+      if (!liveIds.has(id)) this.sweepReconciledAt.delete(id);
+    }
+    const due = [...this.eventBroker.state.subscriptions]
+      .filter((subscription) => subscription
+        && subscription.pending.length === 0
+        && reconcilableSubscription(subscription)
+        && (!eventRoutingRequired(this.identity, subscription) || routeAllowsIdentity(subscription, this.identity))
+        && nowMs - (this.sweepReconciledAt.get(subscription.id) ?? 0) >= minIntervalMs)
+      .sort((left, right) => (this.sweepReconciledAt.get(left.id) ?? 0) - (this.sweepReconciledAt.get(right.id) ?? 0))
+      .slice(0, maxPerSweep);
+    const reconciled = [];
+    for (const subscription of due) {
+      this.sweepReconciledAt.set(subscription.id, nowMs);
+      this.metrics.eventSweepReconciliations += 1;
+      try {
+        const result = await this.reconcileEvents(subscription.id);
+        const delivered = (result?.matchedSubscriptionIds || []).length;
+        this.metrics.eventSweepDeliveries += delivered;
+        reconciled.push({ id: subscription.id, ok: result?.ok !== false, delivered });
+      } catch (error) {
+        this.metrics.eventSweepErrors += 1;
+        reconciled.push({ id: subscription.id, ok: false, error: error.code || error.message });
+      }
+    }
+    return { ok: true, reconciled };
+  }
+
+  // Dry-run only: removal stays an explicit `events gc --apply`. The report is
+  // kept for status/health and logged when an orphan needs a human or agent.
+  scheduledEventGarbageCollection({ nowMs = Date.now(), olderThanMs = DEFAULT_SCHEDULED_GC_AGE_MS } = {}) {
+    if (!this.eventBroker || !this.eventListenerInspector) return null;
+    const report = this.eventBroker.garbageCollect({
+      listenerAttached: this.eventListenerInspector,
+      olderThanMs,
+      apply: false,
+      includeUnique: true,
+    });
+    const orphanedWithPending = [...this.eventBroker.state.subscriptions]
+      .filter((subscription) => subscription
+        && subscription.pending.length > 0
+        && this.eventListenerInspector(subscription.id) !== true
+        && nowMs - Date.parse(subscription.pending[0]?.receivedAt || subscription.createdAt) >= olderThanMs)
+      .map((subscription) => ({
+        id: subscription.id,
+        agentId: subscription.agentId,
+        repo: subscription.repo,
+        resource: subscription.resource,
+        number: subscription.number ?? null,
+        runId: subscription.runId ?? null,
+        pendingState: subscription.pending[0]?.state ?? null,
+        pendingSince: subscription.pending[0]?.receivedAt ?? null,
+      }));
+    this.metrics.eventScheduledGcRuns += 1;
+    this.lastScheduledGc = {
+      at: new Date(nowMs).toISOString(),
+      olderThanMs,
+      orphanCandidateCount: report.candidateCount,
+      orphanCandidateIds: report.candidates.map(({ id }) => id),
+      orphanedWithPending,
+    };
+    if (report.candidateCount > 0 || orphanedWithPending.length > 0) {
+      logStructuredError('event_gc_orphans_detected', new Error('orphaned event subscriptions'), {
+        identity: this.identity,
+        orphanCandidateCount: report.candidateCount,
+        orphanedWithPending,
+        nextAction: 'bin/gh-frontaliere events gc (dry-run), then events gc --apply --include-unique if confirmed dead',
+      });
+    }
+    return this.lastScheduledGc;
+  }
+
   async reconcileEvents(subscriptionId) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
@@ -1441,7 +1558,7 @@ export class GitHubCoordinator {
           || run.name === subscription.workflow
           || run.workflow_name === subscription.workflow
           || String(run.workflow_id) === String(subscription.workflow))
-        && (!subscription.sha || run.head_sha === subscription.sha)
+        && (!subscription.sha || shaMatches(run.head_sha, subscription.sha))
         && (!subscription.branch || run.head_branch === subscription.branch)
       )) || null;
     }
@@ -2177,6 +2294,8 @@ function readTokenAndStart(identity) {
   let terminate = () => {};
   let expirationTimer = null;
   let listenerHeartbeatTimer = null;
+  let eventSweepTimer = null;
+  let scheduledGcTimer = null;
   const eventListeners = new Map();
   const sharedAcknowledgements = new Set();
   let activeRequestCount = 0;
@@ -2488,6 +2607,7 @@ function readTokenAndStart(identity) {
   const server = createServer((connection) => {
     coordinator.metrics.socketConnections += 1;
     let buffer = '';
+    const decodeChunk = createUtf8ChunkDecoder();
     let handled = false;
     let listener = null;
     connection.on('error', () => {
@@ -2589,7 +2709,7 @@ function readTokenAndStart(identity) {
 
     connection.on('data', (chunk) => {
       try {
-        buffer += chunk.toString('utf8');
+        buffer += decodeChunk(chunk);
         let newline;
         while ((newline = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, newline);
@@ -2625,6 +2745,8 @@ function readTokenAndStart(identity) {
     terminating = true;
     if (expirationTimer) clearInterval(expirationTimer);
     if (listenerHeartbeatTimer) clearInterval(listenerHeartbeatTimer);
+    if (eventSweepTimer) clearInterval(eventSweepTimer);
+    if (scheduledGcTimer) clearInterval(scheduledGcTimer);
     for (const listeners of eventListeners.values()) {
       for (const listener of listeners) {
         writeMessage(listener.connection, {
@@ -2673,6 +2795,31 @@ function readTokenAndStart(identity) {
 
   listenerHeartbeatTimer = setInterval(expireStaleListeners, 60_000);
   listenerHeartbeatTimer.unref?.();
+
+  let sweepRunning = false;
+  const runEventSweep = () => {
+    if (sweepRunning) return;
+    sweepRunning = true;
+    coordinator.reconcileStaleSubscriptions()
+      .catch((error) => logStructuredError('event_sweep_failed', error))
+      .finally(() => { sweepRunning = false; });
+  };
+  const firstSweepTimer = setTimeout(runEventSweep, 30_000);
+  firstSweepTimer.unref?.();
+  eventSweepTimer = setInterval(runEventSweep, EVENT_SWEEP_INTERVAL_MS);
+  eventSweepTimer.unref?.();
+
+  const runScheduledGc = () => {
+    try {
+      coordinator.scheduledEventGarbageCollection();
+    } catch (error) {
+      logStructuredError('event_scheduled_gc_failed', error);
+    }
+  };
+  const firstGcTimer = setTimeout(runScheduledGc, 5 * 60_000);
+  firstGcTimer.unref?.();
+  scheduledGcTimer = setInterval(runScheduledGc, SCHEDULED_GC_INTERVAL_MS);
+  scheduledGcTimer.unref?.();
 
   stopSourceWatcher = installSourceReloadWatcher(() => {
     coordinator.metrics.sourceReloads += 1;

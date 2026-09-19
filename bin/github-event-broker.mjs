@@ -54,6 +54,8 @@ function normalizedState(value) {
   const state = String(value || '').trim().toLowerCase().replace(/-/g, '_');
   const aliases = {
     changes_requested: 'needs_review',
+    review: 'reviewed',
+    review_submitted: 'reviewed',
     comment: 'commented',
     new_comment: 'commented',
     conflicting: 'conflict',
@@ -599,6 +601,7 @@ function eventAuditRecord({
       : String(event.deploymentId),
     commentId: normalizedCommentId(event?.commentId),
     commentUrl: normalizedString(event?.commentUrl),
+    actor: normalizedString(event?.actor),
     mergeable: event?.mergeable === true || event?.mergeable === false ? event.mergeable : null,
     mergeableState: normalizedMergeableState(event?.mergeableState),
     state: normalizedStateValue || null,
@@ -673,6 +676,7 @@ function normalizedEvent({
   conclusion = null,
   commentId = null,
   commentUrl = null,
+  actor = null,
   mergeable = null,
   mergeableState = null,
   url = null,
@@ -699,6 +703,7 @@ function normalizedEvent({
     conclusion: normalizedState(conclusion),
     commentId: normalizedCommentId(commentId),
     commentUrl: normalizedString(commentUrl),
+    actor: normalizedString(actor),
     mergeable: mergeable === true || mergeable === false ? mergeable : null,
     mergeableState: normalizedMergeableState(mergeableState),
     url,
@@ -768,10 +773,14 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       resource: 'pull_request',
       resources: [],
       state,
+      // `reviewed` is the state-agnostic signal: an observer that must react to
+      // any submitted review (approve, comment, request changes) waits for it.
       states: [
         ...(reviewState ? [reviewState] : []),
+        ...(normalizedState(payload.action) === 'submitted' ? ['reviewed'] : []),
         ...(mergeability.conflict ? ['conflict'] : []),
       ],
+      actor: payload.review?.user?.login || payload.sender?.login || null,
       action: payload.action,
       number: pullRequest.number || payload.number || null,
       sha: pullRequest.head?.sha || null,
@@ -803,6 +812,7 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       sha: pullRequest.head?.sha || null,
       commentId: comment.id,
       commentUrl,
+      actor: comment.user?.login || payload.sender?.login || null,
       url: commentUrl,
       receivedAt,
     });
@@ -888,6 +898,19 @@ export function eventMatchesSubscription(event, subscription) {
   return subscription.waitFor.some((state) => states.includes(state));
 }
 
+const PULL_REQUEST_LIFECYCLE_STATES = new Set(['merged', 'closed']);
+
+// Agents often pass an abbreviated SHA (`git rev-parse --short`); GitHub always
+// reports the full one. Accept an unambiguous prefix of at least 7 hex chars.
+export function shaMatches(eventSha, subscriptionSha) {
+  const left = String(eventSha || '').trim().toLowerCase();
+  const right = String(subscriptionSha || '').trim().toLowerCase();
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const [shorter, longer] = left.length <= right.length ? [left, right] : [right, left];
+  return shorter.length >= 7 && /^[0-9a-f]+$/.test(shorter) && longer.startsWith(shorter);
+}
+
 export function eventMatchesSubscriptionTarget(event, subscription) {
   if (!event || !subscription || event.repo !== subscription.repo) return false;
   const resources = event.resources || [event.resource];
@@ -902,7 +925,15 @@ export function eventMatchesSubscriptionTarget(event, subscription) {
   // initial reconciliation hint; retaining it as a hard filter would make the
   // observer silently ignore every later run on the same branch.
   const followsLatestWorkflow = subscription.followLatest && subscription.resource === 'workflow_run';
-  if (subscription.sha && !followsLatestWorkflow && event.sha !== subscription.sha) return false;
+  // A pull request that is merged or closed has reached its end state whatever
+  // its head: autorebase and fix commits move the head after the observer
+  // subscribed, and pinning the lifecycle to the old SHA left observers waiting
+  // on PRs merged hours earlier.
+  const pullRequestLifecycle = subscription.resource === 'pull_request'
+    && event.resource === 'pull_request'
+    && (event.states || [event.state]).some((state) => PULL_REQUEST_LIFECYCLE_STATES.has(state));
+  if (subscription.sha && !followsLatestWorkflow && !pullRequestLifecycle
+    && !shaMatches(event.sha, subscription.sha)) return false;
   if (subscription.branch && event.branch !== subscription.branch) return false;
   if (subscription.environment && event.environment !== subscription.environment) return false;
   if (subscription.workflow && event.workflow !== subscription.workflow) return false;
