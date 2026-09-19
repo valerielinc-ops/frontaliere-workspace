@@ -631,7 +631,11 @@ test('segnala invece di consegnare la risposta API tagliata a MAX_BODY_BYTES', a
     assert.equal(response.body, '');
     assert.equal(response.error.code, RESPONSE_TRUNCATED_CODE);
     assert.ok(response.error.message.includes(String(maxBodyBytes)), response.error.message);
-    assert.equal(responseBody.cancelled, true);
+    // Senza `content-length` la dimensione reale si misura contando lo stream
+    // oltre il cap: 8 MiB + 'oltre il cap'. Non deve dire «0 byte».
+    assert.equal(response.bodyBytes, maxBodyBytes + 'oltre il cap'.length);
+    assert.equal(response.bodyBytesAtLeast, false);
+    assert.ok(response.error.message.includes(String(maxBodyBytes + 'oltre il cap'.length)));
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -65,11 +65,14 @@ export const RESPONSE_TRUNCATED_CODE = 'response_body_truncated';
 // Exit code dedicato (sysexits EX_DATAERR): distingue «risposta tagliata dal
 // nostro cap» da 1 (errore HTTP/rete) e da 0 (risposta completa).
 export const RESPONSE_TRUNCATED_EXIT_CODE = 65;
+// Oltre questo tetto non contiamo piu' i byte scartati: l'errore dice
+// «almeno N byte» invece di drenare un body senza fine.
+const TRUNCATION_MEASURE_CEILING = MAX_BODY_BYTES * 16;
 
-export function describeTruncation(method, path, bytes) {
-  const actual = Number.isFinite(bytes) && bytes !== null
-    ? `${bytes} byte`
-    : 'dimensione non dichiarata da GitHub';
+export function describeTruncation(method, path, bytes, bytesAtLeast = false) {
+  const actual = Number.isInteger(bytes) && bytes > 0
+    ? `${bytesAtLeast ? 'almeno ' : ''}${bytes} byte`
+    : 'dimensione non misurabile';
   return `${RESPONSE_TRUNCATED_CODE}: ${method} ${path} ha un body di ${actual}, oltre il cap locale di ${MAX_BODY_BYTES} byte; il body NON viene consegnato (sarebbe JSON invalido). Alza FRONTALIERE_GH_MAX_BODY_BYTES o pagina la richiesta.`;
 }
 export const SOURCE_RELOAD_DEBOUNCE_MS = 3_000;
@@ -348,9 +351,14 @@ function trimOutput(value, maxBytes = MAX_BODY_BYTES) {
     : `${Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8')}\n[truncated]`;
 }
 
+// Attenzione: `headers.get` rende `null` quando l'header manca e `''` quando
+// e' vuoto, e `Number(null) === 0`: senza questo filtro una risposta chunked
+// (che non dichiara `content-length`) verrebbe descritta come «0 byte».
 function declaredBodyBytes(response) {
-  const raw = Number(response?.headers?.get?.('content-length'));
-  return Number.isFinite(raw) && raw >= 0 ? raw : null;
+  const raw = response?.headers?.get?.('content-length');
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 /**
@@ -373,32 +381,44 @@ async function readResponseBody(response) {
 
   const chunks = [];
   let bytes = 0;
+  let buffered = 0;
   let truncated = false;
+  let bytesAtLeast = false;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     if (!value) continue;
     const chunk = Buffer.from(value);
-    const remaining = MAX_BODY_BYTES - bytes;
-    if (remaining <= 0) {
-      truncated = true;
-      break;
-    }
-    if (chunk.length > remaining) {
-      chunks.push(chunk.subarray(0, remaining));
-      bytes += remaining;
-      truncated = true;
-      break;
-    }
-    chunks.push(chunk);
     bytes += chunk.length;
+    const remaining = MAX_BODY_BYTES - buffered;
+    if (remaining > 0) {
+      const keep = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      chunks.push(keep);
+      buffered += keep.length;
+    }
+    if (bytes > MAX_BODY_BYTES) {
+      truncated = true;
+      // Oltre il cap non teniamo piu' nulla in memoria, ma continuiamo a
+      // contare: senza `content-length` (le risposte chunked di GitHub non lo
+      // mandano) questo e' l'unico modo di nominare la dimensione reale
+      // nell'errore.  Il tetto evita di drenare un body patologico.
+      if (declaredBytes !== null || bytes > TRUNCATION_MEASURE_CEILING) {
+        bytesAtLeast = declaredBytes === null;
+        break;
+      }
+    }
   }
   if (truncated) {
     try { await reader.cancel(); } catch { /* best effort */ }
   }
   const body = Buffer.concat(chunks).toString('utf8');
   if (!truncated) return { body, truncated: false, bytes };
-  return { body: `${body}\n[truncated]`, truncated: true, bytes: declaredBytes ?? null };
+  return {
+    body: `${body}\n[truncated]`,
+    truncated: true,
+    bytes: declaredBytes ?? bytes,
+    bytesAtLeast,
+  };
 }
 
 function observedHeaders(headers) {
@@ -1881,7 +1901,12 @@ export class GitHubCoordinator {
     const renderedHeaders = request.anonymous
       ? { ...responseHeaders, 'x-frontaliere-auth-mode': 'anonymous' }
       : responseHeaders;
-    const { body, truncated: bodyTruncated, bytes: bodyBytes } = await readResponseBody(response);
+    const {
+      body,
+      truncated: bodyTruncated,
+      bytes: bodyBytes,
+      bytesAtLeast: bodyBytesAtLeast,
+    } = await readResponseBody(response);
     if (response.status === 304 && cached) {
       this.metrics.cacheRevalidations += 1;
       cached.expiresAt = Date.now() + ttl;
@@ -1921,9 +1946,10 @@ export class GitHubCoordinator {
         body: '',
         truncated: true,
         bodyBytes,
+        bodyBytesAtLeast,
         error: {
           code: RESPONSE_TRUNCATED_CODE,
-          message: describeTruncation(request.method || 'GET', request.path, bodyBytes),
+          message: describeTruncation(request.method || 'GET', request.path, bodyBytes, bodyBytesAtLeast),
           status: response.status,
           headers: renderedHeaders,
         },
@@ -2038,7 +2064,7 @@ export class GitHubCoordinator {
           exitCode: RESPONSE_TRUNCATED_EXIT_CODE,
           truncated: true,
           stdout: '',
-          stderr: `${response.error?.message || describeTruncation(parsed.method, path, response.bodyBytes)}\n`,
+          stderr: `${response.error?.message || describeTruncation(parsed.method, path, response.bodyBytes, response.bodyBytesAtLeast)}\n`,
           status: response.status,
           headers: response.headers,
         };
