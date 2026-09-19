@@ -1,0 +1,28 @@
+#!/bin/sh
+# Esegue uno script hook del sito dal worktree che segue origin/main
+# (bin/site-hooks-refresh), con fallback al checkout principale se il
+# worktree non c'e' ancora. Lo stdin dell'hook passa intatto allo script.
+#
+# Uso negli hook della root: sh "$WORKSPACE/bin/site-hook" scripts/ci/pr-watch-gate.mjs
+#
+# Fail-open come i comandi che sostituisce: script assente -> exit 0.
+set -u
+rel="${1:?uso: site-hook <path relativo allo script>}"
+shift
+
+ws="${WORKSPACE:-}"
+if [ -z "$ws" ] || [ ! -d "$ws/frontaliere-si-o-no" ]; then
+  ws="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)" || exit 0
+fi
+site="$ws/frontaliere-si-o-no"
+wt="${FRONTALIERE_SITE_HOOKS_DIR:-$site/.claude/worktrees/hooks-main}"
+
+# Riallineamento in background, throttled dentro lo script: non rallenta il
+# tool call e non trattiene i pipe dell'hook.
+( "$ws/bin/site-hooks-refresh" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
+
+if [ -f "$wt/$rel" ]; then
+  exec node "$wt/$rel" "$@"
+fi
+[ -f "$site/$rel" ] || exit 0
+exec node "$site/$rel" "$@"

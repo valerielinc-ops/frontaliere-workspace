@@ -27,11 +27,11 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/run-mutation-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/run-mutation-gate.mjs\"'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/run-mutation-gate.mjs'"
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || d=\"${WORKSPACE:-$d}/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-write-gate.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-body-write-gate.mjs\"'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-body-write-gate.mjs'"
           },
           {
             "type": "command",
@@ -39,7 +39,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-body-check-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-body-check-gate.mjs\"'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-body-check-gate.mjs'"
           }
         ]
       },
@@ -84,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-register.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-watch-register.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-register.mjs\"'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-watch-register.mjs'"
           }
         ]
       }
@@ -94,7 +94,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-watch-gate.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; node \"$d/scripts/ci/pr-watch-gate.mjs\"'",
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-watch-gate.mjs'",
             "timeout": 930
           }
         ]
