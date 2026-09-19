@@ -11,6 +11,7 @@ import { accessSync, constants as fsConstants } from 'node:fs';
 import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordinator-client.mjs';
 
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
+export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
 export const EVENT_HEALTH_ALERT_THRESHOLD = 2;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
 
@@ -116,13 +117,19 @@ export async function checkCoordinatorHealth(identity) {
       alerts.push({ code: 'webhook_secret_unconfigured', message: `${normalized}: webhook secret is not configured` });
     }
     const eventSummary = status.events || {};
-    if (Number(eventSummary.webhookSignatureFailures || 0) > 0) {
-      alerts.push({
+    const signatureFailures = Number(eventSummary.webhookSignatureFailures || 0);
+    if (signatureFailures > 0) {
+      // The ingress is reachable from the public internet, so stray unsigned POSTs
+      // are expected background noise and must not paint the daemon red. A real
+      // secret mismatch rejects every delivery, so the count climbs past the
+      // threshold quickly instead of sitting at one or two.
+      const entry = {
         code: 'webhook_signature_rejected',
-        count: Number(eventSummary.webhookSignatureFailures),
+        count: signatureFailures,
         lastWebhookSignatureFailureAt: eventSummary.lastWebhookSignatureFailureAt || null,
-        message: `${normalized}: ${eventSummary.webhookSignatureFailures} webhook deliveries were rejected for invalid signatures`,
-      });
+        message: `${normalized}: ${signatureFailures} webhook deliveries were rejected for invalid signatures`,
+      };
+      (signatureFailures >= WEBHOOK_SIGNATURE_ALERT_THRESHOLD ? alerts : warnings).push(entry);
     }
     const lifecycleHealth = eventLifecycleHealth(eventSummary, normalized);
     alerts.push(...lifecycleHealth.alerts);
