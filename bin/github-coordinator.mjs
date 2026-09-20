@@ -2566,13 +2566,6 @@ function readTokenAndStart(identity) {
       } else {
         deliverEvent(listener);
       }
-      const remainingListeners = eventListeners.get(listener.subscriptionId) || new Set();
-      const awaitingSharedAck = [...remainingListeners]
-        .some((candidate) => candidate.inFlightEventId === request.eventId);
-      const persistentSharedListener = [...remainingListeners].some((candidate) => !candidate.once);
-      if (listener.shared && remainingListeners.size === 0 && !awaitingSharedAck && !persistentSharedListener) {
-        coordinator.eventUnsubscribe(listener.subscriptionId);
-      }
       return;
     }
     if (request.type === 'event-unsubscribe') {

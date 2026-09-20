@@ -1155,9 +1155,11 @@ export class GitHubEventBroker {
   pruneExpiredSubscriptions(nowMs = this.now()) {
     const subscriptionsBefore = this.state.subscriptions.length;
     const expiredIds = this.state.subscriptions
-      .filter((subscription) => subscription.expiresAtMs <= nowMs)
+      .filter((subscription) => subscription.expiresAtMs <= nowMs && subscription.pending.length === 0)
       .map((subscription) => subscription.id);
-    this.state.subscriptions = this.state.subscriptions.filter((subscription) => subscription.expiresAtMs > nowMs);
+    this.state.subscriptions = this.state.subscriptions.filter((subscription) => (
+      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
+    ));
     this.metrics.subscriptionsExpired += subscriptionsBefore - this.state.subscriptions.length;
     return expiredIds;
   }

@@ -39,11 +39,14 @@ import {
   sendRequest,
   socketPath,
   subscribeToEvents,
+  unsubscribeFromEvents,
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
   EVENT_HEALTH_ALERT_THRESHOLD,
+  LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
+  launchdHealthFindings,
 } from '../bin/github-coordinator-health.mjs';
 import {
   GitHubEventBroker,
@@ -309,6 +312,28 @@ test('health segnala lifecycle solo oltre la soglia di persistenza', () => {
     'stalled_subscriptions',
   ]);
   assert.deepEqual(above.warnings, []);
+});
+
+test('health classifica launchd spawn scheduled come warning solo con processo socket e probe sani', () => {
+  const launchd = { supported: true, state: LAUNCHD_SPAWN_SCHEDULED_STATE };
+  const healthy = launchdHealthFindings('default', launchd, {
+    processHealthy: true,
+    socketHealthy: true,
+    probeHealthy: true,
+  });
+  assert.deepEqual(healthy.alerts, []);
+  assert.deepEqual(healthy.warnings.map(({ code }) => code), ['launchd_spawn_scheduled']);
+
+  for (const missing of ['processHealthy', 'socketHealthy', 'probeHealthy']) {
+    const findings = launchdHealthFindings('default', launchd, {
+      processHealthy: true,
+      socketHealthy: true,
+      probeHealthy: true,
+      [missing]: false,
+    });
+    assert.deepEqual(findings.warnings, [], missing);
+    assert.deepEqual(findings.alerts.map(({ code }) => code), ['launchd_not_running'], missing);
+  }
 });
 
 test('invalida i check di protocollo quando cambia il daemon', async () => {
@@ -1308,6 +1333,48 @@ test('espone deadline, ETA storica e duplicati senza richiedere polling', () => 
   }
 });
 
+test('conserva una subscription scaduta finché contiene un evento pending', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-pending-expiry-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'pending-expiry-secret', now: () => nowMs });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 105,
+      waitFor: ['merged'],
+      ttlSeconds: 1,
+      allowDuplicate: true,
+    });
+    const event = normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'pending-expiry-105',
+      receivedAt: new Date(nowMs).toISOString(),
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 105, merged: true },
+      },
+    });
+    assert.deepEqual(broker.recordEvent(event).matchedSubscriptionIds, [subscription.id]);
+
+    nowMs += 2_000;
+    assert.deepEqual(broker.expireSubscriptions(), []);
+    assert.equal(broker.metrics.subscriptionsExpired, 0);
+    assert.equal(broker.pendingEvent(subscription.id).id, event.id);
+    assert.equal(broker.getSubscription(subscription.id).pendingEvents, 1);
+
+    const acknowledgement = broker.acknowledge(subscription.id, event.id);
+    assert.equal(acknowledgement.ok, true);
+    assert.equal(acknowledgement.subscriptionRemoved, true);
+    assert.equal(broker.getSubscription(subscription.id), null);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('normalizza il filename del workflow nel nome visualizzato e mette in cache il lookup', async () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-workflow-name-'));
   const stateFile = join(stateDirectory, 'events.json');
@@ -2206,7 +2273,8 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
     assert.equal(event.number, 42);
     const status = await eventSubscriptions({ identity });
     assert.equal(status.pendingEvents, 0);
-    assert.equal(status.subscriptions.length, 0);
+    assert.equal(status.subscriptions.length, 1, 'la shared subscription resta dopo l ack');
+    assert.equal((await unsubscribeFromEvents(subscriptionId, { identity })).removed, true);
     const audit = await eventAudit({ repo: 'owner/repo', number: 42, limit: 1 }, { identity });
     assert.equal(audit.events[0].classification, 'matched');
     assert.deepEqual(audit.events[0].matchedSubscriptionIds, [subscriptionId]);
@@ -2305,7 +2373,10 @@ test('fan-out shared consegna lo stesso webhook a due agenti senza duplicare la 
     assert.equal(second.state, 'merged');
     const status = await eventSubscriptions({ identity });
     assert.equal(status.pendingEvents, 0);
-    assert.equal(status.subscriptions.length, 0);
+    assert.equal(status.subscriptions.length, 1, 'l ack dell ultimo listener non disiscrive una shared subscription');
+    const unsubscribed = await unsubscribeFromEvents(subscriptionId, { identity });
+    assert.equal(unsubscribed.removed, true);
+    assert.equal((await eventSubscriptions({ identity })).subscriptions.length, 0);
   } finally {
     try {
       await sendRequest({ type: 'shutdown' }, { identity });
