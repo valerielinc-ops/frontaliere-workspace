@@ -13,7 +13,38 @@ import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordi
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
 export const EVENT_HEALTH_ALERT_THRESHOLD = 2;
+export const LAUNCHD_SPAWN_SCHEDULED_STATE = 'spawn scheduled';
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
+
+export function launchdHealthFindings(
+  identity,
+  launchd,
+  { processHealthy = false, socketHealthy = false, probeHealthy = false } = {},
+) {
+  const state = String(launchd?.state || '').trim().toLowerCase();
+  if (!launchd?.supported || state === 'running') {
+    return { alerts: [], warnings: [] };
+  }
+  if (state === LAUNCHD_SPAWN_SCHEDULED_STATE
+    && processHealthy
+    && socketHealthy
+    && probeHealthy) {
+    return {
+      alerts: [],
+      warnings: [{
+        code: 'launchd_spawn_scheduled',
+        message: `${identity}: launchd spawn is scheduled while the coordinator is healthy`,
+      }],
+    };
+  }
+  return {
+    alerts: [{
+      code: 'launchd_not_running',
+      message: `${identity}: launchd state is ${launchd.state}`,
+    }],
+    warnings: [],
+  };
+}
 
 export function eventLifecycleHealth(eventSummary, identity) {
   const alerts = [];
@@ -97,11 +128,9 @@ export async function checkCoordinatorHealth(identity) {
   const normalized = normalizeIdentity(identity);
   const launchd = launchdState(normalized);
   const pids = coordinatorPids(normalized);
+  const hasSocket = socketPresent(normalized);
   const alerts = [];
   const warnings = [];
-  if (launchd.supported && launchd.state !== 'running') {
-    alerts.push({ code: 'launchd_not_running', message: `${normalized}: launchd state is ${launchd.state}` });
-  }
   if (pids.length !== 1) {
     alerts.push({
       code: 'coordinator_process_count',
@@ -109,7 +138,7 @@ export async function checkCoordinatorHealth(identity) {
       pids,
     });
   }
-  if (!socketPresent(normalized)) {
+  if (!hasSocket) {
     alerts.push({ code: 'coordinator_socket_missing', message: `${normalized}: coordinator socket is missing` });
   }
 
@@ -120,6 +149,13 @@ export async function checkCoordinatorHealth(identity) {
   } catch (error) {
     alerts.push({ code: 'coordinator_probe_failed', message: `${normalized}: ${error.message}` });
   }
+  const launchdHealth = launchdHealthFindings(normalized, launchd, {
+    processHealthy: pids.length === 1,
+    socketHealthy: hasSocket,
+    probeHealthy: status !== null && status !== undefined,
+  });
+  alerts.push(...launchdHealth.alerts);
+  warnings.push(...launchdHealth.warnings);
   if (status) {
     if (Number(status.protocolVersion) < REQUIRED_COORDINATOR_PROTOCOL) {
       alerts.push({
@@ -177,7 +213,7 @@ export async function checkCoordinatorHealth(identity) {
     warnings,
     launchd,
     pids,
-    socketPresent: socketPresent(normalized),
+    socketPresent: hasSocket,
     status: status ? {
       protocolVersion: status.protocolVersion,
       webhookSecretConfigured: status.events?.webhookSecretConfigured === true,
