@@ -12,7 +12,6 @@ import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordi
 
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
-export const EVENT_HEALTH_ALERT_THRESHOLD = 2;
 export const LAUNCHD_SPAWN_SCHEDULED_STATE = 'spawn scheduled';
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
 
@@ -63,7 +62,11 @@ export function eventLifecycleHealth(eventSummary, identity) {
   ];
   for (const check of checks) {
     if (check.count <= 0) continue;
-    (check.count >= EVENT_HEALTH_ALERT_THRESHOLD ? alerts : warnings).push(check);
+    // A listener disappearing is expected when an agent finishes, times out,
+    // or is restarted. Likewise a target may remain quiet while no listener
+    // is attached. These counters are useful for cleanup/retention, but must
+    // not make the coordinator unhealthy or trigger another agent cycle.
+    warnings.push(check);
   }
   // The daemon's hourly dry-run GC: an event delivered to nobody for over an
   // hour means an agent died waiting (e.g. a `merged` pending for 5 h), which
