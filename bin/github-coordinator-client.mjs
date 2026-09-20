@@ -505,14 +505,25 @@ export async function listenForEvent(subscriptionId, {
   }
   const details = await eventSubscription(subscriptionId, { identity: normalized });
   await ensureEventProtocol(normalized, { requireWebhookSecret: true });
+  let pendingEventsPresent = Number(details.subscription?.pendingEvents || 0) > 0;
   let leaseDeadlineMs = Date.parse(details.subscription?.expiresAt || '');
   const requestedDeadlineMs = timeoutMs > 0 ? Date.now() + timeoutMs : Infinity;
-  let deadlineIsSubscription = Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= requestedDeadlineMs;
   const renewalInterval = Number.isFinite(Number(heartbeatIntervalMs)) && Number(heartbeatIntervalMs) > 0
     ? Number(heartbeatIntervalMs)
     : EVENT_LISTENER_HEARTBEAT_INTERVAL_MS;
-  const leaseRenewalEnabled = autoRenew
-    && (!Number.isFinite(leaseDeadlineMs) || leaseDeadlineMs - Date.now() >= renewalInterval * 2);
+  let leaseRenewalEnabled = autoRenew
+    && (pendingEventsPresent
+      || !Number.isFinite(leaseDeadlineMs)
+      || leaseDeadlineMs - Date.now() >= renewalInterval * 2);
+  if (autoRenew && pendingEventsPresent
+    && Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= Date.now()) {
+    const renewed = await renewEventSubscription(subscriptionId, { ttlMs: leaseMs, agentId }, {
+      identity: normalized,
+    });
+    leaseDeadlineMs = Date.parse(renewed.subscription?.expiresAt || '');
+    pendingEventsPresent = Number(renewed.subscription?.pendingEvents || 0) > 0;
+    leaseRenewalEnabled = true;
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     let socket = null;
     let reconnectTimer = null;
@@ -522,6 +533,7 @@ export async function listenForEvent(subscriptionId, {
     let retryAttempt = 0;
     let settled = false;
     let event = null;
+    let deadlineIsSubscription = Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= requestedDeadlineMs;
 
     const deadlineError = () => {
       const error = new Error(deadlineIsSubscription
@@ -546,11 +558,29 @@ export async function listenForEvent(subscriptionId, {
     };
 
     const refreshLease = (subscription) => {
+      pendingEventsPresent = Number(subscription?.pendingEvents || 0) > 0;
+      if (autoRenew && pendingEventsPresent) leaseRenewalEnabled = true;
       const refreshed = Date.parse(subscription?.expiresAt || '');
       if (Number.isFinite(refreshed)) {
         leaseDeadlineMs = refreshed;
         scheduleDeadline();
       }
+    };
+
+    const refreshPendingLease = async (subscription) => {
+      const expiresAtMs = Date.parse(subscription?.expiresAt || '');
+      const hasPending = Number(subscription?.pendingEvents || 0) > 0;
+      pendingEventsPresent = hasPending;
+      if (autoRenew && hasPending) leaseRenewalEnabled = true;
+      if (!autoRenew || !hasPending || !Number.isFinite(expiresAtMs) || expiresAtMs > Date.now()) {
+        return subscription;
+      }
+      const renewed = await renewEventSubscription(subscriptionId, { ttlMs: leaseMs, agentId }, {
+        identity: normalized,
+      });
+      pendingEventsPresent = Number(renewed.subscription?.pendingEvents || 0) > 0;
+      leaseRenewalEnabled = true;
+      return renewed.subscription || subscription;
     };
 
     const cleanup = ({ destroySocket = false } = {}) => {
@@ -575,7 +605,13 @@ export async function listenForEvent(subscriptionId, {
 
     const scheduleReconnect = () => {
       if (settled || reconnectTimer) return;
-      const deadlineMs = Number.isFinite(leaseDeadlineMs)
+      if (autoRenew && pendingEventsPresent && deadlineTimer) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
+      const deadlineMs = autoRenew && pendingEventsPresent
+        ? requestedDeadlineMs
+        : Number.isFinite(leaseDeadlineMs)
         ? Math.min(leaseDeadlineMs, requestedDeadlineMs)
         : requestedDeadlineMs;
       const remainingMs = deadlineMs - Date.now();
@@ -591,9 +627,14 @@ export async function listenForEvent(subscriptionId, {
           await ensureCoordinator(normalized);
           await ensureEventProtocol(normalized, { requireWebhookSecret: true });
           const refreshed = await eventSubscription(subscriptionId, { identity: normalized });
-          refreshLease(refreshed.subscription);
+          const subscription = await refreshPendingLease(refreshed.subscription);
+          refreshLease(subscription);
           openSocket();
-        } catch {
+        } catch (error) {
+          if (error?.code === 'event_subscription_not_found') {
+            rejectOnce(error);
+            return;
+          }
           scheduleReconnect();
         }
       }, delayMs);
@@ -683,6 +724,8 @@ export async function listenForEvent(subscriptionId, {
           if (response?.type === 'listening' || response?.type === 'heartbeat') {
             refreshLease(response.subscription);
           } else if (response?.type === 'event') {
+            pendingEventsPresent = true;
+            if (autoRenew) leaseRenewalEnabled = true;
             event = response.event;
             candidate.write(`${JSON.stringify({
               type: 'event-ack',

@@ -209,6 +209,53 @@ test('il gc programmato in dry-run segnala l evento pending senza listener e non
   }
 });
 
+test('lo status compatto espone i contatori pending senza materializzare i dettagli del gc', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-compact-status-'));
+  const { broker, coordinator } = makeCoordinator(stateDirectory);
+  try {
+    coordinator.setEventListenerInspector(() => false);
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    const created = broker.subscribe({
+      agentId: 'compact-agent',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 9229,
+      waitFor: ['merged'],
+      ttlSeconds: 36_000,
+    });
+    broker.recordEvent(normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'merged-9229',
+      receivedAt,
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 9229, merged: true },
+      },
+    }));
+    coordinator.scheduledEventGarbageCollection();
+
+    const compact = coordinator.status({ compact: true });
+    assert.equal(compact.events.pendingEvents, 1);
+    assert.equal(compact.events.pendingSubscriptionCount, 1);
+    assert.equal(compact.events.oldestPendingAt, receivedAt);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingEventDetails'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events.scheduledGc, 'orphanedWithPending'), false);
+    assert.equal(compact.events.scheduledGc.orphanedWithPendingSubscriptionCount, 1);
+    assert.equal(compact.events.scheduledGc.orphanedWithPendingEventCount, 1);
+    assert.equal(compact.events.scheduledGc.nextAction, 'reattach_or_explicit_ack');
+
+    const eventSummary = coordinator.eventSubscriptionSummary();
+    assert.equal(Object.prototype.hasOwnProperty.call(eventSummary, 'pendingEventDetails'), false);
+
+    const full = coordinator.status();
+    assert.equal(full.events.pendingEventDetails.length, 1);
+    assert.equal(full.events.scheduledGc.orphanedWithPending[0].id, created.id);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('il daemon accetta un webhook firmato con caratteri multibyte spezzati sul socket', async () => {
   const stateDirectory = mkdtempSync('/tmp/frontaliere-utf8-');
   const previousEnvironment = {
