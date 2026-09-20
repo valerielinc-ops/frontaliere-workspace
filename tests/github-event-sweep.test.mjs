@@ -256,6 +256,73 @@ test('lo status compatto espone i contatori pending senza materializzare i detta
   }
 });
 
+test('il primo status dopo un riavvio rileva subito il backlog pending senza cancellarlo', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-restart-gc-'));
+  const originalWrite = process.stderr.write;
+  const logged = [];
+  try {
+    const first = makeCoordinator(stateDirectory);
+    const created = first.broker.subscribe({
+      agentId: 'restarted-agent',
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 9230,
+      waitFor: ['merged'],
+      ttlSeconds: 36_000,
+    });
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    first.broker.recordEvent(normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'merged-9230',
+      receivedAt,
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 9230, merged: true },
+      },
+    }));
+
+    // A new coordinator process restores the persisted broker state but has
+    // no in-memory scheduled GC report yet.
+    const { broker, coordinator } = makeCoordinator(stateDirectory);
+    coordinator.setEventListenerInspector(() => false);
+    let gcCalls = 0;
+    const scheduledGc = coordinator.scheduledEventGarbageCollection.bind(coordinator);
+    coordinator.scheduledEventGarbageCollection = (...args) => {
+      gcCalls += 1;
+      return scheduledGc(...args);
+    };
+    process.stderr.write = (chunk) => { logged.push(String(chunk)); return true; };
+
+    const compact = coordinator.status({ compact: true });
+    const health = eventLifecycleHealth(compact.events, 'test');
+    assert.equal(gcCalls, 1, 'il primo probe deve eseguire una sola ispezione GC locale');
+    assert.equal(compact.events.pendingEvents, 1);
+    assert.equal(compact.events.pendingSubscriptionCount, 1);
+    assert.equal(compact.events.oldestPendingAt, receivedAt);
+    assert.equal(compact.events.scheduledGc.orphanedWithPendingSubscriptionCount, 1);
+    assert.equal(compact.events.scheduledGc.orphanedWithPendingEventCount, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events.scheduledGc, 'orphanedWithPending'), false);
+    assert.deepEqual(health.alerts.map(({ code }) => code), ['orphaned_pending_events']);
+    assert.equal(health.alerts[0].eventCount, 1);
+    assert.equal(health.alerts[0].subscriptionCount, 1);
+    assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
+    assert.ok(logged.some((line) => line.includes('event_gc_orphans_detected')));
+
+    const secondCompact = coordinator.status({ compact: true });
+    assert.equal(gcCalls, 1, 'le probe successive non devono rieseguire il bootstrap GC');
+    assert.equal(secondCompact.events.scheduledGc.orphanedWithPendingEventCount, 1);
+
+    const full = coordinator.status();
+    assert.equal(full.events.pendingEventDetails.length, 1);
+    assert.equal(full.events.scheduledGc.orphanedWithPending.length, 1);
+    assert.equal(full.events.scheduledGc.orphanedWithPending[0].id, created.id);
+  } finally {
+    process.stderr.write = originalWrite;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('il daemon accetta un webhook firmato con caratteri multibyte spezzati sul socket', async () => {
   const stateDirectory = mkdtempSync('/tmp/frontaliere-utf8-');
   const previousEnvironment = {

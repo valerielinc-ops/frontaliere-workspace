@@ -1008,11 +1008,14 @@ export class GitHubCoordinator {
     };
     this.sweepReconciledAt = new Map();
     this.lastScheduledGc = null;
+    this.scheduledGcBootstrapAttempted = false;
+    this.scheduledGcBootstrapInProgress = false;
   }
 
   status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
+    this.ensureScheduledEventGarbageCollection();
     const eventSummary = this.eventBroker ? (() => {
       const summary = this.eventBroker.summary({
         listenerAttached: this.eventListenerInspector,
@@ -1171,6 +1174,27 @@ export class GitHubCoordinator {
 
   setEventListenerInspector(inspector) {
     this.eventListenerInspector = typeof inspector === 'function' ? inspector : null;
+  }
+
+  ensureScheduledEventGarbageCollection() {
+    if (!this.eventBroker
+      || !this.eventListenerInspector
+      || this.lastScheduledGc
+      || this.scheduledGcBootstrapAttempted
+      || this.scheduledGcBootstrapInProgress) return;
+    this.scheduledGcBootstrapAttempted = true;
+    this.scheduledGcBootstrapInProgress = true;
+    try {
+      // This is a local, dry-run inspection only. Pending events remain
+      // protected and no GitHub/network operation is performed.
+      this.scheduledEventGarbageCollection();
+    } catch (error) {
+      // A first status probe must stay useful even if the local persisted
+      // state is temporarily unreadable; the normal scheduled timer retries.
+      logStructuredError('event_initial_gc_failed', error);
+    } finally {
+      this.scheduledGcBootstrapInProgress = false;
+    }
   }
 
   setEventListenerCountInspector(inspector) {
