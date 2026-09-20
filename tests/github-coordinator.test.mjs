@@ -318,6 +318,31 @@ test('health mantiene alert solo per eventi pending senza listener oltre la grac
   ]);
 });
 
+test('health usa i contatori pending compatti e non restituisce la lista degli orfani', () => {
+  const findings = eventLifecycleHealth({
+    pendingEvents: 111,
+    pendingSubscriptionCount: 70,
+    oldestPendingAt: '2026-09-20T02:06:39.944Z',
+    scheduledGc: {
+      orphanedWithPendingSubscriptionCount: 70,
+      orphanedWithPendingEventCount: 111,
+      orphanedWithPendingOldestAt: '2026-09-20T02:06:39.944Z',
+      nextAction: 'reattach_or_explicit_ack',
+    },
+  }, 'default');
+  assert.equal(findings.alerts.length, 1);
+  assert.deepEqual(findings.alerts[0], {
+    code: 'orphaned_pending_events',
+    count: 111,
+    subscriptionCount: 70,
+    eventCount: 111,
+    oldestPendingAt: '2026-09-20T02:06:39.944Z',
+    nextAction: 'reattach_or_explicit_ack',
+    message: 'default: 111 pending events across 70 subscriptions have had no listener for over an hour',
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(findings.alerts[0], 'subscriptions'), false);
+});
+
 test('health classifica launchd spawn scheduled come warning solo con processo socket e probe sani', () => {
   const launchd = { supported: true, state: LAUNCHD_SPAWN_SCHEDULED_STATE };
   const healthy = launchdHealthFindings('default', launchd, {
@@ -2463,6 +2488,86 @@ test('scollega un listener caduto senza terminare il coordinatore e segnala la s
       await waitForCoordinatorStop(identity, 5_000);
     } catch {
       // The daemon may not have started if setup failed; cleanup remains safe.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('riattacca e rinnova una subscription scaduta quando conserva un evento pending', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-pending-reconnect-');
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  const identity = 'event-pending-reconnect';
+  const secret = 'event-pending-reconnect-secret';
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = secret;
+
+  try {
+    await ensureCoordinator(identity);
+    const subscription = (await subscribeToEvents({
+      agentId: 'agent-pending-reconnect',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '9004',
+      waitFor: ['success'],
+      ttlSeconds: 0.1,
+    }, { identity })).subscription;
+    const payload = {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: {
+        id: 9004,
+        name: 'CI',
+        conclusion: 'success',
+        head_sha: 'pending-reconnect-abc123',
+      },
+    };
+    const body = JSON.stringify(payload);
+    await ingestGitHubWebhook({
+      eventName: 'workflow_run',
+      deliveryId: 'pending-reconnect-9004',
+      signature: signedWebhook(body, secret),
+      rawBody: body,
+    }, { identity });
+    assert.equal((await eventSubscriptions({ identity })).pendingEvents, 1);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    const expired = await eventSubscriptions({ identity });
+    assert.equal(expired.subscriptions.find(({ id }) => id === subscription.id).remainingMs, 0);
+
+    const event = await listenForEvent(subscription.id, {
+      identity,
+      agentId: 'agent-pending-reconnect',
+      timeoutMs: 3_000,
+      heartbeatIntervalMs: 20,
+      reconcileAfterMs: 0,
+    });
+    assert.equal(event.state, 'success');
+    assert.equal(event.runId, '9004');
+    const afterAck = await eventSubscriptions({ identity });
+    assert.equal(afterAck.pendingEvents, 0);
+    const retained = afterAck.subscriptions.find(({ id }) => id === subscription.id);
+    assert.ok(retained);
+    assert.ok(retained.lastRenewedAt, 'la lease pending scaduta deve essere rinnovata prima del reattach');
+    assert.ok(retained.remainingMs > 0);
+    assert.equal((await unsubscribeFromEvents(subscription.id, { identity })).removed, true);
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // Il coordinatore puo' non essere partito se il setup fallisce.
     }
     for (const [name, value] of Object.entries(previousEnvironment)) {
       if (value === undefined) delete process.env[name];

@@ -68,18 +68,35 @@ export function eventLifecycleHealth(eventSummary, identity) {
     // not make the coordinator unhealthy or trigger another agent cycle.
     warnings.push(check);
   }
-  // The daemon's hourly dry-run GC: an event delivered to nobody for over an
-  // hour means an agent died waiting (e.g. a `merged` pending for 5 h), which
-  // is always worth an alarm, not a warning.
-  const orphanedWithPending = Array.isArray(eventSummary?.scheduledGc?.orphanedWithPending)
-    ? eventSummary.scheduledGc.orphanedWithPending
+  // The daemon's hourly dry-run GC: pending events without a listener for over
+  // an hour mean an agent died waiting.  Keep this high-signal alert separate
+  // from the generic orphan/stalled warnings, but expose counts only: the full
+  // subscription list belongs to an explicit `status --full` inspection.
+  const scheduledGc = eventSummary?.scheduledGc || {};
+  const orphanedWithPending = Array.isArray(scheduledGc.orphanedWithPending)
+    ? scheduledGc.orphanedWithPending
     : [];
-  if (orphanedWithPending.length > 0) {
+  const orphanedPendingSubscriptionCount = Number(
+    scheduledGc.orphanedWithPendingSubscriptionCount ?? orphanedWithPending.length,
+  );
+  const orphanedPendingEventCount = Number(
+    scheduledGc.orphanedWithPendingEventCount
+      ?? orphanedWithPending.reduce((total, subscription) => total + Number(subscription.pendingCount || 1), 0),
+  );
+  if (orphanedPendingSubscriptionCount > 0 || orphanedPendingEventCount > 0) {
+    const oldestPendingAt = scheduledGc.orphanedWithPendingOldestAt
+      || eventSummary?.oldestPendingAt
+      || orphanedWithPending.map(({ pendingSince }) => pendingSince).filter(Boolean)
+        .sort((left, right) => Date.parse(left) - Date.parse(right))[0]
+      || null;
     alerts.push({
       code: 'orphaned_pending_events',
-      count: orphanedWithPending.length,
-      subscriptions: orphanedWithPending,
-      message: `${identity}: ${orphanedWithPending.length} delivered events have had no listener for over an hour`,
+      count: orphanedPendingEventCount,
+      subscriptionCount: orphanedPendingSubscriptionCount,
+      eventCount: orphanedPendingEventCount,
+      oldestPendingAt,
+      nextAction: 'reattach_or_explicit_ack',
+      message: `${identity}: ${orphanedPendingEventCount} pending events across ${orphanedPendingSubscriptionCount} subscriptions have had no listener for over an hour`,
     });
   }
   return { alerts, warnings };
@@ -226,12 +243,29 @@ export async function checkCoordinatorHealth(identity) {
       events: {
         subscriptionCount: status.events?.subscriptionCount,
         pendingEvents: status.events?.pendingEvents,
+        pendingSubscriptionCount: status.events?.pendingSubscriptionCount,
+        oldestPendingAt: status.events?.oldestPendingAt || null,
         activeListeners: status.events?.activeListeners,
         listenerHeartbeatMetrics: status.events?.listenerHeartbeatMetrics,
         listenerCount: status.events?.listenerCount,
         orphanedSubscriptions: status.events?.orphanedSubscriptions,
         duplicateSubscriptions: status.events?.duplicateSubscriptions,
         stalledSubscriptions: status.events?.stalledSubscriptions,
+        ...(status.events?.scheduledGc ? {
+          scheduledGc: {
+            at: status.events.scheduledGc.at || null,
+            olderThanMs: status.events.scheduledGc.olderThanMs,
+            orphanCandidateCount: status.events.scheduledGc.orphanCandidateCount,
+            orphanedWithPendingSubscriptionCount: Number(
+              status.events.scheduledGc.orphanedWithPendingSubscriptionCount || 0,
+            ),
+            orphanedWithPendingEventCount: Number(
+              status.events.scheduledGc.orphanedWithPendingEventCount || 0,
+            ),
+            orphanedWithPendingOldestAt: status.events.scheduledGc.orphanedWithPendingOldestAt || null,
+            nextAction: status.events.scheduledGc.nextAction || 'reattach_or_explicit_ack',
+          },
+        } : {}),
         ...(Number(status.events?.webhookSignatureFailures || 0) > 0 ? {
           webhookSignatureFailures: Number(status.events.webhookSignatureFailures),
           lastWebhookSignatureFailureAt: status.events.lastWebhookSignatureFailureAt || null,

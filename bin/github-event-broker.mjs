@@ -305,6 +305,26 @@ function pendingEventDetails(subscriptions, nowMs) {
   }));
 }
 
+function pendingEventSummary(subscriptions) {
+  let pendingEvents = 0;
+  let pendingSubscriptionCount = 0;
+  let oldestPendingAt = null;
+  let oldestPendingMs = Infinity;
+  for (const subscription of subscriptions) {
+    if (subscription.pending.length === 0) continue;
+    pendingSubscriptionCount += 1;
+    pendingEvents += subscription.pending.length;
+    for (const event of subscription.pending) {
+      const receivedAtMs = Date.parse(event.receivedAt || '');
+      if (Number.isFinite(receivedAtMs) && receivedAtMs < oldestPendingMs) {
+        oldestPendingMs = receivedAtMs;
+        oldestPendingAt = new Date(receivedAtMs).toISOString();
+      }
+    }
+  }
+  return { pendingEvents, pendingSubscriptionCount, oldestPendingAt };
+}
+
 function selectedSubscription(subscription, filters, listenerAttached, nowMs) {
   if (!targetMatchesFilter(subscription, filters)) return false;
   if (filters.active === true && listenerAttachedValue(listenerAttached, subscription.id) !== true) return false;
@@ -1249,7 +1269,7 @@ export class GitHubEventBroker {
       .length;
   }
 
-  summary({ listenerAttached = null, listenerInfo = null, ...filters } = {}) {
+  summary({ listenerAttached = null, listenerInfo = null, includePendingDetails = true, ...filters } = {}) {
     if (this.prune()) this.persist();
     const allSubscriptions = this.state.subscriptions;
     const nowMs = this.now();
@@ -1272,8 +1292,7 @@ export class GitHubEventBroker {
       ? null
       : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
     const stalledSubscriptions = publicSubscriptions.filter(({ targetStalled }) => targetStalled);
-    const pendingEvents = subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0);
-    const pendingEventDetailsList = pendingEventDetails(subscriptions, nowMs);
+    const { pendingEvents, pendingSubscriptionCount, oldestPendingAt } = pendingEventSummary(subscriptions);
     const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
     const listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
     const listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
@@ -1299,7 +1318,9 @@ export class GitHubEventBroker {
         ? subscription.sharedAgentIds
         : [subscription.agentId])).length,
       pendingEvents,
-      pendingEventDetails: pendingEventDetailsList,
+      pendingSubscriptionCount,
+      oldestPendingAt,
+      ...(includePendingDetails ? { pendingEventDetails: pendingEventDetails(subscriptions, nowMs) } : {}),
       listenerCount,
       listenerAliveSubscriptions: listenerAttached === null ? null : listenerAliveSubscriptions,
       listenerDeadSubscriptions: listenerAttached === null ? null : listenerDeadSubscriptions,
@@ -1334,6 +1355,7 @@ export class GitHubEventBroker {
     const subscriptions = boundedLimit === null
       ? allSubscriptions
       : allSubscriptions.slice(0, boundedLimit);
+    const pendingSummary = pendingEventSummary(subscriptions);
     return {
       stateFile: this.stateFile,
       subscriptions: subscriptions.map((subscription) => this.publicSubscription(subscription, {
@@ -1341,7 +1363,7 @@ export class GitHubEventBroker {
         listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
         listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
       })),
-      pendingEvents: subscriptions.reduce((total, subscription) => total + subscription.pending.length, 0),
+      ...pendingSummary,
       pendingEventDetails: pendingEventDetails(subscriptions, nowMs),
       metrics: { ...this.metrics },
       summary: this.summary({ ...filters, listenerAttached, listenerInfo }),

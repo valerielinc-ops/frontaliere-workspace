@@ -93,6 +93,32 @@ function routeAllowsIdentity(subscription, identity) {
 function eventRoutingRequired(identity, spec) {
   return EVENT_ROUTING_IDENTITIES.has(identity) || hasEventRoute(spec?.repo);
 }
+
+function scheduledGcView(report, compact) {
+  if (!report || !compact) return report || null;
+  const orphanedWithPending = Array.isArray(report.orphanedWithPending)
+    ? report.orphanedWithPending
+    : [];
+  const subscriptionCount = Number(report.orphanedWithPendingSubscriptionCount);
+  const eventCount = Number(report.orphanedWithPendingEventCount);
+  return {
+    at: report.at,
+    olderThanMs: report.olderThanMs,
+    orphanCandidateCount: report.orphanCandidateCount,
+    orphanedWithPendingSubscriptionCount: Number.isFinite(subscriptionCount)
+      ? subscriptionCount
+      : orphanedWithPending.length,
+    orphanedWithPendingEventCount: Number.isFinite(eventCount)
+      ? eventCount
+      : orphanedWithPending.reduce((total, subscription) => total + Number(subscription.pendingCount || 1), 0),
+    orphanedWithPendingOldestAt: report.orphanedWithPendingOldestAt
+      || orphanedWithPending.map(({ pendingSince }) => pendingSince).filter(Boolean)
+        .sort((left, right) => Date.parse(left) - Date.parse(right))[0]
+      || null,
+    nextAction: report.nextAction || 'reattach_or_explicit_ack',
+  };
+}
+
 export const RESPONSE_TRUNCATED_CODE = 'response_body_truncated';
 // Exit code dedicato (sysexits EX_DATAERR): distingue «risposta tagliata dal
 // nostro cap» da 1 (errore HTTP/rete) e da 0 (risposta completa).
@@ -991,6 +1017,7 @@ export class GitHubCoordinator {
       const summary = this.eventBroker.summary({
         listenerAttached: this.eventListenerInspector,
         listenerInfo: this.eventListenerInfoInspector,
+        includePendingDetails: !compact,
       });
       const signatureFailures = Number(this.eventBroker.metrics.webhookSignatureFailures || 0);
       if (compact && signatureFailures === 0 && summary.metrics) {
@@ -1010,7 +1037,7 @@ export class GitHubCoordinator {
           timeouts: this.metrics.eventListenerTimeouts,
         },
         ...summary,
-        scheduledGc: this.lastScheduledGc,
+        scheduledGc: scheduledGcView(this.lastScheduledGc, compact),
         ...(compact && signatureFailures === 0
           ? {}
           : {
@@ -1251,6 +1278,7 @@ export class GitHubCoordinator {
       },
       ...this.eventBroker.summary({
         ...options,
+        includePendingDetails: options.includePendingDetails === true,
         listenerAttached: this.eventListenerInspector,
         listenerInfo: this.eventListenerInfoInspector,
       }),
@@ -1486,6 +1514,7 @@ export class GitHubCoordinator {
         resource: subscription.resource,
         number: subscription.number ?? null,
         runId: subscription.runId ?? null,
+        pendingCount: subscription.pending.length,
         pendingState: subscription.pending[0]?.state ?? null,
         pendingSince: subscription.pending[0]?.receivedAt ?? null,
       }));
@@ -1496,13 +1525,28 @@ export class GitHubCoordinator {
       orphanCandidateCount: report.candidateCount,
       orphanCandidateIds: report.candidates.map(({ id }) => id),
       orphanedWithPending,
+      orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+      orphanedWithPendingEventCount: orphanedWithPending.reduce(
+        (total, subscription) => total + Number(subscription.pendingCount || 1),
+        0,
+      ),
+      orphanedWithPendingOldestAt: orphanedWithPending
+        .map(({ pendingSince }) => pendingSince)
+        .filter(Boolean)
+        .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null,
+      nextAction: 'reattach_or_explicit_ack',
     };
     if (report.candidateCount > 0 || orphanedWithPending.length > 0) {
       logStructuredError('event_gc_orphans_detected', new Error('orphaned event subscriptions'), {
         identity: this.identity,
         orphanCandidateCount: report.candidateCount,
-        orphanedWithPending,
-        nextAction: 'bin/gh-frontaliere events gc (dry-run), then events gc --apply --include-unique if confirmed dead',
+        orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+        orphanedWithPendingEventCount: orphanedWithPending.reduce(
+          (total, subscription) => total + Number(subscription.pendingCount || 1),
+          0,
+        ),
+        orphanedWithPendingOldestAt: this.lastScheduledGc.orphanedWithPendingOldestAt,
+        nextAction: 'reattach_or_explicit_ack',
       });
     }
     return this.lastScheduledGc;
