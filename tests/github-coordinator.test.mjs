@@ -43,7 +43,6 @@ import {
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
-  EVENT_HEALTH_ALERT_THRESHOLD,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
   launchdHealthFindings,
@@ -292,26 +291,31 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
   }
 });
 
-test('health segnala lifecycle solo oltre la soglia di persistenza', () => {
-  const below = eventLifecycleHealth({
-    orphanedSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD - 1,
-    stalledSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD - 1,
+test('health classifica residui lifecycle come warning indipendentemente dal volume', () => {
+  const findings = eventLifecycleHealth({
+    orphanedSubscriptions: 69,
+    stalledSubscriptions: 6,
   }, 'default');
-  assert.deepEqual(below.alerts, []);
-  assert.deepEqual(below.warnings.map(({ code }) => code), [
+  assert.deepEqual(findings.alerts, []);
+  assert.deepEqual(findings.warnings.map(({ code }) => code), [
     'orphaned_subscriptions',
     'stalled_subscriptions',
   ]);
+});
 
-  const above = eventLifecycleHealth({
-    orphanedSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD,
-    stalledSubscriptions: EVENT_HEALTH_ALERT_THRESHOLD,
+test('health mantiene alert solo per eventi pending senza listener oltre la grace period', () => {
+  const findings = eventLifecycleHealth({
+    orphanedSubscriptions: 69,
+    stalledSubscriptions: 6,
+    scheduledGc: {
+      orphanedWithPending: [{ id: 'sub-old', pendingState: 'merged' }],
+    },
   }, 'default');
-  assert.deepEqual(above.alerts.map(({ code }) => code), [
+  assert.deepEqual(findings.alerts.map(({ code }) => code), ['orphaned_pending_events']);
+  assert.deepEqual(findings.warnings.map(({ code }) => code), [
     'orphaned_subscriptions',
     'stalled_subscriptions',
   ]);
-  assert.deepEqual(above.warnings, []);
 });
 
 test('health classifica launchd spawn scheduled come warning solo con processo socket e probe sani', () => {
