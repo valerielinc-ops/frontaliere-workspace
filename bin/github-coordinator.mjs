@@ -36,7 +36,12 @@ import {
   socketPath,
   stateDirectory,
 } from './github-coordinator-client.mjs';
-import { GitHubEventBroker, normalizeReconciliationEvent, shaMatches } from './github-event-broker.mjs';
+import {
+  GitHubEventBroker,
+  normalizeReconciliationEvent,
+  shaMatches,
+  workflowSelectorMatchesRun,
+} from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -619,29 +624,6 @@ function workflowFilenameMap(data) {
     }
   }
   return result;
-}
-
-function workflowSelectorForms(value) {
-  if (value === null || value === undefined) return [];
-  const raw = String(value).trim().toLowerCase();
-  if (!raw) return [];
-  const forms = new Set([raw]);
-  const filename = workflowFilename(raw);
-  if (filename) {
-    forms.add(filename);
-    forms.add(filename.replace(/\.ya?ml$/i, ''));
-  } else if (!raw.includes('/') && !raw.includes('.')) {
-    forms.add(`${raw}.yml`);
-  }
-  return [...forms];
-}
-
-function workflowSelectorMatchesRun(run, selector) {
-  const expected = new Set(workflowSelectorForms(selector));
-  if (expected.size === 0) return true;
-  const candidates = [run?.name, run?.workflow_name, run?.path, run?.workflow_path, run?.workflow_id]
-    .flatMap((value) => workflowSelectorForms(value));
-  return candidates.some((candidate) => expected.has(candidate));
 }
 
 function cacheKeyFor(request) {

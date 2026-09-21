@@ -1968,6 +1968,62 @@ test('la riconciliazione workflow non confonde il titolo display del run con il 
 
   assert.equal(event.workflow, 'tests');
   assert.equal(eventMatchesSubscription(event, subscription), true);
+
+  const otherWorkflow = normalizeReconciliationEvent({
+    subscription,
+    data: {
+      id: 9002,
+      name: 'Code checks and review · PR #1694 · synchronize',
+      path: '.github/workflows/other.yml',
+      status: 'completed',
+      conclusion: 'success',
+      head_branch: 'transport/fix',
+      head_sha: 'deadbeef',
+    },
+  });
+  assert.equal(eventMatchesSubscription(otherWorkflow, subscription), false);
+});
+
+test('un webhook workflow conserva path e workflow_id per il matching della subscription', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-workflow-identifiers-'));
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'workflow-identifiers-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    workflow: '12345',
+    branch: 'main',
+    waitFor: ['success'],
+    ttlSeconds: 60,
+  });
+
+  try {
+    const webhook = normalizeWebhookEvent({
+      eventName: 'workflow_run',
+      deliveryId: 'workflow-id-12345',
+      payload: {
+        action: 'completed',
+        repository: { full_name: 'owner/repo' },
+        workflow_run: {
+          id: 9003,
+          name: 'Code checks and review · PR #1694 · synchronize',
+          workflow_id: 12345,
+          path: '.github/workflows/tests.yml',
+          status: 'completed',
+          conclusion: 'success',
+          head_branch: 'main',
+        },
+      },
+    });
+
+    assert.equal(webhook.workflowId, '12345');
+    assert.equal(webhook.workflowPath, '.github/workflows/tests.yml');
+    assert.deepEqual(broker.recordEvent(webhook).matchedSubscriptionIds, [subscription.id]);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('la riconciliazione per workflow accetta il path REST del workflow', async () => {
