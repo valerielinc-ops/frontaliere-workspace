@@ -12,7 +12,8 @@
  * latter is not a CI bypass: the repository's own remote checks still run;
  * it only avoids applying another repository's local gate to it.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ const KNOWN_REPOSITORIES = new Map([
 
 const REPO_FLAG_RE = /(?:^|\s)(?:--repo|-R)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 const REPO_FLAG_TEST_RE = /(?:^|\s)(?:--repo|-R)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/;
+const COMMAND_CWD_RE = /(?:^|&&|;|\|\||\n|["'])\s*cd(?:\s+--)?\s+(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|]+))\s*&&/g;
 
 /**
  * @param {string} command
@@ -70,6 +72,67 @@ export function repositoryDirectory(repository, workspaceRoot = ROOT) {
   return child ? join(workspaceRoot, child) : undefined;
 }
 
+function isDirectory(candidate) {
+  try {
+    return statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function gitValue(cwd, args) {
+  try {
+    return execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function sameGitRepository(candidate, reference) {
+  const candidateCommon = gitValue(candidate, ['rev-parse', '--git-common-dir']);
+  const referenceCommon = gitValue(reference, ['rev-parse', '--git-common-dir']);
+  if (!candidateCommon || !referenceCommon) return false;
+  try {
+    return realpathSync(resolve(candidate, candidateCommon)) ===
+      realpathSync(resolve(reference, referenceCommon));
+  } catch {
+    return false;
+  }
+}
+
+/** Return the literal checkout selected by `cd ... && gh pr create`. */
+export function literalCommandDirectory(command, baseCwd) {
+  const prefix = String(command ?? '').split(/\bgh\s+pr\s+create\b/u, 1)[0] || '';
+  let selected;
+  for (const match of prefix.matchAll(COMMAND_CWD_RE)) {
+    const raw = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+    if (!raw || /[$`]/.test(raw)) continue;
+    const candidate = resolve(baseCwd, raw);
+    if (isDirectory(candidate)) selected = candidate;
+  }
+  return selected;
+}
+
+/**
+ * Prefer a worktree named by the command/payload, but never route a gate to an
+ * unrelated Git repository. The old dispatcher always executed the clean
+ * main-checkout copy of the gate, so a worktree proposing a newer gate was
+ * judged by stale code and saw a different candidate set.
+ */
+export function repositoryCheckout(repositoryRoot, command, payloadCwd) {
+  const baseCwd = isDirectory(payloadCwd) ? payloadCwd : repositoryRoot;
+  const candidates = [literalCommandDirectory(command, baseCwd), payloadCwd, repositoryRoot]
+    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  for (const candidate of candidates) {
+    const gate = join(candidate, 'scripts', 'ci', 'sibling-check-gate.mjs');
+    if (existsSync(gate) && sameGitRepository(candidate, repositoryRoot)) return candidate;
+  }
+  return repositoryRoot;
+}
+
 /**
  * @param {string} rawPayload
  * @returns {{ command: string }|undefined}
@@ -79,6 +142,7 @@ function parsePayload(rawPayload) {
     const payload = JSON.parse(rawPayload);
     return {
       command: String(payload?.tool_input?.command ?? payload?.command ?? ''),
+      cwd: typeof payload?.cwd === 'string' ? payload.cwd : undefined,
     };
   } catch {
     return undefined;
@@ -99,8 +163,9 @@ function main() {
   const workspaceRoot = process.env.WORKSPACE || ROOT;
   const repository = explicitRepository(parsed.command);
   if (hasExplicitRepositoryFlag(parsed.command) && repository === undefined) process.exit(0);
-  const repositoryRoot = repositoryDirectory(repository, workspaceRoot);
-  if (!repositoryRoot) process.exit(0);
+  const configuredRoot = repositoryDirectory(repository, workspaceRoot);
+  if (!configuredRoot) process.exit(0);
+  const repositoryRoot = repositoryCheckout(configuredRoot, parsed.command, parsed.cwd);
   const gate = join(repositoryRoot, 'scripts', 'ci', 'sibling-check-gate.mjs');
 
   // A child repository without this repository-specific gate must not inherit

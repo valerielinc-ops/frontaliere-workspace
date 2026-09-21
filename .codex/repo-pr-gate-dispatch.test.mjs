@@ -4,6 +4,8 @@ import {
   explicitRepository,
   hasExplicitRepositoryFlag,
   hasPullRequestCreationCommand,
+  literalCommandDirectory,
+  repositoryCheckout,
   repositoryDirectory,
 } from './repo-pr-gate-dispatch.mjs';
 
@@ -44,5 +46,23 @@ test('ignores pull-request text inside a quoted task and heredoc', () => {
   assert.equal(
     hasPullRequestCreationCommand("cat <<'TASK'\ngh pr create --base main\nTASK"),
     false,
+  );
+});
+
+test('resolves an absolute worktree cd before the PR command', () => {
+  const worktree = process.cwd();
+  assert.equal(
+    literalCommandDirectory(
+      `cd ${worktree} && gh pr create --base main`,
+      worktree,
+    ),
+    worktree,
+  );
+});
+
+test('keeps the configured checkout when the literal cd is not a sibling worktree', () => {
+  assert.equal(
+    repositoryCheckout('/workspace/frontaliere-si-o-no', 'gh pr create --base main', '/workspace'),
+    '/workspace/frontaliere-si-o-no',
   );
 });
