@@ -1943,6 +1943,83 @@ test('la riconciliazione resta nel coordinatore e recupera uno stato workflow se
   }
 });
 
+test('la riconciliazione workflow non confonde il titolo display del run con il workflow', () => {
+  const subscription = {
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    runId: '9001',
+    sha: 'deadbeef',
+    branch: 'transport/fix',
+    workflow: 'tests',
+    waitFor: ['success'],
+  };
+  const event = normalizeReconciliationEvent({
+    subscription,
+    data: {
+      id: 9001,
+      name: 'Code checks and review · PR #1694 · synchronize',
+      path: '.github/workflows/tests.yml',
+      status: 'completed',
+      conclusion: 'success',
+      head_branch: 'transport/fix',
+      head_sha: 'deadbeef',
+    },
+  });
+
+  assert.equal(event.workflow, 'tests');
+  assert.equal(eventMatchesSubscription(event, subscription), true);
+});
+
+test('la riconciliazione per workflow accetta il path REST del workflow', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-workflow-path-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(String(url));
+    assert.equal(requestUrl.pathname, '/repos/owner/repo/actions/runs');
+    assert.equal(requestUrl.searchParams.get('branch'), 'main');
+    return fakeResponse(200, JSON.stringify({
+      workflow_runs: [{
+        id: 9002,
+        name: 'Code checks and review · PR #1694 · synchronize',
+        path: '.github/workflows/tests.yml',
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'main',
+        head_sha: 'deadbeef',
+        updated_at: '2026-09-15T12:00:00Z',
+      }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'workflow-path-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    workflow: 'tests.yml',
+    branch: 'main',
+    waitFor: ['success'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const result = await coordinator.reconcileEvents(subscription.id);
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).state, 'success');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', () => {
   const parsed = parseGhApiArguments([
     'api', 'repos/octocat/Hello-World', '--jq', '.full_name', '--paginate', '--slurp',

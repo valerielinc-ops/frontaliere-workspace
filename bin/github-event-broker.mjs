@@ -1012,7 +1012,14 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: data.id || data.run_id || subscription.runId,
-      workflow: data.name || data.workflow_name || null,
+      // The REST run endpoint exposes `name` as the run display title (for
+      // example "Code checks and review · PR #1694 · synchronize"), while
+      // webhook workflow_run payloads expose the workflow selector (for
+      // example "tests"). Keep reconciliation on the subscription's
+      // canonical selector when the run was already selected by runId or by
+      // the coordinator's workflow filter; otherwise prefer the API's
+      // workflow-specific fields before falling back to the display title.
+      workflow: subscription.workflow || data.workflow_name || data.path || data.name || null,
       branch: data.head_branch || subscription.branch || null,
       sha: data.head_sha || null,
       conclusion: data.conclusion || null,
