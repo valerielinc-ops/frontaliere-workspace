@@ -615,6 +615,10 @@ function eventAuditRecord({
     sha: normalizedString(event?.sha),
     branch: normalizedString(event?.branch),
     workflow: normalizedString(event?.workflow),
+    workflowId: event?.workflowId === null || event?.workflowId === undefined
+      ? null
+      : String(event.workflowId),
+    workflowPath: normalizedString(event?.workflowPath),
     environment: normalizedString(event?.environment),
     deploymentId: event?.deploymentId === null || event?.deploymentId === undefined
       ? null
@@ -689,6 +693,8 @@ function normalizedEvent({
   pullRequestNumbers = [],
   runId = null,
   workflow = null,
+  workflowId = null,
+  workflowPath = null,
   branch = null,
   deploymentId = null,
   environment = null,
@@ -715,7 +721,9 @@ function normalizedEvent({
     number,
     pullRequestNumbers: unique(pullRequestNumbers.map((value) => String(value))),
     runId: runId === null || runId === undefined ? null : String(runId),
-    workflow,
+    workflow: normalizedString(workflow),
+    workflowId: workflowId === null || workflowId === undefined ? null : String(workflowId),
+    workflowPath: normalizedString(workflowPath),
     branch,
     deploymentId: deploymentId === null || deploymentId === undefined ? null : String(deploymentId),
     environment,
@@ -857,7 +865,9 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: run.id,
-      workflow: run.name || run.workflow_name || null,
+      workflow: run.workflow_name || run.name || run.path || null,
+      workflowId: run.workflow_id,
+      workflowPath: run.path || run.workflow_path || null,
       branch: run.head_branch || null,
       sha: run.head_sha || null,
       conclusion: run.conclusion || null,
@@ -931,6 +941,47 @@ export function shaMatches(eventSha, subscriptionSha) {
   return shorter.length >= 7 && /^[0-9a-f]+$/.test(shorter) && longer.startsWith(shorter);
 }
 
+function workflowFilename(value) {
+  if (typeof value !== 'string') return null;
+  const filename = value.trim().split('/').pop();
+  return /\.ya?ml$/i.test(filename) ? filename.toLowerCase() : null;
+}
+
+function workflowSelectorForms(value) {
+  if (value === null || value === undefined) return [];
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return [];
+  const forms = new Set([raw]);
+  const filename = workflowFilename(raw);
+  if (filename) {
+    forms.add(filename);
+    forms.add(filename.replace(/\.ya?ml$/i, ''));
+  } else if (!raw.includes('/') && !raw.includes('.')) {
+    forms.add(`${raw}.yml`);
+  }
+  return [...forms];
+}
+
+function workflowRunHasSelectorMetadata(run) {
+  return [run?.workflow_name, run?.workflowPath, run?.workflow_path, run?.path, run?.workflowId, run?.workflow_id]
+    .some((value) => value !== null && value !== undefined && String(value).trim() !== '');
+}
+
+export function workflowSelectorMatchesRun(run, selector) {
+  const expected = new Set(workflowSelectorForms(selector));
+  if (expected.size === 0) return true;
+  const candidates = [
+    run?.workflow,
+    run?.workflow_name,
+    run?.workflowPath,
+    run?.workflow_path,
+    run?.path,
+    run?.workflowId,
+    run?.workflow_id,
+  ].flatMap((value) => workflowSelectorForms(value));
+  return candidates.some((candidate) => expected.has(candidate));
+}
+
 export function eventMatchesSubscriptionTarget(event, subscription) {
   if (!event || !subscription || event.repo !== subscription.repo) return false;
   const resources = event.resources || [event.resource];
@@ -956,7 +1007,7 @@ export function eventMatchesSubscriptionTarget(event, subscription) {
     && !shaMatches(event.sha, subscription.sha)) return false;
   if (subscription.branch && event.branch !== subscription.branch) return false;
   if (subscription.environment && event.environment !== subscription.environment) return false;
-  if (subscription.workflow && event.workflow !== subscription.workflow) return false;
+  if (subscription.workflow && !workflowSelectorMatchesRun(event, subscription.workflow)) return false;
   if (subscription.deploymentId && String(event.deploymentId) !== String(subscription.deploymentId)) return false;
   return true;
 }
@@ -1000,6 +1051,12 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
     const pullRequestNumbers = Array.isArray(data.pull_requests)
       ? data.pull_requests.map((pullRequest) => pullRequest.number).filter(Boolean)
       : [];
+    const workflowSelectorMatches = subscription.workflow
+      && workflowSelectorMatchesRun(data, subscription.workflow);
+    const workflow = subscription.workflow
+      && (workflowSelectorMatches || (subscription.runId && !workflowRunHasSelectorMetadata(data)))
+      ? subscription.workflow
+      : data.workflow_name || data.path || data.workflow_path || data.name || null;
     return normalizedEvent({
       deliveryId,
       eventName: 'reconciliation',
@@ -1012,7 +1069,14 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: data.id || data.run_id || subscription.runId,
-      workflow: data.name || data.workflow_name || null,
+      // The REST run endpoint may expose `name` as the run display title,
+      // while webhook workflow_run payloads expose the workflow selector.
+      // Preserve the canonical selector only after the run is known to match
+      // it (or a runId is the only available identity); keep the other REST
+      // identifiers on the event so target matching stays fail-closed.
+      workflow,
+      workflowId: data.workflow_id,
+      workflowPath: data.path || data.workflow_path || null,
       branch: data.head_branch || subscription.branch || null,
       sha: data.head_sha || null,
       conclusion: data.conclusion || null,

@@ -36,7 +36,12 @@ import {
   socketPath,
   stateDirectory,
 } from './github-coordinator-client.mjs';
-import { GitHubEventBroker, normalizeReconciliationEvent, shaMatches } from './github-event-broker.mjs';
+import {
+  GitHubEventBroker,
+  normalizeReconciliationEvent,
+  shaMatches,
+  workflowSelectorMatchesRun,
+} from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -1636,10 +1641,7 @@ export class GitHubCoordinator {
     if (listWorkflowRuns) {
       const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
       data = runs.find((run) => (
-        (!subscription.workflow
-          || run.name === subscription.workflow
-          || run.workflow_name === subscription.workflow
-          || String(run.workflow_id) === String(subscription.workflow))
+        workflowSelectorMatchesRun(run, subscription.workflow)
         && (!subscription.sha || shaMatches(run.head_sha, subscription.sha))
         && (!subscription.branch || run.head_branch === subscription.branch)
       )) || null;
