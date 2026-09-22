@@ -1123,6 +1123,28 @@ export class GitHubCoordinator {
     };
   }
 
+  /**
+   * Cheap liveness/protocol probe used before every client request.
+   *
+   * A ping must not inspect the durable event broker: every `gh` invocation
+   * performs one, and serializing hundreds of persisted subscriptions made a
+   * reconnect storm monopolize the event loop while listeners were restoring.
+   * Detailed event state remains available through the explicit `status`
+   * request.
+   */
+  ping() {
+    return {
+      protocolVersion: COORDINATOR_PROTOCOL_VERSION,
+      identity: this.identity,
+      socket: this.socket,
+      metrics: { startedAt: this.metrics.startedAt },
+      events: {
+        enabled: Boolean(this.eventBroker),
+        webhookSecretConfigured: Boolean(this.eventBroker?.webhookSecret),
+      },
+    };
+  }
+
   resetAnonymousBudget() {
     if (Date.now() >= this.anonymousWindowStartedAt + ANONYMOUS_WINDOW_MS) {
       this.anonymousWindowStartedAt = Date.now();
@@ -2721,7 +2743,7 @@ function readTokenAndStart(identity) {
         }
         let result;
         if (request.type === 'ping') {
-          result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
+          result = Promise.resolve({ ok: true, status: coordinator.ping() });
         } else if (request.type === 'status') {
           result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
         } else if (request.type === 'shutdown') {

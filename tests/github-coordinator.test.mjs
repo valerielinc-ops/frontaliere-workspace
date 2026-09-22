@@ -429,6 +429,37 @@ test('invalida i check di protocollo quando cambia il daemon', async () => {
   }
 });
 
+test('il ping del coordinator resta leggero e non serializza il backlog eventi', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-ping-');
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'ping-secret',
+  });
+  let summaryCalls = 0;
+  const originalSummary = broker.summary.bind(broker);
+  broker.summary = (...args) => {
+    summaryCalls += 1;
+    return originalSummary(...args);
+  };
+  const coordinator = new GitHubCoordinator({
+    identity: 'ping-test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const status = coordinator.ping();
+    assert.equal(status.protocolVersion >= 5, true);
+    assert.equal(status.identity, 'ping-test');
+    assert.equal(status.events.webhookSecretConfigured, true);
+    assert.equal(summaryCalls, 0);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('classifica i bucket GitHub senza confondere search e GraphQL', () => {
   assert.equal(classifyBucket('/graphql'), 'graphql');
   assert.equal(classifyBucket('/search/issues'), 'search');
