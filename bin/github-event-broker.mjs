@@ -397,7 +397,7 @@ function normalizeSubscriptionSpec(spec, nowMs) {
     deploymentId: spec.deploymentId === undefined || spec.deploymentId === null ? null : String(spec.deploymentId),
     waitFor: subscriptionStates(spec),
     allowDuplicate,
-    shared: spec.shared === true || spec.sharedObserver === true || !allowDuplicate,
+    shared: spec.shared === true || spec.sharedObserver === true,
     followLatest: spec.followLatest === true || spec.follow_latest === true,
     once: spec.once !== false,
     stalledAfterMs,

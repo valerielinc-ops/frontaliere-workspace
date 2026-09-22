@@ -1646,6 +1646,48 @@ test('rimuove una subscription once dopo l ack di un evento terminale e conserva
   }
 });
 
+test('una subscription one-shot unica non resta shared e viene rimossa dopo l ack', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-single-once-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'single-once-secret' });
+  const coordinator = new GitHubCoordinator({
+    identity: 'single-once',
+    token: 'test-token',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 45,
+      waitFor: ['merged'],
+      ttlSeconds: 300,
+    });
+    assert.equal(subscription.shared, false);
+
+    const event = normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'single-once-45',
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 45, merged: true },
+      },
+    });
+    broker.recordEvent(event);
+    const acknowledgement = coordinator.acknowledgeEvent(subscription.id, event.id);
+
+    assert.equal(acknowledgement.ok, true);
+    assert.equal(acknowledgement.subscriptionRemoved, true);
+    assert.equal(broker.getSubscription(subscription.id), null);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('segue il run successivo quando il run precedente viene cancellato', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-follow-latest-'));
   const stateFile = join(stateDirectory, 'events.json');
@@ -2369,6 +2411,7 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
       number: 42,
       waitFor: ['merged'],
       ttlSeconds: 60,
+      shared: true,
     }, { identity });
     const subscriptionId = subscriptionResponse.subscription.id;
     const eventPromise = listenForEvent(subscriptionId, { identity, timeoutMs: 5_000 });
@@ -2656,6 +2699,7 @@ test('riattacca e rinnova una subscription scaduta quando conserva un evento pen
       runId: '9004',
       waitFor: ['success'],
       ttlSeconds: 0.1,
+      shared: true,
     }, { identity })).subscription;
     const payload = {
       action: 'completed',
