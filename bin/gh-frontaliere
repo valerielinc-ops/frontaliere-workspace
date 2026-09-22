@@ -20,6 +20,7 @@ import {
   unsubscribeFromEvents,
   waitForCoordinatorStop,
 } from './github-coordinator-client.mjs';
+import { alertOnlyHealthReport } from './github-coordinator-health.mjs';
 
 function printStatus(status) {
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
@@ -363,7 +364,9 @@ async function runEventsCommand(args, identity) {
       ? { ...result, strict: { enabled: true, ok: strictFindings.length === 0, findings: strictFindings } }
       : result;
     const healthy = result.ok && (!strict || strictFindings.length === 0);
-    if (!optionArgs.includes('--alert-only') || !healthy) printJson(output);
+    if (!optionArgs.includes('--alert-only') || !healthy) {
+      printJson(optionArgs.includes('--alert-only') ? alertOnlyHealthReport(output) : output);
+    }
     process.exitCode = healthy ? 0 : 1;
     return;
   }
@@ -492,7 +495,9 @@ try {
       ? { ...result, strict: { enabled: true, ok: strictFindings.length === 0, findings: strictFindings } }
       : result;
     const healthy = result.ok && (!strict || strictFindings.length === 0);
-    if (!args.includes('--alert-only') || !healthy) printJson(output);
+    if (!args.includes('--alert-only') || !healthy) {
+      printJson(args.includes('--alert-only') ? alertOnlyHealthReport(output) : output);
+    }
     process.exitCode = healthy ? 0 : 1;
   } else if (command === 'status' || command === 'ping') {
     const response = await sendRequest({

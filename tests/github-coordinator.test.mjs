@@ -44,6 +44,7 @@ import {
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
+  alertOnlyHealthReport,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
   launchdHealthFindings,
@@ -364,6 +365,22 @@ test('health classifica launchd spawn scheduled come warning solo con processo s
     assert.deepEqual(findings.warnings, [], missing);
     assert.deepEqual(findings.alerts.map(({ code }) => code), ['launchd_not_running'], missing);
   }
+});
+
+test('health alert-only limita il report ai finding senza serializzare lo stato', () => {
+  const report = alertOnlyHealthReport({
+    ok: false,
+    checkedAt: '2026-09-22T20:00:00.000Z',
+    alerts: [{ code: 'orphaned_pending_events', count: 123 }],
+    warnings: [{ code: 'pending_events', count: 123 }],
+    identities: [{ status: { events: { pendingEventDetails: ['large'] } } }],
+  });
+  assert.deepEqual(report, {
+    ok: false,
+    checkedAt: '2026-09-22T20:00:00.000Z',
+    alerts: [{ code: 'orphaned_pending_events', count: 123 }],
+    warnings: [{ code: 'pending_events', count: 123 }],
+  });
 });
 
 test('invalida i check di protocollo quando cambia il daemon', async () => {
