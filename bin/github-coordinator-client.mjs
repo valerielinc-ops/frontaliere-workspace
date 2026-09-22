@@ -531,6 +531,7 @@ export async function listenForEvent(subscriptionId, {
     let heartbeatTimer = null;
     let reconcileTimer = null;
     let retryAttempt = 0;
+    let listenerReady = false;
     let settled = false;
     let event = null;
     let deadlineIsSubscription = Number.isFinite(leaseDeadlineMs) && leaseDeadlineMs <= requestedDeadlineMs;
@@ -676,6 +677,7 @@ export async function listenForEvent(subscriptionId, {
       const onDisconnect = () => {
         if (settled || disconnected) return;
         disconnected = true;
+        listenerReady = false;
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer);
           heartbeatTimer = null;
@@ -684,7 +686,6 @@ export async function listenForEvent(subscriptionId, {
         scheduleReconnect();
       };
       candidate.on('connect', () => {
-        retryAttempt = 0;
         startHeartbeat(candidate);
         candidate.write(`${JSON.stringify({
           type: 'event-listen',
@@ -722,6 +723,10 @@ export async function listenForEvent(subscriptionId, {
             return;
           }
           if (response?.type === 'listening' || response?.type === 'heartbeat') {
+            if (response.type === 'listening' && !listenerReady) {
+              listenerReady = true;
+              retryAttempt = 0;
+            }
             refreshLease(response.subscription);
           } else if (response?.type === 'event') {
             pendingEventsPresent = true;

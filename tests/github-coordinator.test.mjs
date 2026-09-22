@@ -2671,6 +2671,7 @@ test('scollega un listener caduto senza terminare il coordinatore e segnala la s
     const status = await sendRequest({ type: 'status', compact: true }, { identity });
     assert.equal(status.status.events.listenerCount, 0);
     assert.equal(status.status.events.orphanedSubscriptions, 1);
+    assert.equal(status.status.metrics.socketErrors, 0, 'un reset del listener non è un errore del coordinatore');
 
     const expiring = (await subscribeToEvents({
       agentId: 'agent-resilience',
@@ -2858,6 +2859,8 @@ test('riaggancia il listener dopo il riavvio, rinnova la lease e recupera il rep
     const event = await eventPromise;
     assert.equal(event.state, 'success');
     assert.equal(event.runId, '9003');
+    const recoveredStatus = await sendRequest({ type: 'status', compact: true }, { identity });
+    assert.equal(recoveredStatus.status.metrics.socketErrors, 0, 'il reconnect dopo il riavvio non deve lasciare errori socket');
   } finally {
     try {
       await sendRequest({ type: 'shutdown' }, { identity });
