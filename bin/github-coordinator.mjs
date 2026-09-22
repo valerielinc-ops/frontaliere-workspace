@@ -2404,12 +2404,36 @@ function readTokenAndStart(identity) {
   let scheduledGcTimer = null;
   const eventListeners = new Map();
   const sharedAcknowledgements = new Set();
+  const closingConnections = new WeakSet();
+  const expectedClientSocketErrors = new Set([
+    'ECONNABORTED',
+    'ECONNRESET',
+    'EPIPE',
+    'ERR_STREAM_DESTROYED',
+    'ERR_STREAM_WRITE_AFTER_END',
+  ]);
   let activeRequestCount = 0;
   const EVENT_LISTENER_HEARTBEAT_TIMEOUT_MS = 3 * 60 * 1_000;
   const EVENT_LISTENER_ACK_TIMEOUT_MS = 3 * 60 * 1_000;
 
   const writeMessage = (connection, message) => {
-    if (!connection.destroyed) connection.write(`${JSON.stringify(message)}\n`);
+    if (connection.destroyed || connection.writableEnded) return false;
+    try {
+      connection.write(`${JSON.stringify(message)}\n`);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const endConnection = (connection) => {
+    closingConnections.add(connection);
+    if (!connection.destroyed && !connection.writableEnded) connection.end();
+  };
+
+  const destroyConnection = (connection) => {
+    closingConnections.add(connection);
+    if (!connection.destroyed) connection.destroy();
   };
 
   const clientErrorDetails = (error) => {
@@ -2456,11 +2480,11 @@ function readTokenAndStart(identity) {
     try {
       if (!connection.destroyed) {
         writeMessage(connection, { ok: false, error: clientErrorDetails(error) });
-        connection.end();
+        endConnection(connection);
       }
     } catch (closeError) {
       logStructuredError('client_connection_close_failed', closeError);
-      connection.destroy();
+      destroyConnection(connection);
     }
   };
   coordinator.setEventListenerInspector((subscriptionId) => (eventListeners.get(String(subscriptionId))?.size || 0) > 0);
@@ -2485,7 +2509,7 @@ function readTokenAndStart(identity) {
     if (!pending.ok) {
       writeMessage(listener.connection, pending);
       detachEventListener(listener);
-      listener.connection.end();
+      endConnection(listener.connection);
       return;
     }
     if (!pending.event) return;
@@ -2509,7 +2533,7 @@ function readTokenAndStart(identity) {
           error: { code: 'event_subscription_removed', message: 'event subscription was removed' },
         });
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
       }
       return;
     }
@@ -2523,7 +2547,7 @@ function readTokenAndStart(identity) {
           },
         });
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
       }
       return;
     }
@@ -2538,13 +2562,13 @@ function readTokenAndStart(identity) {
         ok: false,
         error: { code: 'event_webhook_secret_unconfigured', message: 'webhook secret is not configured' },
       });
-      connection.end();
+      endConnection(connection);
       return null;
     }
     const details = coordinator.eventSubscriptionDetails(subscriptionId);
     if (!details.ok) {
       writeMessage(connection, details);
-      connection.end();
+      endConnection(connection);
       return null;
     }
     const lease = coordinator.heartbeatEventListener(subscriptionId, {
@@ -2554,7 +2578,7 @@ function readTokenAndStart(identity) {
     });
     if (!lease.ok) {
       writeMessage(connection, lease);
-      connection.end();
+      endConnection(connection);
       return null;
     }
     const listeners = eventListeners.get(subscriptionId);
@@ -2564,7 +2588,7 @@ function readTokenAndStart(identity) {
         ok: false,
         error: { code: 'event_listener_already_attached', message: 'event subscription already has a listener' },
       });
-      connection.end();
+      endConnection(connection);
       return null;
     }
     const listener = {
@@ -2601,7 +2625,7 @@ function readTokenAndStart(identity) {
       if (!heartbeat.ok) {
         writeMessage(listener.connection, heartbeat);
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
         return;
       }
       listener.lastHeartbeatAt = new Date().toISOString();
@@ -2624,7 +2648,7 @@ function readTokenAndStart(identity) {
           error: { code: 'event_ack_mismatch', message: 'event acknowledgement does not match the pending event' },
         });
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
         return;
       }
       const eventKey = `${listener.subscriptionId}:${request.eventId}`;
@@ -2639,7 +2663,7 @@ function readTokenAndStart(identity) {
       if (!acknowledgement.ok && !sharedDuplicateAcknowledgement) {
         writeMessage(listener.connection, acknowledgement);
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
         return;
       }
       if (listener.shared && acknowledgement.ok) {
@@ -2653,7 +2677,7 @@ function readTokenAndStart(identity) {
       writeMessage(listener.connection, { ok: true, type: 'acked', eventId: request.eventId });
       if (listener.once) {
         detachEventListener(listener);
-        listener.connection.end();
+        endConnection(listener.connection);
         if (!listener.shared) coordinator.eventUnsubscribe(listener.subscriptionId);
       } else {
         deliverEvent(listener);
@@ -2664,7 +2688,7 @@ function readTokenAndStart(identity) {
       coordinator.eventUnsubscribe(listener.subscriptionId);
       writeMessage(listener.connection, { ok: true, type: 'unsubscribed', subscriptionId: listener.subscriptionId });
       detachEventListener(listener);
-      listener.connection.end();
+      endConnection(listener.connection);
       return;
     }
     writeMessage(listener.connection, {
@@ -2672,7 +2696,7 @@ function readTokenAndStart(identity) {
       error: { code: 'unsupported_event_listener_request', message: 'unsupported event listener request' },
     });
     detachEventListener(listener);
-    listener.connection.end();
+    endConnection(listener.connection);
   };
 
   const expireStaleListeners = () => {
@@ -2698,7 +2722,7 @@ function readTokenAndStart(identity) {
           },
         });
         detachEventListener(listener);
-        listener.connection.destroy();
+        endConnection(listener.connection);
       }
     }
   };
@@ -2709,8 +2733,10 @@ function readTokenAndStart(identity) {
     const decodeChunk = createUtf8ChunkDecoder();
     let handled = false;
     let listener = null;
-    connection.on('error', () => {
-      coordinator.metrics.socketErrors += 1;
+    connection.on('error', (error) => {
+      if (!closingConnections.has(connection) && !expectedClientSocketErrors.has(error?.code)) {
+        coordinator.metrics.socketErrors += 1;
+      }
       // A supervisor disappearing must detach only its listener.  Without an
       // error handler ECONNRESET can terminate the whole coordinator process.
       detachConnectionListeners(connection, listener);
@@ -2782,7 +2808,7 @@ function readTokenAndStart(identity) {
         Promise.resolve(result).then((response) => {
           try {
             writeMessage(connection, response);
-            connection.end();
+            endConnection(connection);
             if (request.type === 'shutdown') setTimeout(terminate, 10);
           } catch (error) {
             closeConnectionAfterError(connection, error, listener);
@@ -2792,10 +2818,10 @@ function readTokenAndStart(identity) {
         }, (error) => {
           try {
             writeMessage(connection, { ok: false, error: clientErrorDetails(error) });
-            connection.end();
+            endConnection(connection);
           } catch (closeError) {
             logStructuredError('client_connection_close_failed', closeError);
-            connection.destroy();
+            destroyConnection(connection);
           } finally {
             finishRequest();
           }
@@ -2819,7 +2845,7 @@ function readTokenAndStart(identity) {
             request = JSON.parse(line);
           } catch (error) {
             writeMessage(connection, { ok: false, error: { code: 'invalid_request', message: error.message } });
-            connection.end();
+            endConnection(connection);
             return;
           }
           handleRequest(request);
@@ -2830,6 +2856,7 @@ function readTokenAndStart(identity) {
     });
     connection.on('close', () => {
       coordinator.metrics.socketDisconnects += 1;
+      closingConnections.delete(connection);
       detachConnectionListeners(connection, listener);
     });
   });
@@ -2852,7 +2879,7 @@ function readTokenAndStart(identity) {
           ok: false,
           error: { code: 'event_listener_closed', message: 'coordinator is restarting' },
         });
-        listener.connection.destroy();
+        endConnection(listener.connection);
       }
     }
     eventListeners.clear();
@@ -2870,7 +2897,7 @@ function readTokenAndStart(identity) {
     }
   };
   server.on('error', (error) => {
-    coordinator.metrics.socketErrors += 1;
+    if (error.code !== 'EADDRINUSE') coordinator.metrics.socketErrors += 1;
     releaseCoordinatorOwner(ownerLock);
     if (error.code !== 'EADDRINUSE') process.stderr.write(`github-coordinator: ${error.message}\n`);
     process.exit(error.code === 'EADDRINUSE' ? 0 : 1);
