@@ -64,6 +64,11 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
 
+## Gate PII locale
+
+- La blocklist PII è un file non tracciato, per-clone, in `info/pii-blocklist.txt` sotto la directory Git comune. Nei linked worktree `.git` è un file: non usare mai il percorso letterale `.git/info/pii-blocklist.txt`.
+- Per ogni scan risolvi sempre il path con `BL="$(git rev-parse --git-path info/pii-blocklist.txt)"`; se il file risolto manca, fermati e chiedi al proprietario. Non copiare la blocklist dentro il worktree e non committarla.
+
 ## Coordinatore GitHub locale
 
 - Le chiamate GitHub degli agenti passano dal coordinatore condiviso in
