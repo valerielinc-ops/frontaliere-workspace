@@ -287,6 +287,16 @@ export async function checkHealth(identities = DEFAULT_IDENTITIES) {
   };
 }
 
+export function alertOnlyHealthReport(result) {
+  return {
+    ok: result?.ok === true,
+    checkedAt: result?.checkedAt || null,
+    alerts: Array.isArray(result?.alerts) ? result.alerts : [],
+    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+    ...(result?.strict ? { strict: result.strict } : {}),
+  };
+}
+
 function optionValue(args, name) {
   const index = args.findIndex((value) => value === name || value.startsWith(`${name}=`));
   if (index < 0) return null;
@@ -298,6 +308,9 @@ if (process.argv[1] && process.argv[1].endsWith('/github-coordinator-health.mjs'
   const identityOption = optionValue(args, '--identity');
   const identities = identityOption ? [identityOption] : DEFAULT_IDENTITIES;
   const result = await checkHealth(identities);
-  if (!args.includes('--alert-only') || !result.ok) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (!args.includes('--alert-only') || !result.ok) {
+    const output = args.includes('--alert-only') ? alertOnlyHealthReport(result) : result;
+    process.stdout.write(`${JSON.stringify(output)}\n`);
+  }
   process.exitCode = result.ok ? 0 : 1;
 }

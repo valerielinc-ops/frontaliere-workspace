@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import {
   chmodSync,
@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -43,6 +44,7 @@ import {
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
+  alertOnlyHealthReport,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
   launchdHealthFindings,
@@ -363,6 +365,22 @@ test('health classifica launchd spawn scheduled come warning solo con processo s
     assert.deepEqual(findings.warnings, [], missing);
     assert.deepEqual(findings.alerts.map(({ code }) => code), ['launchd_not_running'], missing);
   }
+});
+
+test('health alert-only limita il report ai finding senza serializzare lo stato', () => {
+  const report = alertOnlyHealthReport({
+    ok: false,
+    checkedAt: '2026-09-22T20:00:00.000Z',
+    alerts: [{ code: 'orphaned_pending_events', count: 123 }],
+    warnings: [{ code: 'pending_events', count: 123 }],
+    identities: [{ status: { events: { pendingEventDetails: ['large'] } } }],
+  });
+  assert.deepEqual(report, {
+    ok: false,
+    checkedAt: '2026-09-22T20:00:00.000Z',
+    alerts: [{ code: 'orphaned_pending_events', count: 123 }],
+    warnings: [{ code: 'pending_events', count: 123 }],
+  });
 });
 
 test('invalida i check di protocollo quando cambia il daemon', async () => {
@@ -2406,6 +2424,111 @@ test('isola un errore di elaborazione su una connessione e mantiene vivo il coor
     } catch {
       // Il daemon puo' non avere raggiunto l'avvio; il cleanup resta sicuro.
     }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('recupera un endpoint Unix residuo prima di riavviare il coordinator', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-stale-endpoint-');
+  const identity = `stale-endpoint-${process.pid}`;
+  const socket = join(stateDirectory, `github-coordinator-${identity}.sock`);
+  const previousStateDirectory = process.env.FRONTALIERE_GH_STATE_DIR;
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  writeFileSync(socket, 'stale endpoint');
+  const child = spawn(process.execPath, [join(ROOT, 'bin', 'github-coordinator.mjs'), 'serve', '--identity', identity], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      FRONTALIERE_GH_STATE_DIR: stateDirectory,
+      FRONTALIERE_GH_IDENTITY: identity,
+      FRONTALIERE_GH_TOKEN: 'test-token-not-real',
+      FRONTALIERE_REAL_GH: '/bin/echo',
+      FRONTALIERE_GH_WEBHOOK_SECRET: 'stale-endpoint-secret',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+  const waitForSocket = async () => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        if (statSync(socket).isSocket()) return;
+      } catch {
+        // The stale file is removed before the replacement socket is bound.
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+    throw new Error(`coordinator socket did not start: ${stderr}`);
+  };
+
+  try {
+    await waitForSocket();
+    const ping = await sendRequest({ type: 'ping' }, { identity });
+    assert.equal(ping.ok, true);
+    assert.equal(statSync(socket).isSocket(), true);
+
+    const childExit = new Promise((resolvePromise) => {
+      child.once('exit', (code, signal) => resolvePromise({ code, signal }));
+    });
+    await sendRequest({ type: 'shutdown' }, { identity });
+    const exit = child.exitCode !== null
+      ? { code: child.exitCode, signal: child.signalCode }
+      : await Promise.race([
+        childExit,
+        new Promise((_, rejectPromise) => setTimeout(
+          () => rejectPromise(new Error(`coordinator did not stop: ${stderr}`)),
+          3_000,
+        )),
+      ]);
+    assert.deepEqual(exit, { code: 0, signal: null });
+    assert.equal(existsSync(socket), false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    try { await waitForCoordinatorStop(identity, 3_000); } catch { /* child may already be gone */ }
+    if (previousStateDirectory === undefined) delete process.env.FRONTALIERE_GH_STATE_DIR;
+    else process.env.FRONTALIERE_GH_STATE_DIR = previousStateDirectory;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('non lascia il socket quando una connessione resta aperta durante lo shutdown', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-shutdown-');
+  const identity = `shutdown-idle-${process.pid}`;
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  Object.assign(process.env, {
+    FRONTALIERE_GH_STATE_DIR: stateDirectory,
+    FRONTALIERE_GH_IDENTITY: identity,
+    FRONTALIERE_GH_TOKEN: 'test-token-not-real',
+    FRONTALIERE_REAL_GH: '/bin/echo',
+    FRONTALIERE_GH_WEBHOOK_SECRET: 'shutdown-secret',
+  });
+  let idleConnection;
+
+  try {
+    await ensureCoordinator(identity);
+    idleConnection = createConnection(socketPath(identity));
+    await new Promise((resolvePromise, rejectPromise) => {
+      idleConnection.once('error', rejectPromise);
+      idleConnection.once('connect', resolvePromise);
+    });
+    await sendRequest({ type: 'shutdown' }, { identity });
+    assert.equal(await waitForCoordinatorStop(identity, 5_000), true);
+    assert.equal(existsSync(socketPath(identity)), false);
+  } finally {
+    idleConnection?.destroy();
+    try { await waitForCoordinatorStop(identity, 3_000); } catch { /* child may already be gone */ }
     for (const [name, value] of Object.entries(previousEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;

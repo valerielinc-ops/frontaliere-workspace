@@ -315,6 +315,16 @@ function releaseCoordinatorOwner(ownerLock, { removeSocket = false } = {}) {
   try { closeSync(ownerLock.fd); } catch { /* already closed */ }
 }
 
+function removeStaleCoordinatorSocket(socket) {
+  try {
+    unlinkSync(socket);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = {}) {
   let triggered = false;
   let watcher;
@@ -2388,8 +2398,20 @@ function readTokenAndStart(identity) {
   const ownerLock = claimCoordinatorOwner(identity, socket);
   if (!ownerLock) return;
 
-  const realGh = resolveRealGh();
-  const token = resolveToken(identity, realGh);
+  let realGh;
+  let token;
+  try {
+    // A forced shutdown can leave the filesystem entry behind after the
+    // process has gone away. The owner lock is the authority for this path:
+    // once we own it, no live coordinator should still be serving this socket.
+    removeStaleCoordinatorSocket(socket);
+    realGh = resolveRealGh();
+    token = resolveToken(identity, realGh);
+  } catch (error) {
+    releaseCoordinatorOwner(ownerLock, { removeSocket: true });
+    try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
+    throw error;
+  }
 
   const eventBroker = new GitHubEventBroker({
     stateFile: eventStatePath(identity),
@@ -2403,6 +2425,7 @@ function readTokenAndStart(identity) {
   let eventSweepTimer = null;
   let scheduledGcTimer = null;
   const eventListeners = new Map();
+  const connections = new Set();
   const sharedAcknowledgements = new Set();
   const closingConnections = new WeakSet();
   const expectedClientSocketErrors = new Set([
@@ -2728,6 +2751,7 @@ function readTokenAndStart(identity) {
   };
 
   const server = createServer((connection) => {
+    connections.add(connection);
     coordinator.metrics.socketConnections += 1;
     let buffer = '';
     const decodeChunk = createUtf8ChunkDecoder();
@@ -2856,6 +2880,7 @@ function readTokenAndStart(identity) {
     });
     connection.on('close', () => {
       coordinator.metrics.socketDisconnects += 1;
+      connections.delete(connection);
       closingConnections.delete(connection);
       detachConnectionListeners(connection, listener);
     });
@@ -2884,8 +2909,28 @@ function readTokenAndStart(identity) {
     }
     eventListeners.clear();
     stopSourceWatcher();
-    server.close(() => process.exit(exitCode));
-    setTimeout(() => process.exit(exitCode), 1_000);
+    let forceExitTimer = null;
+    const finish = () => {
+      if (forceExitTimer) clearTimeout(forceExitTimer);
+      cleanUp();
+      process.exit(exitCode);
+    };
+    try {
+      server.close(finish);
+    } catch (error) {
+      logStructuredError('server_close_failed', error);
+      finish();
+      return;
+    }
+    forceExitTimer = setTimeout(() => {
+      // A client can keep a half-closed Unix socket alive indefinitely. Do not
+      // let that prevent launchd from getting a clean handoff and leave a
+      // stale endpoint for the replacement process.
+      for (const connection of connections) destroyConnection(connection);
+      server.closeAllConnections?.();
+      cleanUp();
+      process.exit(exitCode);
+    }, 1_000);
   };
 
   const cleanUp = () => {
