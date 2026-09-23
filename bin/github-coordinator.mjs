@@ -45,7 +45,7 @@ import {
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
-const COORDINATOR_PROTOCOL_VERSION = 5;
+const COORDINATOR_PROTOCOL_VERSION = 6;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
 const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
 const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
