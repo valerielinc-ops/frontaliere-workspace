@@ -12,6 +12,11 @@
           },
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/pii-blocklist-policy.mjs\" ] || d=\"$(cd \"$d/..\" && pwd)\"; [ -f \"$d/bin/pii-blocklist-policy.mjs\" ] || exit 0; node \"$d/bin/pii-blocklist-policy.mjs\"'",
+            "statusMessage": "Risoluzione obbligatoria della blocklist PII nei linked worktree"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/run-mutation-gate.mjs'",
             "statusMessage": "Blocco rerun/cancel per evitare review duplicate"
           },
