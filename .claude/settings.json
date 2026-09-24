@@ -31,6 +31,10 @@
           },
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --pre'"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/run-mutation-gate.mjs'"
           },
           {
@@ -39,7 +43,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/.codex/repo-pr-gate-dispatch.mjs\" ] || exit 0; node \"$d/.codex/repo-pr-gate-dispatch.mjs\"'"
+            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/bin/pr-gate-cache.mjs\" ] || exit 0; node \"$d/bin/pr-gate-cache.mjs\"'"
           },
           {
             "type": "command",
@@ -68,6 +72,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --cleanup'",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -x \"$d/bin/gh-frontaliere\" ] || d=\"$WORKSPACE/bin/gh-frontaliere\"; [ -x \"$d\" ] || exit 0; node \"$d\" ping >/dev/null 2>&1 || true'"
           },
           {
@@ -82,6 +91,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${CLAUDE_PROJECT_DIR:-${WORKSPACE:-$PWD}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --cleanup'",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'"
           }
         ]
@@ -91,6 +105,10 @@
       {
         "matcher": "Bash",
         "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --post'"
+          },
           {
             "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-watch-register.mjs'"

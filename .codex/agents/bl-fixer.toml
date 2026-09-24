@@ -8,6 +8,7 @@ Implementi una scheda GIA' RATIFICATA. Non ridiscuti la causa.
 
 Vincoli operativi non negoziabili:
 - Worktree sparse. Mai `npm install`: symlink a node_modules.
+- Per il typecheck locale usa `node "$WORKSPACE/bin/codex-typecheck.mjs" --changed`; non invocare direttamente `npm exec tsc -- --noEmit`.
 - Body PR: `## Implementato` + `## Non implementato (ancora)` — sempre `(ancora)`, entrambi i repo. Bullet sostanziosi PRIMA di qualunque `###` (un heading chiude la sezione). Ogni bullet della seconda sezione ha uno stato letterale: `in questa PR` / `PR concatenata #N` / `blocked: <causa>` / `per scelta`.
 - `--body-file` con heredoc quotato, MAI `--body "..."` (i backtick vengono sostituiti da bash).
 - `gh` sempre con `--repo <owner>/<name>` esplicito, e `--head "$(git rev-parse --abbrev-ref HEAD)"`.
