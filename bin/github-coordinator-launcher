@@ -3,19 +3,77 @@
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+# launchd inherits macOS's conservative 256-descriptor soft limit. Raise only
+# this daemon's limit so its socket, watcher and worker pipes are not starved.
+ulimit -n 4096 2>/dev/null || true
+
+coordinator_identity="default"
+refresh_remote_config=0
+launcher_args=()
+for launcher_arg in "$@"; do
+  if [ "$launcher_arg" = "--refresh-remote-config" ]; then
+    refresh_remote_config=1
+  else
+    launcher_args+=("$launcher_arg")
+    if [ "$launcher_arg" = "--identity" ]; then
+      coordinator_identity="__next__"
+    elif [ "$coordinator_identity" = "__next__" ]; then
+      coordinator_identity="$launcher_arg"
+    fi
+  fi
+done
+case "${FRONTALIERE_GH_RC_REFRESH:-}" in
+  1|true|TRUE|yes|YES) refresh_remote_config=1 ;;
+esac
+unset FRONTALIERE_GH_RC_REFRESH
+
+if [ "$refresh_remote_config" -eq 0 ]; then
+  rc_cache_exports="$(node "$script_dir/github-coordinator-rc-cache.mjs" hydrate --identity "$coordinator_identity" 2>/dev/null || true)"
+  if [ -n "$rc_cache_exports" ]; then
+    eval "$rc_cache_exports"
+  fi
+  unset rc_cache_exports
+fi
+
+webhook_was_missing=0
+if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ]; then webhook_was_missing=1; fi
+token_was_missing=0
+if [ "$coordinator_identity" = "nanako" ]; then
+  if [ -z "${FRONTALIERE_GH_TOKEN_NANAKO:-}" ] \
+    && [ -z "${GITHUB_PAT_NANAKO:-}" ] \
+    && [ -z "${GH_TOKEN:-}" ]; then token_was_missing=1; fi
+else
+  if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] \
+    && [ -z "${GITHUB_PAT:-}" ] \
+    && [ -z "${GH_TOKEN:-}" ] \
+    && [ -z "${GITHUB_TOKEN:-}" ]; then token_was_missing=1; fi
+fi
+
+if [ "$refresh_remote_config" -eq 1 ]; then
+  # Explicit refresh deliberately bypasses the launchd values for this start.
+  # The old cache stays in launchd until the new values have loaded, so a
+  # failed refresh does not strand the next KeepAlive restart without creds.
+  unset FRONTALIERE_GH_WEBHOOK_SECRET
+  if [ "$coordinator_identity" = "nanako" ]; then
+    unset FRONTALIERE_GH_TOKEN_NANAKO GITHUB_PAT_NANAKO
+  else
+    unset FRONTALIERE_GH_TOKEN GITHUB_PAT GH_TOKEN GITHUB_TOKEN
+  fi
+  webhook_was_missing=1
+  token_was_missing=1
+fi
 
 # Client auto-starts must load the same Remote Config secret as the persistent
 # launch agent.  Keep an explicit test/workflow override when one is present.
 # The webhook secret alone is not an authenticated GitHub API credential.  A
 # launchd environment can retain the former while losing the Remote Config
 # token, so hydrate RC whenever no GitHub token is present.
-if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ] || {
-  [ -z "${FRONTALIERE_GH_TOKEN:-}" ] &&
-  [ -z "${GH_TOKEN:-}" ] &&
-  [ -z "${GITHUB_TOKEN:-}" ] &&
-  [ -z "${GITHUB_PAT:-}" ];
-}; then
-  . "$script_dir/rc-env.sh" >/dev/null 2>&1
+rc_loaded=0
+if [ "$webhook_was_missing" -eq 1 ] || [ "$token_was_missing" -eq 1 ]; then
+  . "${FRONTALIERE_GH_RC_ENV_SCRIPT:-$script_dir/rc-env.sh}" >/dev/null 2>&1
+  rc_loaded=1
 fi
 
 # Remote Config names the default owner's credential GITHUB_PAT.  Keep the
@@ -24,6 +82,22 @@ fi
 if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -n "${GITHUB_PAT:-}" ]; then
   export FRONTALIERE_GH_TOKEN="$GITHUB_PAT"
 fi
+if [ -z "${FRONTALIERE_GH_TOKEN_NANAKO:-}" ] && [ -n "${GITHUB_PAT_NANAKO:-}" ]; then
+  export FRONTALIERE_GH_TOKEN_NANAKO="$GITHUB_PAT_NANAKO"
+fi
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "$@"
+if [ "$rc_loaded" -eq 1 ]; then
+  if [ "$token_was_missing" -eq 1 ]; then
+    if [ "$coordinator_identity" = "nanako" ]; then
+      export FRONTALIERE_GH_RC_CACHE_NANAKO_TOKEN=1
+    else
+      export FRONTALIERE_GH_RC_CACHE_DEFAULT_TOKEN=1
+    fi
+  fi
+  if [ "$webhook_was_missing" -eq 1 ]; then
+    export FRONTALIERE_GH_RC_CACHE_WEBHOOK=1
+  fi
+  node "$script_dir/github-coordinator-rc-cache.mjs" persist --identity "$coordinator_identity" >/dev/null 2>&1 || true
+fi
+
+exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "${launcher_args[@]}"

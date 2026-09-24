@@ -1105,12 +1105,20 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
 }
 
 export class GitHubEventBroker {
-  constructor({ stateFile, webhookSecret, now = () => Date.now(), legacyStateFile = null }) {
+  constructor({
+    stateFile,
+    webhookSecret,
+    now = () => Date.now(),
+    legacyStateFile = null,
+    initialState = null,
+    canPersist = null,
+  }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
     this.legacyStateFile = legacyStateFile && legacyStateFile !== stateFile ? legacyStateFile : null;
     this.webhookSecret = normalizedString(webhookSecret);
     this.now = now;
+    this.canPersist = typeof canPersist === 'function' ? canPersist : null;
     this.metrics = {
       subscriptionsCreated: 0,
       subscriptionsExpired: 0,
@@ -1126,7 +1134,11 @@ export class GitHubEventBroker {
       latencySamplesRecorded: 0,
       subscriptionsGarbageCollected: 0,
     };
-    this.state = this.loadState();
+    // A coordinator may load the durable state in a worker so that a large
+    // persisted backlog cannot block its Unix socket during startup. The
+    // worker has already validated/normalized this snapshot; library callers
+    // keep the ordinary synchronous path by default.
+    this.state = initialState || this.loadState();
     if (this.state.migratedLegacyFiles?.length > 0) this.persist();
   }
 
@@ -1224,6 +1236,12 @@ export class GitHubEventBroker {
   }
 
   persist() {
+    if (this.canPersist && this.canPersist() !== true) {
+      throw brokerError(
+        'event_state_owner_lost',
+        'event broker state owner lock is no longer held; refusing to overwrite newer state',
+      );
+    }
     const temporary = `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temporary, `${JSON.stringify(this.state)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -1318,10 +1336,13 @@ export class GitHubEventBroker {
   }
 
   publicSubscription(subscription, options = {}) {
-    const duplicateTargetCount = this.duplicateSubscriptionCounts().get(subscriptionDedupKey(subscription)) || 1;
+    const duplicateTargetCount = options.duplicateTargetCount
+      ?? this.duplicateSubscriptionCounts().get(subscriptionDedupKey(subscription))
+      ?? 1;
+    const waitEstimate = options.waitEstimate ?? this.estimateFor(subscription);
     return subscriptionPublic(subscription, {
       ...options,
-      waitEstimate: this.estimateFor(subscription),
+      waitEstimate,
       duplicateTargetCount,
     });
   }
@@ -1333,10 +1354,21 @@ export class GitHubEventBroker {
       .length;
   }
 
-  summary({ listenerAttached = null, listenerInfo = null, includePendingDetails = true, ...filters } = {}) {
-    if (this.prune()) this.persist();
-    const allSubscriptions = this.state.subscriptions;
+  summary({
+    listenerAttached = null,
+    listenerInfo = null,
+    includePendingDetails = true,
+    compact = false,
+    ...filters
+  } = {}) {
     const nowMs = this.now();
+    // Keep status observational while presenting the same active view that a
+    // pruning read used to expose. Pending subscriptions remain visible past
+    // expiry; only empty expired records are hidden until the expiry timer
+    // persists their removal.
+    const allSubscriptions = this.state.subscriptions.filter((subscription) => (
+      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
+    ));
     const subscriptions = allSubscriptions.filter((subscription) => (
       selectedSubscription(subscription, filters, listenerAttached, nowMs)
     ));
@@ -1347,19 +1379,26 @@ export class GitHubEventBroker {
       if (!latencyByResource.has(sample.resource)) latencyByResource.set(sample.resource, []);
       latencyByResource.get(sample.resource).push(sample);
     }
-    const publicSubscriptions = subscriptions.map((subscription) => this.publicSubscription(subscription, {
-      nowMs,
-      listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
-      listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
-    }));
+    // Coordinator probes and full status summaries only need counters. The
+    // full subscription representations belong to status(). Building them
+    // here as well doubles ETA/duplicate work and can stall the socket.
     const listenerCount = listenerAttached === null
       ? null
-      : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
-    const stalledSubscriptions = publicSubscriptions.filter(({ targetStalled }) => targetStalled);
+      : subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) === true).length;
+    const stalledSubscriptions = subscriptions.filter((subscription) => subscriptionIsStalled(subscription, nowMs));
     const { pendingEvents, pendingSubscriptionCount, oldestPendingAt } = pendingEventSummary(subscriptions);
     const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
-    const listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
-    const listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
+    let listenerAliveSubscriptions = 0;
+    let listenerDeadSubscriptions = 0;
+    for (const subscription of subscriptions) {
+      const liveness = listenerLiveness(
+        listenerAttachedValue(listenerAttached, subscription.id),
+        listenerInfoValue(listenerInfo, subscription.id),
+        nowMs,
+      );
+      if (liveness.alive === true) listenerAliveSubscriptions += 1;
+      if (liveness.dead === true) listenerDeadSubscriptions += 1;
+    }
     const duplicateSubscriptions = duplicateGroups.reduce((total, group) => total + group.count - 1, 0);
     const alerts = [];
     if (pendingEvents > 0) alerts.push({ code: 'pending_events', count: pendingEvents });
@@ -1370,9 +1409,13 @@ export class GitHubEventBroker {
     if (stalledSubscriptions.length > 0) {
       alerts.push({ code: 'stalled_subscriptions', scope: 'target', count: stalledSubscriptions.length });
     }
-    const summaryLine = publicSubscriptions.length === 1
-      ? publicSubscriptions[0].compactLine
-      : String(publicSubscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
+    const summaryLine = !compact && subscriptions.length === 1
+      ? this.publicSubscription(subscriptions[0], {
+        nowMs,
+        listenerAttached: listenerAttachedValue(listenerAttached, subscriptions[0].id),
+        listenerInfo: listenerInfoValue(listenerInfo, subscriptions[0].id),
+      }).compactLine
+      : String(subscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
         + ' listener attivi · ' + String(pendingEvents) + ' eventi pending';
     return {
       stateFile: this.stateFile,
@@ -1407,9 +1450,11 @@ export class GitHubEventBroker {
   }
 
   status({ listenerAttached = null, listenerInfo = null, limit, ...filters } = {}) {
-    if (this.prune()) this.persist();
     const nowMs = this.now();
-    const allSubscriptions = this.state.subscriptions.filter((subscription) => (
+    const activeSubscriptions = this.state.subscriptions.filter((subscription) => (
+      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
+    ));
+    const allSubscriptions = activeSubscriptions.filter((subscription) => (
       selectedSubscription(subscription, filters, listenerAttached, nowMs)
     ));
     const numericLimit = limit === undefined || limit === null ? null : Number(limit);
@@ -1420,13 +1465,26 @@ export class GitHubEventBroker {
       ? allSubscriptions
       : allSubscriptions.slice(0, boundedLimit);
     const pendingSummary = pendingEventSummary(subscriptions);
-    return {
-      stateFile: this.stateFile,
-      subscriptions: subscriptions.map((subscription) => this.publicSubscription(subscription, {
+    const duplicateCounts = this.duplicateSubscriptionCounts();
+    const waitEstimateCache = new Map();
+    const publicSubscriptions = subscriptions.map((subscription) => {
+      const estimateKey = latencySampleKey(subscription);
+      let waitEstimate = waitEstimateCache.get(estimateKey);
+      if (!waitEstimate) {
+        waitEstimate = this.estimateFor(subscription);
+        waitEstimateCache.set(estimateKey, waitEstimate);
+      }
+      return this.publicSubscription(subscription, {
         nowMs,
         listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
         listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
-      })),
+        waitEstimate,
+        duplicateTargetCount: duplicateCounts.get(subscriptionDedupKey(subscription)) || 1,
+      });
+    });
+    return {
+      stateFile: this.stateFile,
+      subscriptions: publicSubscriptions,
       ...pendingSummary,
       pendingEventDetails: pendingEventDetails(subscriptions, nowMs),
       metrics: { ...this.metrics },
@@ -1538,7 +1596,10 @@ export class GitHubEventBroker {
     if (!Number.isFinite(grace) || grace <= 0) {
       throw brokerError('event_gc_age_invalid', 'event garbage collection age must be positive');
     }
-    this.prune();
+    // A dry-run must be observational. In particular, status/health and the
+    // scheduled orphan inspection must never prune an expired subscription or
+    // rewrite the durable snapshot while a listener is being reattached.
+    const pruned = apply ? this.prune() : false;
     const nowMs = this.now();
     const duplicateCounts = this.duplicateSubscriptionCounts();
     const eligibility = new Map();
@@ -1576,7 +1637,7 @@ export class GitHubEventBroker {
     ));
     const candidateIds = candidates.map(({ id }) => id);
     const removedIds = apply ? candidateIds : [];
-    if (apply && removedIds.length > 0) {
+    if (apply && (pruned || removedIds.length > 0)) {
       const removed = new Set(removedIds);
       this.state.subscriptions = this.state.subscriptions.filter(({ id }) => !removed.has(id));
       this.metrics.subscriptionsGarbageCollected += removedIds.length;

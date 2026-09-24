@@ -225,6 +225,13 @@ export async function checkCoordinatorHealth(identity) {
         message: `${normalized}: ${status.metrics.socketErrors} socket errors since process start`,
       });
     }
+    if (Number(status.metrics?.socketTimeouts || 0) > 0) {
+      warnings.push({
+        code: 'socket_idle_timeouts',
+        count: Number(status.metrics.socketTimeouts),
+        message: `${normalized}: ${status.metrics.socketTimeouts} idle socket connections were closed`,
+      });
+    }
   }
   return {
     identity: normalized,

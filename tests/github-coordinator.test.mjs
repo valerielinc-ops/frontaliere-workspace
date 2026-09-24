@@ -35,6 +35,7 @@ import {
   eventSubscriptions,
   ingestGitHubWebhook,
   listenForEvent,
+  LOCAL_EVENT_DETAIL_TIMEOUT_MS,
   normalizeIdentity,
   requestTimeoutMilliseconds,
   sendRequest,
@@ -278,7 +279,6 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
     'events-summary',
     'events-audit',
     'events-gc',
-    'events-subscription',
     'events-subscription-target',
     'events-unsubscribe',
     'events-renew',
@@ -291,6 +291,7 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
   for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile', 'confirm-cancellation']) {
     assert.equal(requestTimeoutMilliseconds({ type }), 15 * 60 * 1_000, type);
   }
+  assert.equal(requestTimeoutMilliseconds({ type: 'events-subscription' }), LOCAL_EVENT_DETAIL_TIMEOUT_MS);
 });
 
 test('health classifica residui lifecycle come warning indipendentemente dal volume', () => {
@@ -381,6 +382,58 @@ test('health alert-only limita il report ai finding senza serializzare lo stato'
     alerts: [{ code: 'orphaned_pending_events', count: 123 }],
     warnings: [{ code: 'pending_events', count: 123 }],
   });
+});
+
+test('ritenta una lettura locale dopo una transizione del socket senza ritentare mutation', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-socket-retry-');
+  const identity = `socket-retry-${process.pid}`;
+  const previousStateDirectory = process.env.FRONTALIERE_GH_STATE_DIR;
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  let server;
+  let statusAttempts = 0;
+  const status = {
+    protocolVersion: 6,
+    identity,
+    metrics: { startedAt: 'socket-retry-daemon' },
+    events: { webhookSecretConfigured: true },
+  };
+  try {
+    server = createServer((connection) => {
+      let buffer = '';
+      connection.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline));
+        if (request.type === 'ping') {
+          connection.end(`${JSON.stringify({ ok: true, status })}\n`);
+          return;
+        }
+        if (request.type === 'status') {
+          statusAttempts += 1;
+          if (statusAttempts === 1) {
+            connection.destroy();
+            return;
+          }
+          connection.end(`${JSON.stringify({ ok: true, status })}\n`);
+        }
+      });
+    });
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.once('error', rejectPromise);
+      server.listen(socketPath(identity), resolvePromise);
+    });
+
+    const response = await sendRequest({ type: 'status', compact: true }, { identity });
+    assert.equal(response.ok, true);
+    assert.equal(statusAttempts, 2);
+  } finally {
+    if (server) await new Promise((resolvePromise) => server.close(resolvePromise));
+    try { unlinkSync(socketPath(identity)); } catch { /* socket già rimosso */ }
+    if (previousStateDirectory === undefined) delete process.env.FRONTALIERE_GH_STATE_DIR;
+    else process.env.FRONTALIERE_GH_STATE_DIR = previousStateDirectory;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('invalida i check di protocollo quando cambia il daemon', async () => {
@@ -1900,11 +1953,11 @@ test('il ciclo di expiry raccoglie i duplicati sicuri e protegge l unico pending
 
     coordinator.expireEventSubscriptions();
 
-    assert.equal(broker.getSubscription(duplicate.id), null);
+    assert.ok(broker.getSubscription(duplicate.id), 'automatic expiry must not run orphan GC');
     assert.ok(broker.getSubscription(primary.id));
     assert.ok(broker.getSubscription(protectedUnique.id));
     assert.equal(broker.pendingEvent(protectedUnique.id).id, event.id);
-    assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
+    assert.equal(broker.metrics.subscriptionsGarbageCollected, 0);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }
@@ -2439,6 +2492,7 @@ test('recupera un endpoint Unix residuo prima di riavviare il coordinator', asyn
   const previousStateDirectory = process.env.FRONTALIERE_GH_STATE_DIR;
   process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
   writeFileSync(socket, 'stale endpoint');
+  writeFileSync(`${socket}.owner`, '{ truncated owner record');
   const child = spawn(process.execPath, [join(ROOT, 'bin', 'github-coordinator.mjs'), 'serve', '--identity', identity], {
     cwd: ROOT,
     env: {
