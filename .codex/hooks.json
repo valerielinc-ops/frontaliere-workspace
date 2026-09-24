@@ -17,6 +17,11 @@
           },
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --pre'",
+            "statusMessage": "Serializzazione e telemetria dei comandi pesanti"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/run-mutation-gate.mjs'",
             "statusMessage": "Blocco rerun/cancel per evitare review duplicate"
           },
@@ -27,7 +32,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/.codex/repo-pr-gate-dispatch.mjs\" ] || exit 0; node \"$d/.codex/repo-pr-gate-dispatch.mjs\"'",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/pr-gate-cache.mjs\" ] || exit 0; node \"$d/bin/pr-gate-cache.mjs\"'",
             "statusMessage": "Controllo dei file gemelli prima della PR"
           },
           {
@@ -62,6 +67,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --cleanup'",
+            "timeout": 5,
+            "statusMessage": "Rimozione dei residui scaduti del runtime agenti"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -x \"$d/bin/gh-frontaliere\" ] || exit 0; node \"$d/bin/gh-frontaliere\" ping >/dev/null 2>&1 || true'",
             "statusMessage": "Avvio del coordinatore GitHub condiviso"
           },
@@ -78,6 +89,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --cleanup'",
+            "timeout": 5,
+            "statusMessage": "Cleanup degli observer creati dalla sessione"
+          },
+          {
+            "type": "command",
             "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'",
             "timeout": 3
           }
@@ -88,6 +105,11 @@
       {
         "matcher": "Bash",
         "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --post'",
+            "statusMessage": "Chiusura telemetria e lease del comando"
+          },
           {
             "type": "command",
             "command": "sh -c 'w=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-watch-register.mjs'",
