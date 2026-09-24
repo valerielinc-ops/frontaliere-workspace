@@ -45,6 +45,10 @@ import {
 } from '../bin/github-coordinator-client.mjs';
 import {
   alertOnlyHealthReport,
+  alertOnlyFingerprint,
+  clearAlertOnlyState,
+  HEALTH_PROBE_TIMEOUT_MS,
+  shouldEmitAlertOnly,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
   launchdHealthFindings,
@@ -305,6 +309,10 @@ test('health classifica residui lifecycle come warning indipendentemente dal vol
   ]);
 });
 
+test('health usa una soglia probe piu tollerante del client operativo', () => {
+  assert.equal(HEALTH_PROBE_TIMEOUT_MS, 10_000);
+});
+
 test('health mantiene alert solo per eventi pending senza listener oltre la grace period', () => {
   const findings = eventLifecycleHealth({
     orphanedSubscriptions: 69,
@@ -381,6 +389,67 @@ test('health alert-only limita il report ai finding senza serializzare lo stato'
     alerts: [{ code: 'orphaned_pending_events', count: 123 }],
     warnings: [{ code: 'pending_events', count: 123 }],
   });
+});
+
+test('health alert-only deduplica un incidente persistente e lo ripete dopo un ora', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-health-dedupe-');
+  const statePath = join(stateDirectory, 'health.json');
+  const report = {
+    ok: false,
+    checkedAt: '2026-09-24T07:00:00.000Z',
+    alerts: [{
+      code: 'orphaned_pending_events',
+      count: 123,
+      subscriptionCount: 70,
+      message: 'default: 123 pending events across 70 subscriptions have had no listener for over an hour',
+      nextAction: 'reattach_or_explicit_ack',
+    }],
+    warnings: [{
+      code: 'pending_events',
+      count: 123,
+      message: 'default: 123 webhook events await acknowledgement',
+    }],
+  };
+  try {
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 1_000 }), true);
+    assert.equal(shouldEmitAlertOnly({
+      ...report,
+      checkedAt: '2026-09-24T07:00:30.000Z',
+      alerts: [{ ...report.alerts[0], count: 124, subscriptionCount: 71,
+        message: 'default: 124 pending events across 71 subscriptions have had no listener for over an hour' }],
+      warnings: [{ ...report.warnings[0], count: 124, message: 'default: 124 webhook events await acknowledgement' }],
+    }, { statePath, nowMs: 30_000 }), false);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 3_600_999 }), false);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 3_601_000 }), true);
+    assert.equal(alertOnlyFingerprint(report), alertOnlyFingerprint({
+      ...report,
+      checkedAt: 'later',
+      alerts: [{ ...report.alerts[0], count: 999, message: 'default: 999 pending events across 999 subscriptions have had no listener for over an hour' }],
+      warnings: [{ ...report.warnings[0], count: 999, message: 'default: 999 webhook events await acknowledgement' }],
+    }));
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('health alert-only riapre subito un incidente dopo un intervallo sano', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-health-recovery-');
+  const statePath = join(stateDirectory, 'health.json');
+  const report = {
+    ok: false,
+    alerts: [{
+      code: 'coordinator_probe_failed',
+      message: 'default: probe failed',
+    }],
+    warnings: [],
+  };
+  try {
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 1_000 }), true);
+    assert.equal(clearAlertOnlyState({ statePath }), true);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 2_000 }), true);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test('invalida i check di protocollo quando cambia il daemon', async () => {
