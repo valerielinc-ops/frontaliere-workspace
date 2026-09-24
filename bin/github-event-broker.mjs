@@ -1318,10 +1318,13 @@ export class GitHubEventBroker {
   }
 
   publicSubscription(subscription, options = {}) {
-    const duplicateTargetCount = this.duplicateSubscriptionCounts().get(subscriptionDedupKey(subscription)) || 1;
+    const duplicateTargetCount = options.duplicateTargetCount
+      ?? this.duplicateSubscriptionCounts().get(subscriptionDedupKey(subscription))
+      ?? 1;
+    const waitEstimate = options.waitEstimate ?? this.estimateFor(subscription);
     return subscriptionPublic(subscription, {
       ...options,
-      waitEstimate: this.estimateFor(subscription),
+      waitEstimate,
       duplicateTargetCount,
     });
   }
@@ -1353,41 +1356,25 @@ export class GitHubEventBroker {
       if (!latencyByResource.has(sample.resource)) latencyByResource.set(sample.resource, []);
       latencyByResource.get(sample.resource).push(sample);
     }
-    // The coordinator's liveness/status probe is called by every local client.
-    // Do not build a public representation (and its historical ETA sort) for
-    // every persisted subscription when the caller only needs counters.
-    const publicSubscriptions = compact
-      ? null
-      : subscriptions.map((subscription) => this.publicSubscription(subscription, {
-        nowMs,
-        listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
-        listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
-      }));
+    // Coordinator probes and full status summaries only need counters. The
+    // full subscription representations belong to status(). Building them
+    // here as well doubles ETA/duplicate work and can stall the socket.
     const listenerCount = listenerAttached === null
       ? null
-      : compact
-        ? subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) === true).length
-        : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
-    const stalledSubscriptions = compact
-      ? subscriptions.filter((subscription) => subscriptionIsStalled(subscription, nowMs))
-      : publicSubscriptions.filter(({ targetStalled }) => targetStalled);
+      : subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) === true).length;
+    const stalledSubscriptions = subscriptions.filter((subscription) => subscriptionIsStalled(subscription, nowMs));
     const { pendingEvents, pendingSubscriptionCount, oldestPendingAt } = pendingEventSummary(subscriptions);
     const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
     let listenerAliveSubscriptions = 0;
     let listenerDeadSubscriptions = 0;
-    if (compact) {
-      for (const subscription of subscriptions) {
-        const liveness = listenerLiveness(
-          listenerAttachedValue(listenerAttached, subscription.id),
-          listenerInfoValue(listenerInfo, subscription.id),
-          nowMs,
-        );
-        if (liveness.alive === true) listenerAliveSubscriptions += 1;
-        if (liveness.dead === true) listenerDeadSubscriptions += 1;
-      }
-    } else {
-      listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
-      listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
+    for (const subscription of subscriptions) {
+      const liveness = listenerLiveness(
+        listenerAttachedValue(listenerAttached, subscription.id),
+        listenerInfoValue(listenerInfo, subscription.id),
+        nowMs,
+      );
+      if (liveness.alive === true) listenerAliveSubscriptions += 1;
+      if (liveness.dead === true) listenerDeadSubscriptions += 1;
     }
     const duplicateSubscriptions = duplicateGroups.reduce((total, group) => total + group.count - 1, 0);
     const alerts = [];
@@ -1399,8 +1386,12 @@ export class GitHubEventBroker {
     if (stalledSubscriptions.length > 0) {
       alerts.push({ code: 'stalled_subscriptions', scope: 'target', count: stalledSubscriptions.length });
     }
-    const summaryLine = !compact && publicSubscriptions.length === 1
-      ? publicSubscriptions[0].compactLine
+    const summaryLine = !compact && subscriptions.length === 1
+      ? this.publicSubscription(subscriptions[0], {
+        nowMs,
+        listenerAttached: listenerAttachedValue(listenerAttached, subscriptions[0].id),
+        listenerInfo: listenerInfoValue(listenerInfo, subscriptions[0].id),
+      }).compactLine
       : String(subscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
         + ' listener attivi · ' + String(pendingEvents) + ' eventi pending';
     return {
@@ -1449,13 +1440,26 @@ export class GitHubEventBroker {
       ? allSubscriptions
       : allSubscriptions.slice(0, boundedLimit);
     const pendingSummary = pendingEventSummary(subscriptions);
-    return {
-      stateFile: this.stateFile,
-      subscriptions: subscriptions.map((subscription) => this.publicSubscription(subscription, {
+    const duplicateCounts = this.duplicateSubscriptionCounts();
+    const waitEstimateCache = new Map();
+    const publicSubscriptions = subscriptions.map((subscription) => {
+      const estimateKey = latencySampleKey(subscription);
+      let waitEstimate = waitEstimateCache.get(estimateKey);
+      if (!waitEstimate) {
+        waitEstimate = this.estimateFor(subscription);
+        waitEstimateCache.set(estimateKey, waitEstimate);
+      }
+      return this.publicSubscription(subscription, {
         nowMs,
         listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
         listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
-      })),
+        waitEstimate,
+        duplicateTargetCount: duplicateCounts.get(subscriptionDedupKey(subscription)) || 1,
+      });
+    });
+    return {
+      stateFile: this.stateFile,
+      subscriptions: publicSubscriptions,
       ...pendingSummary,
       pendingEventDetails: pendingEventDetails(subscriptions, nowMs),
       metrics: { ...this.metrics },
