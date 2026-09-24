@@ -3329,28 +3329,22 @@ function readTokenAndStart(identity) {
     }
     eventListeners.clear();
     stopSourceWatcher();
-    let forceExitTimer = null;
     const finish = () => {
-      if (forceExitTimer) clearTimeout(forceExitTimer);
       cleanUp();
       process.exit(exitCode);
     };
     try {
-      server.close(finish);
-    } catch (error) {
-      logStructuredError('server_close_failed', error);
-      finish();
-      return;
-    }
-    forceExitTimer = setTimeout(() => {
-      // A client can keep a half-closed Unix socket alive indefinitely. Do not
-      // let that prevent launchd from getting a clean handoff and leave a
-      // stale endpoint for the replacement process.
+      // Do not wait for a half-closed listener or an idle RPC connection. A
+      // source reload must hand the owner lock to launchd as one operation;
+      // waiting for server.close() lets a busy/rejected event loop keep the
+      // old process alive without a usable control plane.
       for (const connection of connections) destroyConnection(connection);
       server.closeAllConnections?.();
-      cleanUp();
-      process.exit(exitCode);
-    }, 1_000);
+      server.close();
+    } catch (error) {
+      logStructuredError('server_close_failed', error);
+    }
+    finish();
   };
 
   eventBrokerReady.catch((error) => {
