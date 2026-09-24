@@ -359,6 +359,15 @@ function writeAlertOnlyState(path, state) {
   }
 }
 
+export function clearAlertOnlyState({ statePath = alertOnlyStatePath() } = {}) {
+  try {
+    unlinkSync(statePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return false;
+  }
+  return true;
+}
+
 /**
  * Return whether an alert-only report should be written by a periodic probe.
  *
@@ -394,12 +403,13 @@ if (process.argv[1] && process.argv[1].endsWith('/github-coordinator-health.mjs'
   const identityOption = optionValue(args, '--identity');
   const identities = identityOption ? [identityOption] : DEFAULT_IDENTITIES;
   const result = await checkHealth(identities);
-  if (!args.includes('--alert-only') || !result.ok) {
-    const alertOnly = args.includes('--alert-only');
+  const alertOnly = args.includes('--alert-only');
+  const dedupe = alertOnly && ['1', 'true', 'yes'].includes(
+    String(process.env.FRONTALIERE_GH_HEALTH_DEDUPE || '').toLowerCase(),
+  );
+  if (alertOnly && dedupe && result.ok) clearAlertOnlyState();
+  if (!alertOnly || !result.ok) {
     const output = alertOnly ? alertOnlyHealthReport(result) : result;
-    const dedupe = alertOnly && ['1', 'true', 'yes'].includes(
-      String(process.env.FRONTALIERE_GH_HEALTH_DEDUPE || '').toLowerCase(),
-    );
     if (!dedupe || shouldEmitAlertOnly(output)) process.stdout.write(`${JSON.stringify(output)}\n`);
   }
   process.exitCode = result.ok ? 0 : 1;

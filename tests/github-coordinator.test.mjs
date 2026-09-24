@@ -46,6 +46,7 @@ import {
 import {
   alertOnlyHealthReport,
   alertOnlyFingerprint,
+  clearAlertOnlyState,
   shouldEmitAlertOnly,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
@@ -421,6 +422,26 @@ test('health alert-only deduplica un incidente persistente e lo ripete dopo un o
       alerts: [{ ...report.alerts[0], count: 999, message: 'default: 999 pending events across 999 subscriptions have had no listener for over an hour' }],
       warnings: [{ ...report.warnings[0], count: 999, message: 'default: 999 webhook events await acknowledgement' }],
     }));
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('health alert-only riapre subito un incidente dopo un intervallo sano', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-health-recovery-');
+  const statePath = join(stateDirectory, 'health.json');
+  const report = {
+    ok: false,
+    alerts: [{
+      code: 'coordinator_probe_failed',
+      message: 'default: probe failed',
+    }],
+    warnings: [],
+  };
+  try {
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 1_000 }), true);
+    assert.equal(clearAlertOnlyState({ statePath }), true);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 2_000 }), true);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }
