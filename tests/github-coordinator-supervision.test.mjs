@@ -294,6 +294,9 @@ test('github-coordinator-release riscrive i plist verso la release corrente in d
     assert.match(result.stdout, new RegExp(`\\+\\s*<string>${releaseRoot}/current/bin/github-coordinator-launcher</string>`));
     assert.match(result.stdout, /\+\s*<key>FRONTALIERE_GH_SUPERVISED<\/key>/);
     assert.match(result.stdout, /\+\s*<key>WORKSPACE<\/key>/);
+    // Background clamps the control plane to priority 4: never render it.
+    assert.match(result.stdout, /\+\s*<key>ProcessType<\/key>\s*\n\+\s*<string>Interactive<\/string>/);
+    assert.doesNotMatch(result.stdout, /\+\s*<string>Background<\/string>/);
     // Dry-run never touches the installed plist.
     const installed = spawnSync('plutil', ['-extract', 'ProgramArguments.0', 'raw', '-o', '-', join(agents, `${label}.plist`)], {
       encoding: 'utf8',
