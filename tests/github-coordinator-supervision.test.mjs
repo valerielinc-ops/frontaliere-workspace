@@ -373,6 +373,29 @@ test('github-coordinator-release riscrive i plist verso la release corrente in d
   }
 });
 
+test('una release installata include config/ e il routing la legge', () => {
+  const releaseRoot = mkdtempSync('/tmp/frontaliere-coordinator-release-install-');
+  try {
+    const sha = spawnSync('git', ['-C', ROOT, 'rev-parse', 'origin/main'], { encoding: 'utf8' }).stdout.trim();
+    const install = spawnSync(join(ROOT, 'bin', 'github-coordinator-release'), ['install', '--ref', sha], {
+      encoding: 'utf8',
+      env: { ...process.env, FRONTALIERE_GH_RELEASE_ROOT: releaseRoot },
+    });
+    assert.equal(install.status, 0, install.stderr);
+    const release = join(releaseRoot, 'releases', sha);
+    assert.ok(existsSync(join(release, 'config', 'github-event-routing.json')));
+    const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const { loadEventRouting } = await import(${JSON.stringify(join(release, 'bin', 'github-event-routing.mjs'))});
+      process.stdout.write(String(loadEventRouting().routes.size));
+    `], { encoding: 'utf8' });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.ok(Number(probe.stdout.trim()) > 0);
+  } finally {
+    spawnSync('chmod', ['-R', 'u+w', releaseRoot]);
+    rmSync(releaseRoot, { recursive: true, force: true });
+  }
+});
+
 test('unsubscribe con agentId stacca solo quell agente da una subscription condivisa', () => {
   const directory = mkdtempSync('/tmp/frontaliere-broker-unsubscribe-');
   try {

@@ -65,16 +65,23 @@ install_release() {
   fi
   git -C "$WORKSPACE" cat-file -e "$sha:bin/github-coordinator.mjs" 2>/dev/null \
     || die "$sha non contiene bin/github-coordinator.mjs"
+  # bin/github-event-routing.mjs reads ../config/github-event-routing.json on
+  # every subscribe and webhook: a release without config/ answered 400 to
+  # every GitHub delivery (105 lost on 2026-09-24, then redelivered).
+  git -C "$WORKSPACE" cat-file -e "$sha:config/github-event-routing.json" 2>/dev/null \
+    || die "$sha non contiene config/github-event-routing.json"
   mkdir -p "$RELEASES"
   staging="$RELEASES/.staging-$sha-$$"
   rm -rf "$staging"
   mkdir -p "$staging"
-  git -C "$WORKSPACE" archive --format=tar "$sha" bin | tar -x -C "$staging"
+  git -C "$WORKSPACE" archive --format=tar "$sha" bin config | tar -x -C "$staging"
   printf '{"sha":"%s","ref":"%s","installedAt":"%s","workspace":"%s"}\n' \
     "$sha" "$ref" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WORKSPACE" > "$staging/RELEASE.json"
   node --check "$staging/bin/github-coordinator.mjs" >/dev/null || die "sintassi non valida in $sha"
+  node -e 'require(process.argv[1])' "$staging/config/github-event-routing.json" 2>/dev/null \
+    || die "config/github-event-routing.json non valido in $sha"
   # Read-only: an edit in place would recreate the very reload this avoids.
-  chmod -R a-w "$staging/bin"
+  chmod -R a-w "$staging/bin" "$staging/config"
   mv "$staging" "$target"
   note "release installata: $target"
   echo "$sha"
