@@ -28,6 +28,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import {
   createUtf8ChunkDecoder,
   normalizeIdentity,
@@ -75,10 +76,13 @@ const EVENT_ROUTING_IDENTITIES = new Set(['default', 'nanako']);
 
 export const EVENT_SWEEP_INTERVAL_MS = 2 * 60 * 1_000;
 export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
-export const EVENT_SWEEP_MAX_PER_RUN = 10;
+// A sweep is a recovery hint, not a second event-delivery plane. Keep one
+// reconciliation per turn so it cannot occupy the GitHub queue for an entire
+// burst of reconnects or status requests.
+export const EVENT_SWEEP_MAX_PER_RUN = 1;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
-export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
 export const SCHEDULED_GC_BOOTSTRAP_DELAY_MS = 250;
+export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
 export const SOCKET_IDLE_TIMEOUT_MS = 10 * 1_000;
 
 function reconcilableSubscription(subscription) {
@@ -166,10 +170,45 @@ function legacyEventStatePath(identity) {
   return directory ? join(directory, `github-events-${normalizeIdentity(identity)}.json`) : null;
 }
 
+function loadEventBrokerStateInWorker({ stateFile, legacyStateFile }) {
+  const worker = new Worker(new URL('./github-event-broker-loader.mjs', import.meta.url), {
+    workerData: { stateFile, legacyStateFile: legacyStateFile || null },
+  });
+  let settled = false;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    };
+    worker.once('error', rejectOnce);
+    worker.once('exit', (code) => {
+      if (code !== 0 && !settled) {
+        rejectOnce(Object.assign(new Error(`event state loader exited with code ${code}`), {
+          code: 'event_state_loader_exit',
+        }));
+      }
+    });
+    worker.once('message', (result) => {
+      if (!result?.ok) {
+        rejectOnce(Object.assign(new Error(result?.error?.message || 'event state load failed'), {
+          code: result?.error?.code || 'event_state_load_failed',
+        }));
+        return;
+      }
+      settled = true;
+      resolvePromise(result.state);
+      worker.terminate().catch(() => {});
+    });
+  });
+  return { worker, promise };
+}
+
 export const WATCHED_SOURCE_NAMES = new Set([
   'github-coordinator-client.mjs',
   'github-coordinator.mjs',
   'github-event-broker.mjs',
+  'github-event-broker-loader.mjs',
   'github-event-routing.mjs',
   'github-coordinator-launcher',
   'github-coordinator-rc-cache.mjs',
@@ -364,8 +403,31 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = 
   let triggered = false;
   let watcher;
   let scheduler;
+  const sourceSnapshots = new Map();
+  for (const name of WATCHED_SOURCE_NAMES) {
+    try {
+      sourceSnapshots.set(name, readFileSync(join(THIS_DIR, name)));
+    } catch {
+      sourceSnapshots.set(name, null);
+    }
+  }
+  const sourceContentChanged = (name) => {
+    let current;
+    try {
+      current = readFileSync(join(THIS_DIR, name));
+    } catch {
+      current = null;
+    }
+    const previous = sourceSnapshots.get(name);
+    if (current === null || previous === null) return current !== previous;
+    return !current.equals(previous);
+  };
   const triggerReload = () => {
     if (triggered) return;
+    // Editors and atomic writers can emit metadata-only directory events.
+    // Keep the initial bytes fixed until exit so a real edit remains visible
+    // through the debounce window without restarting on a no-op notification.
+    if (![...WATCHED_SOURCE_NAMES].some(sourceContentChanged)) return;
     triggered = true;
     scheduler.stop();
     try { watcher?.close(); } catch { /* watcher already closed */ }
@@ -379,7 +441,7 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = 
   try {
     watcher = watch(THIS_DIR, { persistent: false }, (_eventType, filename) => {
       const name = String(filename || '');
-      if (triggered || !WATCHED_SOURCE_NAMES.has(name)) return;
+      if (triggered || !WATCHED_SOURCE_NAMES.has(name) || !sourceContentChanged(name)) return;
       if (scheduler.request()) {
         process.stderr.write(
           `github-coordinator: source changed; restart scheduled (debounce=${SOURCE_RELOAD_DEBOUNCE_MS}ms, quiescence=${SOURCE_RELOAD_QUIESCENCE_MS}ms)\n`,
@@ -1009,6 +1071,7 @@ export class GitHubCoordinator {
     this.realGh = realGh;
     this.socket = socket;
     this.eventBroker = eventBroker;
+    this.eventBrokerLoading = false;
     this.eventNotifier = null;
     this.eventListenerInspector = null;
     this.eventListenerCountInspector = null;
@@ -1102,7 +1165,10 @@ export class GitHubCoordinator {
             lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
           }),
       };
-    })() : { enabled: false };
+    })() : {
+      enabled: false,
+      loading: this.eventBrokerLoading === true,
+    };
     if (compact) {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
@@ -1158,7 +1224,10 @@ export class GitHubCoordinator {
           lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
           scheduledGc: this.lastScheduledGc,
         }
-        : { enabled: false },
+        : {
+          enabled: false,
+          loading: this.eventBrokerLoading === true,
+        },
       pendingCancellations: [...this.pendingCancellations.values()]
         .map((pending) => this.publicCancellationDetails(pending)),
       anonymous: {
@@ -1189,6 +1258,7 @@ export class GitHubCoordinator {
       metrics: { startedAt: this.metrics.startedAt },
       events: {
         enabled: Boolean(this.eventBroker),
+        loading: this.eventBrokerLoading === true,
         webhookSecretConfigured: Boolean(this.eventBroker?.webhookSecret),
       },
     };
@@ -2042,15 +2112,21 @@ export class GitHubCoordinator {
       }
       this.active += 1;
       if (this.jobIsMutation(job)) this.activeMutations += 1;
-      this.run(job).catch((error) => job.reject(error)).finally(() => {
-        this.active -= 1;
-        if (this.jobIsMutation(job)) {
-          this.activeMutations -= 1;
-          this.lastMutationAt = Date.now();
-          this.cache.clear();
-          this.cliCache.clear();
-        }
-        this.pump();
+      // Reserve the slot now, but start first-use fetch/CLI work on the next
+      // turn. Node may lazily initialize undici/child-process internals here;
+      // deferring that initialization keeps the Unix socket responsive during
+      // a burst of queued reads.
+      setImmediate(() => {
+        this.run(job).catch((error) => job.reject(error)).finally(() => {
+          this.active -= 1;
+          if (this.jobIsMutation(job)) {
+            this.activeMutations -= 1;
+            this.lastMutationAt = Date.now();
+            this.cache.clear();
+            this.cliCache.clear();
+          }
+          this.pump();
+        });
       });
     }
   }
@@ -2470,17 +2546,37 @@ function readTokenAndStart(identity) {
     throw error;
   }
 
-  const eventBroker = new GitHubEventBroker({
-    stateFile: eventStatePath(identity),
-    legacyStateFile: legacyEventStatePath(identity),
-    webhookSecret: process.env.FRONTALIERE_GH_WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET,
+  const eventStateFile = eventStatePath(identity);
+  const legacyStateFile = legacyEventStatePath(identity);
+  const webhookSecret = process.env.FRONTALIERE_GH_WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET;
+  const eventBrokerLoader = loadEventBrokerStateInWorker({
+    stateFile: eventStateFile,
+    legacyStateFile,
   });
+  let eventBroker = null;
   const coordinator = new GitHubCoordinator({ identity, token, realGh, socket, eventBroker });
+  coordinator.eventBrokerLoading = true;
+  const eventBrokerReady = eventBrokerLoader.promise.then((initialState) => {
+    eventBroker = new GitHubEventBroker({
+      stateFile: eventStateFile,
+      legacyStateFile,
+      webhookSecret,
+      initialState,
+    });
+    coordinator.eventBroker = eventBroker;
+    coordinator.eventBrokerLoading = false;
+    return eventBroker;
+  });
+  // Avoid an unhandled rejection while the socket is still bootstrapping; the
+  // definitive handler below terminates the process on a corrupt state file.
+  eventBrokerReady.catch(() => {});
   let terminate = () => {};
   let expirationTimer = null;
   let listenerHeartbeatTimer = null;
   let eventSweepTimer = null;
+  let firstSweepTimer = null;
   let scheduledGcTimer = null;
+  let firstGcTimer = null;
   const eventListeners = new Map();
   const connections = new Set();
   const sharedAcknowledgements = new Set();
@@ -2643,7 +2739,7 @@ function readTokenAndStart(identity) {
 
   const attachEventListener = (connection, request) => {
     const subscriptionId = String(request.subscriptionId || '');
-    if (!eventBroker.webhookSecret) {
+    if (!eventBroker?.webhookSecret) {
       writeMessage(connection, {
         ok: false,
         error: { code: 'event_webhook_secret_unconfigured', message: 'webhook secret is not configured' },
@@ -2857,15 +2953,27 @@ function readTokenAndStart(identity) {
         handled = true;
         connection.setTimeout(0);
         if (request.type === 'event-listen') {
-          listener = attachEventListener(connection, request);
-          finishRequest();
+          eventBrokerReady.then(() => {
+            listener = attachEventListener(connection, request);
+            finishRequest();
+          }, (error) => {
+            closeConnectionAfterError(connection, error, listener);
+            finishRequest();
+          });
           return;
         }
         let result;
         if (request.type === 'ping') {
           result = Promise.resolve({ ok: true, status: coordinator.ping() });
         } else if (request.type === 'status') {
-          result = Promise.resolve({ ok: true, status: coordinator.status({ compact: Boolean(request.compact) }) });
+          // Status is the event-protocol preflight for subscribe/listen. Do
+          // not expose a transient "secret missing" result while the worker
+          // is still attaching the durable broker; ping remains the cheap
+          // liveness probe for callers that do not need event state.
+          result = eventBrokerReady.then(() => ({
+            ok: true,
+            status: coordinator.status({ compact: Boolean(request.compact) }),
+          }));
         } else if (request.type === 'shutdown') {
           result = Promise.resolve({ ok: true });
         } else if (request.type === 'cancellation-details') {
@@ -2873,27 +2981,27 @@ function readTokenAndStart(identity) {
         } else if (request.type === 'confirm-cancellation') {
           result = coordinator.confirmCancellation(request.requestId, request.confirmation);
         } else if (request.type === 'events-subscribe') {
-          result = Promise.resolve(coordinator.eventSubscription(request.spec));
+          result = eventBrokerReady.then(() => coordinator.eventSubscription(request.spec));
         } else if (request.type === 'events-status') {
-          result = Promise.resolve(coordinator.eventSubscriptions(request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.eventSubscriptions(request.options || {}));
         } else if (request.type === 'events-summary') {
-          result = Promise.resolve(coordinator.eventSubscriptionSummary(request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.eventSubscriptionSummary(request.options || {}));
         } else if (request.type === 'events-audit') {
-          result = Promise.resolve(coordinator.eventAudit(request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.eventAudit(request.options || {}));
         } else if (request.type === 'events-gc') {
-          result = Promise.resolve(coordinator.eventGarbageCollect(request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.eventGarbageCollect(request.options || {}));
         } else if (request.type === 'events-subscription') {
-          result = Promise.resolve(coordinator.eventSubscriptionDetails(request.subscriptionId));
+          result = eventBrokerReady.then(() => coordinator.eventSubscriptionDetails(request.subscriptionId));
         } else if (request.type === 'events-subscription-target') {
-          result = Promise.resolve(coordinator.eventSubscriptionTarget(request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.eventSubscriptionTarget(request.options || {}));
         } else if (request.type === 'events-unsubscribe') {
-          result = Promise.resolve(coordinator.eventUnsubscribe(request.subscriptionId));
+          result = eventBrokerReady.then(() => coordinator.eventUnsubscribe(request.subscriptionId));
         } else if (request.type === 'events-renew') {
-          result = Promise.resolve(coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
+          result = eventBrokerReady.then(() => coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
         } else if (request.type === 'events-webhook') {
-          result = Promise.resolve(coordinator.ingestWebhook(request));
+          result = eventBrokerReady.then(() => coordinator.ingestWebhook(request));
         } else if (request.type === 'events-reconcile') {
-          result = coordinator.reconcileEvents(request.subscriptionId);
+          result = eventBrokerReady.then(() => coordinator.reconcileEvents(request.subscriptionId));
         } else if (request.type === 'api' || request.type === 'exec') {
           result = coordinator.submit(request);
         } else {
@@ -2967,7 +3075,10 @@ function readTokenAndStart(identity) {
     if (expirationTimer) clearInterval(expirationTimer);
     if (listenerHeartbeatTimer) clearInterval(listenerHeartbeatTimer);
     if (eventSweepTimer) clearInterval(eventSweepTimer);
+    if (firstSweepTimer) clearTimeout(firstSweepTimer);
     if (scheduledGcTimer) clearInterval(scheduledGcTimer);
+    if (firstGcTimer) clearTimeout(firstGcTimer);
+    eventBrokerLoader.worker.terminate().catch(() => {});
     for (const listeners of eventListeners.values()) {
       for (const listener of listeners) {
         writeMessage(listener.connection, {
@@ -3002,6 +3113,11 @@ function readTokenAndStart(identity) {
       process.exit(exitCode);
     }, 1_000);
   };
+
+  eventBrokerReady.catch((error) => {
+    logStructuredError('event_state_load_failed', error, { identity });
+    setImmediate(() => terminate(1));
+  });
 
   const cleanUp = () => {
     if (ownsCoordinatorLock(ownerLock)) {
@@ -3039,17 +3155,19 @@ function readTokenAndStart(identity) {
 
   let sweepRunning = false;
   const runEventSweep = () => {
-    if (sweepRunning) return;
+    if (!eventBroker || sweepRunning) return;
+    // Never let best-effort recovery compete with the durable event-driven
+    // path. A pending backlog means listeners need the control plane first;
+    // foreground RPC work gets the same priority. Explicit `events
+    // reconcile` remains the one-shot recovery path for a confirmed missing
+    // webhook.
+    if (eventBroker.state.subscriptions.some((subscription) => (subscription.pending?.length || 0) > 0)) return;
+    if (activeRequestCount > 0 || coordinator.active > 0) return;
     sweepRunning = true;
     coordinator.reconcileStaleSubscriptions()
       .catch((error) => logStructuredError('event_sweep_failed', error))
       .finally(() => { sweepRunning = false; });
   };
-  const firstSweepTimer = setTimeout(runEventSweep, 30_000);
-  firstSweepTimer.unref?.();
-  eventSweepTimer = setInterval(runEventSweep, EVENT_SWEEP_INTERVAL_MS);
-  eventSweepTimer.unref?.();
-
   const runScheduledGc = () => {
     try {
       coordinator.scheduledEventGarbageCollection();
@@ -3057,15 +3175,37 @@ function readTokenAndStart(identity) {
       logStructuredError('event_scheduled_gc_failed', error);
     }
   };
-  const firstGcTimer = setTimeout(runScheduledGc, 5 * 60_000);
-  firstGcTimer.unref?.();
-  scheduledGcTimer = setInterval(runScheduledGc, SCHEDULED_GC_INTERVAL_MS);
-  scheduledGcTimer.unref?.();
+  let eventTasksStarted = false;
+  const startEventBackgroundTasks = () => {
+    if (eventTasksStarted || terminating || !eventBroker) return;
+    eventTasksStarted = true;
+    firstSweepTimer = setTimeout(() => {
+      firstSweepTimer = null;
+      runEventSweep();
+    }, 30_000);
+    firstSweepTimer.unref?.();
+    eventSweepTimer = setInterval(runEventSweep, EVENT_SWEEP_INTERVAL_MS);
+    eventSweepTimer.unref?.();
+    firstGcTimer = setTimeout(() => {
+      firstGcTimer = null;
+      runScheduledGc();
+    }, 5 * 60_000);
+    firstGcTimer.unref?.();
+    scheduledGcTimer = setInterval(runScheduledGc, SCHEDULED_GC_INTERVAL_MS);
+    scheduledGcTimer.unref?.();
+  };
+  eventBrokerReady.then(startEventBackgroundTasks).catch(() => {});
 
   stopSourceWatcher = installSourceReloadWatcher(() => {
     coordinator.metrics.sourceReloads += 1;
     terminate();
-  }, { getActiveRequests: () => activeRequestCount });
+  }, {
+    // A source reload must not close the Unix socket while the worker state
+    // load or an in-flight background reconciliation is still active.
+    getActiveRequests: () => activeRequestCount
+      + (sweepRunning ? 1 : 0)
+      + (coordinator.eventBrokerLoading ? 1 : 0),
+  });
 
   installProcessSafetyHandlers(terminate);
 

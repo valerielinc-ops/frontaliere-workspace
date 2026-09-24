@@ -1105,7 +1105,13 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
 }
 
 export class GitHubEventBroker {
-  constructor({ stateFile, webhookSecret, now = () => Date.now(), legacyStateFile = null }) {
+  constructor({
+    stateFile,
+    webhookSecret,
+    now = () => Date.now(),
+    legacyStateFile = null,
+    initialState = null,
+  }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
     this.legacyStateFile = legacyStateFile && legacyStateFile !== stateFile ? legacyStateFile : null;
@@ -1126,7 +1132,11 @@ export class GitHubEventBroker {
       latencySamplesRecorded: 0,
       subscriptionsGarbageCollected: 0,
     };
-    this.state = this.loadState();
+    // A coordinator may load the durable state in a worker so that a large
+    // persisted backlog cannot block its Unix socket during startup. The
+    // worker has already validated/normalized this snapshot; library callers
+    // keep the ordinary synchronous path by default.
+    this.state = initialState || this.loadState();
     if (this.state.migratedLegacyFiles?.length > 0) this.persist();
   }
 

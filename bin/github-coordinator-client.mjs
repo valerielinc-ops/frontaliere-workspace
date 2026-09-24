@@ -403,8 +403,13 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false, sta
   let memo = rememberProtocolStatus(identity, status);
   if (memo?.eventProtocolConfirmed
     && (!requireWebhookSecret || memo.webhookSecretConfigured)) return;
-  const response = status
-    ? { status }
+  // `ensureCoordinator` intentionally starts with a cheap ping. During the
+  // worker-backed broker bootstrap that ping reports `loading: true`; do not
+  // treat its temporary `webhookSecretConfigured: false` as the final event
+  // protocol result. The status RPC waits for the broker in that narrow case.
+  const readyStatus = status?.events?.loading === true ? null : status;
+  const response = readyStatus
+    ? { status: readyStatus }
     : await connectWithTransientRetry(
       { type: 'status', identity, compact: true },
       { identity, timeoutMs: CONNECT_TIMEOUT_MS, retry: true },
