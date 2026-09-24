@@ -12,9 +12,14 @@
 #   bin/github-coordinator-release status
 #   bin/github-coordinator-release install  [--ref <git-ref>]
 #   bin/github-coordinator-release activate <sha>
-#   bin/github-coordinator-release migrate-launchd [--dry-run] [--label <label>]...
-#   bin/github-coordinator-release restart  [--label <label>]...
-#   bin/github-coordinator-release deploy   [--ref <git-ref>] [--no-restart]
+#   bin/github-coordinator-release migrate-launchd [--dry-run] [--force] [--label <label>]...
+#   bin/github-coordinator-release restart  [--force] [--label <label>]...
+#   bin/github-coordinator-release deploy   [--ref <git-ref>] [--no-restart] [--force]
+#   bin/github-coordinator-release wait-idle [--identity default|nanako]
+#
+# restart and migrate-launchd wait (IDLE_TIMEOUT_S, default 180) for a
+# coordinator with no queued or running request before stopping it; --force
+# skips the wait.
 #
 # Default ref: origin/main. Releases live in
 # ${FRONTALIERE_GH_RELEASE_ROOT:-~/.local/share/frontaliere/github-coordinator}
@@ -158,6 +163,43 @@ socket.on('error', () => { clearTimeout(timer); process.exit(1); });
 NODE
 }
 
+# Prints "<queueLength> <active>" from the compact status, or fails.
+coordinator_load() {
+  node - "$STATE_DIR/github-coordinator-$1.sock" <<'NODE'
+const { createConnection } = require('node:net');
+const socket = createConnection(process.argv[2]);
+let buffer = '';
+const timer = setTimeout(() => { socket.destroy(); process.exit(2); }, 3000);
+socket.on('connect', () => socket.write(`${JSON.stringify({ type: 'status', compact: true })}\n`));
+socket.on('data', (chunk) => {
+  buffer += chunk;
+  if (!buffer.includes('\n')) return;
+  clearTimeout(timer);
+  const status = JSON.parse(buffer.slice(0, buffer.indexOf('\n'))).status || {};
+  console.log(`${Number(status.queueLength || 0)} ${Number(status.active || 0)}`);
+  socket.end();
+  process.exit(0);
+});
+socket.on('error', () => { clearTimeout(timer); process.exit(1); });
+NODE
+}
+
+# A restart destroys every open connection: a queued or running `gh` request
+# (a push, a PR creation, a 15-minute exec) would fail for its agent. Wait for
+# an idle coordinator; --force skips the wait.
+wait_coordinator_idle() {
+  identity="$1"
+  [ "${FORCE:-0}" = "1" ] && return 0
+  deadline=$(( $(date +%s) + ${IDLE_TIMEOUT_S:-180} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    load="$(coordinator_load "$identity" 2>/dev/null)" || return 0
+    if [ "$load" = "0 0" ]; then return 0; fi
+    note "$identity: coda/attivi $load, attendo che si svuotino"
+    sleep 2
+  done
+  die "$identity: coordinator mai inattivo entro ${IDLE_TIMEOUT_S:-180} s (usa --force per riavviare comunque)"
+}
+
 webhook_port() {
   case "$1" in
     *-default) echo 18787 ;;
@@ -242,6 +284,10 @@ migrate_launchd() {
   for label in $(selected_labels); do
     plist="$(label_plist "$label")"
     cp -p "$plist" "$backup/$label.plist"
+    case "$label" in
+      ch.frontaliere.github-coordinator-health) ;;
+      ch.frontaliere.github-coordinator-*) wait_coordinator_idle "${label#ch.frontaliere.github-coordinator-}" ;;
+    esac
     previous="$(service_pid "$label")"
     note "$label: bootout (pid ${previous:-nessuno})"
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
@@ -259,6 +305,10 @@ migrate_launchd() {
 
 restart_services() {
   for label in $(selected_labels); do
+    case "$label" in
+      ch.frontaliere.github-coordinator-health) ;;
+      ch.frontaliere.github-coordinator-*) wait_coordinator_idle "${label#ch.frontaliere.github-coordinator-}" ;;
+    esac
     previous="$(service_pid "$label")"
     note "$label: kickstart -k (pid ${previous:-nessuno})"
     launchctl kickstart -k "$DOMAIN/$label"
@@ -290,12 +340,15 @@ command="${1:-status}"
 REF="origin/main"
 RESTART=1
 DRY_RUN=0
+FORCE=0
 SELECTED=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
     --no-restart) RESTART=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --identity) IDENTITY="$2"; shift 2 ;;
     --label) SELECTED="${SELECTED:+$SELECTED }$2"; shift 2 ;;
     *) ARG="$1"; shift ;;
   esac
@@ -307,6 +360,7 @@ case "$command" in
   activate) activate_release "${ARG:-$(resolve_sha "$REF")}" ;;
   migrate-launchd) migrate_launchd ;;
   restart) restart_services ;;
+  wait-idle) wait_coordinator_idle "${IDENTITY:-default}" ;;
   deploy)
     sha="$(install_release "$REF")"
     activate_release "$sha"
