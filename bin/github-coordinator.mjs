@@ -11,7 +11,7 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import {
   accessSync,
   chmodSync,
@@ -421,6 +421,9 @@ function claimCoordinatorOwner(identity, socket) {
       socket,
       ownerId,
       startedAt: new Date().toISOString(),
+      // A supervised standby may reclaim the socket only from an owner that
+      // launchd does not supervise.
+      supervised: supervisedStandbyEnabled(),
     })}\n`;
     const fd = createAtomicOwnerLock(lockPath, record);
     return { fd, lockPath, socket, ownerId };
@@ -501,6 +504,60 @@ function describeOwnerProcess(pid) {
   }
 }
 
+export const UNSUPERVISED_OWNER_GRACE_MS = 30_000;
+
+export function unsupervisedOwnerGraceMs(env = process.env) {
+  const value = Number(env.FRONTALIERE_GH_RECLAIM_GRACE_MS);
+  return Number.isFinite(value) && value >= 0 ? value : UNSUPERVISED_OWNER_GRACE_MS;
+}
+
+// One JSON request/response over the coordinator socket, without the client
+// helpers (they may auto-start a daemon).
+function coordinatorSocketRequest(socket, request, timeoutMs = 3_000) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const connection = createConnection(socket);
+    let buffer = '';
+    const timer = setTimeout(() => {
+      connection.destroy();
+      rejectPromise(new Error(`coordinator request timed out: ${request.type}`));
+    }, timeoutMs);
+    connection.on('connect', () => connection.write(`${JSON.stringify(request)}\n`));
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      clearTimeout(timer);
+      connection.end();
+      try {
+        resolvePromise(JSON.parse(buffer.slice(0, newline)));
+      } catch (error) {
+        rejectPromise(error);
+      }
+    });
+    connection.on('error', (error) => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+  });
+}
+
+// Twice on 2026-09-24 an agent started `serve` by hand after an ECONNREFUSED,
+// the copy took the lock first and launchd was left waiting behind it. The
+// supervised standby reclaims such an owner: only an unsupervised `serve` of
+// the same identity, only after a grace period (a legitimate manual start has
+// time to finish its work) and only while it has no queued or running request.
+async function reclaimUnsupervisedOwner({ identity, socket, record, describeOwner, log }) {
+  const command = describeOwner(record.pid) || '';
+  if (!command.includes('github-coordinator.mjs serve') || !command.includes(`--identity ${identity}`)) {
+    return false;
+  }
+  const status = (await coordinatorSocketRequest(socket, { type: 'status', compact: true }))?.status || {};
+  if (Number(status.queueLength || 0) > 0 || Number(status.active || 0) > 0) return false;
+  log(`github-coordinator: standby reclaims ${identity} socket from unsupervised pid ${record.pid} (${command})`);
+  await coordinatorSocketRequest(socket, { type: 'shutdown' });
+  return true;
+}
+
 // Under launchd KeepAlive, returning while another live process owns the lock
 // exits 0 and is respawned every ThrottleInterval: 4,123 respawns on nanako,
 // each one reloading Remote Config, while a copy started outside launchd kept
@@ -515,10 +572,29 @@ export function standbyForCoordinatorOwner({
   lockPath = coordinatorOwnerLockPath(identity),
   log = (line) => process.stderr.write(`${line}\n`),
   describeOwner = describeOwnerProcess,
+  reclaimGraceMs = null,
+  reclaim = reclaimUnsupervisedOwner,
+  now = () => Date.now(),
 } = {}) {
   let announcedOwner = null;
   let lastClaimError = null;
   let timer = null;
+  let reclaimInFlight = false;
+  const unsupervisedSince = new Map();
+  const considerReclaim = () => {
+    if (reclaimGraceMs === null || reclaimInFlight) return;
+    let record = null;
+    try { record = readOwnerRecord(lockPath); } catch { record = null; }
+    if (!record || record.supervised === true) return;
+    const key = `${record.pid}:${record.ownerId || ''}`;
+    if (!unsupervisedSince.has(key)) unsupervisedSince.set(key, now());
+    if (now() - unsupervisedSince.get(key) < reclaimGraceMs) return;
+    reclaimInFlight = true;
+    Promise.resolve()
+      .then(() => reclaim({ identity, socket, record, describeOwner, log }))
+      .catch((error) => log(`github-coordinator: standby reclaim failed: ${error?.message || error}`))
+      .finally(() => { reclaimInFlight = false; });
+  };
   const announce = () => {
     let record = null;
     try { record = readOwnerRecord(lockPath); } catch { record = null; }
@@ -541,6 +617,7 @@ export function standbyForCoordinatorOwner({
     }
     if (!ownerLock) {
       announce();
+      considerReclaim();
       return;
     }
     clearInterval(timer);
@@ -2844,6 +2921,7 @@ function readTokenAndStart(identity) {
   const standby = standbyForCoordinatorOwner({
     identity,
     socket,
+    reclaimGraceMs: unsupervisedOwnerGraceMs(),
     onClaimed: (claimed) => {
       process.removeListener('SIGTERM', leaveStandby);
       process.removeListener('SIGINT', leaveStandby);
