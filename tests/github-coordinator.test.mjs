@@ -47,6 +47,7 @@ import {
   alertOnlyHealthReport,
   alertOnlyFingerprint,
   clearAlertOnlyState,
+  HEALTH_PROBE_TIMEOUT_MS,
   shouldEmitAlertOnly,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
@@ -306,6 +307,10 @@ test('health classifica residui lifecycle come warning indipendentemente dal vol
     'orphaned_subscriptions',
     'stalled_subscriptions',
   ]);
+});
+
+test('health usa una soglia probe piu tollerante del client operativo', () => {
+  assert.equal(HEALTH_PROBE_TIMEOUT_MS, 10_000);
 });
 
 test('health mantiene alert solo per eventi pending senza listener oltre la grace period', () => {

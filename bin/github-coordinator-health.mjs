@@ -27,6 +27,10 @@ import {
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
 export const LAUNCHD_SPAWN_SCHEDULED_STATE = 'spawn scheduled';
+// The compact status serializes the durable event summary. Keep the ordinary
+// client connect timeout strict, but give the periodic health probe enough
+// room for one transient event-loop/status burst before raising an alert.
+export const HEALTH_PROBE_TIMEOUT_MS = 10_000;
 export const ALERT_ONLY_REPEAT_MS = 60 * 60 * 1_000;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
 const ALERT_ONLY_STATE_FILE = 'github-coordinator-health-alert-only.json';
@@ -180,7 +184,7 @@ export async function checkCoordinatorHealth(identity) {
 
   let status = null;
   try {
-    const response = await probeCoordinator(normalized);
+    const response = await probeCoordinator(normalized, HEALTH_PROBE_TIMEOUT_MS);
     status = response?.status || response;
   } catch (error) {
     alerts.push({ code: 'coordinator_probe_failed', message: `${normalized}: ${error.message}` });
