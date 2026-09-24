@@ -5,6 +5,10 @@ set -eu
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
+# launchd inherits macOS's conservative 256-descriptor soft limit. Raise only
+# this daemon's limit so its socket, watcher and worker pipes are not starved.
+ulimit -n 4096 2>/dev/null || true
+
 coordinator_identity="default"
 refresh_remote_config=0
 launcher_args=()

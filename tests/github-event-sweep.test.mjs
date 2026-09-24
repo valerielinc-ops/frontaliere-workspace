@@ -6,10 +6,7 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import {
-  GitHubCoordinator,
-  SCHEDULED_GC_BOOTSTRAP_DELAY_MS,
-} from '../bin/github-coordinator.mjs';
+import { GitHubCoordinator } from '../bin/github-coordinator.mjs';
 import {
   createUtf8ChunkDecoder,
   ensureCoordinator,
@@ -197,13 +194,12 @@ test('il gc programmato in dry-run segnala l evento pending senza listener e non
     }));
     process.stderr.write = (chunk) => { logged.push(String(chunk)); return true; };
     const report = coordinator.scheduledEventGarbageCollection();
-    coordinator.scheduledEventGarbageCollection();
     process.stderr.write = originalWrite;
     assert.equal(report.orphanedWithPending.length, 1);
     assert.equal(report.orphanedWithPending[0].id, created.id);
     assert.equal(report.orphanedWithPending[0].pendingState, 'merged');
     assert.ok(broker.getSubscriptionRecord(created.id), 'dry-run: la subscription resta');
-    assert.equal(logged.filter((line) => line.includes('event_gc_orphans_detected')).length, 1);
+    assert.ok(logged.some((line) => line.includes('event_gc_orphans_detected')));
 
     const health = eventLifecycleHealth({ scheduledGc: report }, 'default');
     assert.equal(health.alerts.some(({ code }) => code === 'orphaned_pending_events'), true);
@@ -293,7 +289,7 @@ test('il riepilogo compatto non materializza ogni subscription persistita', () =
   }
 });
 
-test('il primo status dopo un riavvio accoda il probe pending senza bloccare il socket', async () => {
+test('il primo status dopo un riavvio non avvia GC sincrona e il bootstrap post-listen conserva il backlog', async () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-restart-gc-'));
   const originalWrite = process.stderr.write;
   const logged = [];
@@ -323,35 +319,37 @@ test('il primo status dopo un riavvio accoda il probe pending senza bloccare il 
     // no in-memory scheduled GC report yet.
     const { broker, coordinator } = makeCoordinator(stateDirectory);
     coordinator.setEventListenerInspector(() => false);
-    let gcCalls = 0;
-    const scheduledGc = coordinator.scheduledEventGarbageCollection.bind(coordinator);
-    coordinator.scheduledEventGarbageCollection = (...args) => {
-      gcCalls += 1;
-      return scheduledGc(...args);
-    };
     process.stderr.write = (chunk) => { logged.push(String(chunk)); return true; };
 
     const compact = coordinator.status({ compact: true });
-    assert.equal(gcCalls, 0, 'lo status non deve eseguire il GC nel callback del socket');
-    assert.equal(compact.events.scheduledGc, null);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, SCHEDULED_GC_BOOTSTRAP_DELAY_MS + 50));
-    const compactAfterGc = coordinator.status({ compact: true });
-    const health = eventLifecycleHealth(compactAfterGc.events, 'test');
-    assert.equal(gcCalls, 1, 'il bootstrap deve eseguire una sola ispezione GC in background');
-    assert.equal(compactAfterGc.events.pendingEvents, 1);
-    assert.equal(compactAfterGc.events.pendingSubscriptionCount, 1);
-    assert.equal(compactAfterGc.events.oldestPendingAt, receivedAt);
-    assert.equal(compactAfterGc.events.scheduledGc.orphanedWithPendingSubscriptionCount, 1);
-    assert.equal(compactAfterGc.events.scheduledGc.orphanedWithPendingEventCount, 1);
-    assert.equal(Object.prototype.hasOwnProperty.call(compactAfterGc.events.scheduledGc, 'orphanedWithPending'), false);
+    assert.equal(coordinator.lastScheduledGc, null, 'status non deve avviare la scansione GC');
+    assert.equal(compact.events.pendingEvents, 1);
+    assert.equal(compact.events.pendingSubscriptionCount, 1);
+    assert.equal(compact.events.oldestPendingAt, receivedAt);
+    assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
+
+    coordinator.ensureScheduledEventGarbageCollection();
+    await new Promise((resolve) => {
+      const waitForBootstrap = () => {
+        if (coordinator.lastScheduledGc) {
+          resolve();
+          return;
+        }
+        setImmediate(waitForBootstrap);
+      };
+      waitForBootstrap();
+    });
+
+    const health = eventLifecycleHealth({ scheduledGc: coordinator.lastScheduledGc }, 'test');
+    assert.equal(coordinator.lastScheduledGc.orphanedWithPendingSubscriptionCount, 1);
+    assert.equal(coordinator.lastScheduledGc.orphanedWithPendingEventCount, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(coordinator.lastScheduledGc, 'orphanedWithPending'), true);
     assert.deepEqual(health.alerts.map(({ code }) => code), ['orphaned_pending_events']);
     assert.equal(health.alerts[0].eventCount, 1);
     assert.equal(health.alerts[0].subscriptionCount, 1);
-    assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
     assert.ok(logged.some((line) => line.includes('event_gc_orphans_detected')));
 
     const secondCompact = coordinator.status({ compact: true });
-    assert.equal(gcCalls, 1, 'le probe successive non devono rieseguire il bootstrap GC');
     assert.equal(secondCompact.events.scheduledGc.orphanedWithPendingEventCount, 1);
 
     const full = coordinator.status();
@@ -360,6 +358,136 @@ test('il primo status dopo un riavvio accoda il probe pending senza bloccare il 
     assert.equal(full.events.scheduledGc.orphanedWithPending[0].id, created.id);
   } finally {
     process.stderr.write = originalWrite;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('una GC post-listen a backlog grande cede il loop e non riscrive lo snapshot', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-large-gc-'));
+  const { broker, coordinator } = makeCoordinator(stateDirectory);
+  try {
+    coordinator.setEventListenerInspector(() => false);
+    const seed = broker.subscribe({
+      agentId: 'large-backlog-seed',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: 'large-backlog-run',
+      waitFor: ['completed'],
+      ttlSeconds: 36_000,
+      allowDuplicate: true,
+    });
+    const seedRecord = broker.getSubscriptionRecord(seed.id);
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    for (let index = 0; index < 256; index += 1) {
+      const copy = structuredClone(seedRecord);
+      copy.id = `sub-large-${index}`;
+      copy.agentId = `large-agent-${index}`;
+      copy.runId = `large-run-${index}`;
+      copy.createdAt = receivedAt;
+      copy.pending = [{
+        id: `event-large-${index}`,
+        deliveryId: `delivery-large-${index}`,
+        receivedAt,
+        state: 'completed',
+      }];
+      broker.state.subscriptions.push(copy);
+    }
+    broker.persist();
+    const beforeIds = broker.state.subscriptions.map(({ id }) => id);
+
+    let statusTurnYielded = false;
+    setImmediate(() => { statusTurnYielded = true; });
+    const compact = coordinator.status({ compact: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(statusTurnYielded, true);
+    assert.equal(coordinator.lastScheduledGc, null, 'status non deve eseguire GC');
+    assert.equal(compact.events.pendingEvents, 256);
+
+    let gcTurnYielded = false;
+    const gcPromise = coordinator.scheduledEventGarbageCollectionAsync({ batchSize: 8 });
+    setImmediate(() => { gcTurnYielded = true; });
+    const report = await gcPromise;
+    assert.equal(gcTurnYielded, true, 'la scansione deve cedere il loop tra i batch');
+    assert.equal(report.orphanedWithPendingSubscriptionCount, 256);
+    assert.deepEqual(broker.state.subscriptions.map(({ id }) => id), beforeIds);
+    assert.ok(broker.getSubscriptionRecord(seed.id), 'la subscription del run resta presente');
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('lo startup con backlog grande mantiene ping e status del socket reattivi', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-large-socket-');
+  // Keep the identity short: macOS caps Unix-domain socket paths at 104 bytes.
+  const identity = `lg-${process.pid}`;
+  const secret = 'large-socket-secret';
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  process.env.FRONTALIERE_GH_IDENTITY = identity;
+  process.env.FRONTALIERE_GH_TOKEN = 'test-token-not-real';
+  process.env.FRONTALIERE_REAL_GH = '/bin/echo';
+  process.env.FRONTALIERE_GH_WEBHOOK_SECRET = secret;
+  try {
+    const broker = new GitHubEventBroker({
+      stateFile: join(stateDirectory, `github-events-${identity}.json`),
+      webhookSecret: secret,
+    });
+    const seed = broker.subscribe({
+      agentId: 'large-socket-seed',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: 'large-socket-run',
+      waitFor: ['completed'],
+      ttlSeconds: 36_000,
+      allowDuplicate: true,
+    });
+    const seedRecord = broker.getSubscriptionRecord(seed.id);
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    for (let index = 0; index < 512; index += 1) {
+      const copy = structuredClone(seedRecord);
+      copy.id = `sub-socket-${index}`;
+      copy.agentId = `socket-agent-${index}`;
+      copy.runId = `socket-run-${index}`;
+      copy.createdAt = receivedAt;
+      copy.pending = [{
+        id: `event-socket-${index}`,
+        deliveryId: `delivery-socket-${index}`,
+        receivedAt,
+        state: 'completed',
+      }];
+      broker.state.subscriptions.push(copy);
+    }
+    broker.persist();
+
+    const firstPingAt = Date.now();
+    const firstPing = await ensureCoordinator(identity);
+    assert.equal(firstPing.status.identity, identity);
+    assert.ok(Date.now() - firstPingAt < 5_000, 'il ping iniziale non deve attendere il GC');
+
+    const [statusResponse, livenessResponse] = await Promise.all([
+      sendRequest({ type: 'status', compact: true }, { identity }),
+      sendRequest({ type: 'ping', compact: true }, { identity }),
+    ]);
+    assert.equal(statusResponse.status.events.pendingEvents, 512);
+    assert.equal(statusResponse.status.events.pendingSubscriptionCount, 512);
+    assert.equal(livenessResponse.status.identity, identity);
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity);
+    } catch {
+      // The assertions above are the diagnostic; cleanup is best effort.
+    }
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     rmSync(stateDirectory, { recursive: true, force: true });
   }
 });

@@ -82,6 +82,10 @@ export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
 export const EVENT_SWEEP_MAX_PER_RUN = 1;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
 export const SCHEDULED_GC_BOOTSTRAP_DELAY_MS = 250;
+export const SCHEDULED_GC_BATCH_SIZE = 16;
+// Kept for compatibility with older diagnostics; all scheduled inspections
+// now yield in batches regardless of state size.
+export const SCHEDULED_GC_SYNC_SUBSCRIPTION_LIMIT = 32;
 export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
 export const SOCKET_IDLE_TIMEOUT_MS = 10 * 1_000;
 
@@ -340,13 +344,16 @@ function claimCoordinatorOwner(identity, socket) {
   if (existing) unlinkSync(lockPath);
   try {
     const fd = openSync(lockPath, 'wx', 0o600);
-    writeSync(fd, `${JSON.stringify({
+    const ownerId = randomUUID();
+    const record = `${JSON.stringify({
       pid: process.pid,
       identity,
       socket,
+      ownerId,
       startedAt: new Date().toISOString(),
-    })}\n`);
-    return { fd, lockPath, socket };
+    })}\n`;
+    writeSync(fd, record);
+    return { fd, lockPath, socket, ownerId };
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
     let competing;
@@ -371,7 +378,9 @@ function claimCoordinatorOwner(identity, socket) {
 function ownsCoordinatorLock(ownerLock) {
   if (!ownerLock) return false;
   try {
-    return readOwnerRecord(ownerLock.lockPath)?.pid === process.pid;
+    const record = readOwnerRecord(ownerLock.lockPath);
+    return record?.pid === process.pid
+      && (!ownerLock.ownerId || record.ownerId === ownerLock.ownerId);
   } catch {
     return false;
   }
@@ -1131,7 +1140,6 @@ export class GitHubCoordinator {
   status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
-    this.ensureScheduledEventGarbageCollection();
     const eventSummary = this.eventBroker ? (() => {
       const summary = this.eventBroker.summary({
         listenerAttached: this.eventListenerInspector,
@@ -1330,22 +1338,19 @@ export class GitHubCoordinator {
       || this.scheduledGcBootstrapInProgress) return;
     this.scheduledGcBootstrapAttempted = true;
     this.scheduledGcBootstrapInProgress = true;
-    // This is a local, dry-run inspection only. Pending events remain
-    // protected and no GitHub/network operation is performed. Keep it out of
-    // the status RPC: the persisted backlog can be large and synchronous
-    // sorting there makes every local socket client wait behind the scan.
-    this.scheduledGcBootstrapTimer = setTimeout(() => {
+    // This is a local, dry-run inspection only. It is deliberately scheduled
+    // after the server has started listening and performs bounded batches with
+    // setImmediate between them. In particular, status/ping never enters this
+    // path and a large persisted backlog cannot monopolize the socket loop.
+    const runBootstrap = () => {
       this.scheduledGcBootstrapTimer = null;
-      try {
-        this.scheduledEventGarbageCollection();
-      } catch (error) {
-        // A first status probe must stay useful even if the local persisted
-        // state is temporarily unreadable; the normal scheduled timer retries.
-        logStructuredError('event_initial_gc_failed', error);
-      } finally {
-        this.scheduledGcBootstrapInProgress = false;
-      }
-    }, SCHEDULED_GC_BOOTSTRAP_DELAY_MS);
+      this.scheduledEventGarbageCollectionAsync()
+        .catch((error) => logStructuredError('event_initial_gc_failed', error))
+        .finally(() => {
+          this.scheduledGcBootstrapInProgress = false;
+        });
+    };
+    this.scheduledGcBootstrapTimer = setImmediate(runBootstrap);
     this.scheduledGcBootstrapTimer.unref?.();
   }
 
@@ -1662,6 +1667,105 @@ export class GitHubCoordinator {
       }
     }
     return { ok: true, reconciled };
+  }
+
+  recordScheduledEventGarbageCollection({
+    nowMs,
+    olderThanMs,
+    candidateIds,
+    orphanedWithPending,
+  }) {
+    const orphanedWithPendingEventCount = orphanedWithPending.reduce(
+      (total, subscription) => total + Number(subscription.pendingCount || 1),
+      0,
+    );
+    this.metrics.eventScheduledGcRuns += 1;
+    this.lastScheduledGc = {
+      at: new Date(nowMs).toISOString(),
+      olderThanMs,
+      orphanCandidateCount: candidateIds.length,
+      orphanCandidateIds: candidateIds,
+      orphanedWithPending,
+      orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+      orphanedWithPendingEventCount,
+      orphanedWithPendingOldestAt: orphanedWithPending
+        .map(({ pendingSince }) => pendingSince)
+        .filter(Boolean)
+        .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null,
+      nextAction: 'reattach_or_explicit_ack',
+    };
+    const logKey = JSON.stringify({
+      orphanCandidateCount: candidateIds.length,
+      orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+      orphanedWithPendingEventCount,
+      orphanedWithPendingOldestAt: this.lastScheduledGc.orphanedWithPendingOldestAt,
+    });
+    if (candidateIds.length > 0 || orphanedWithPending.length > 0) {
+      if (logKey === this.lastScheduledGcLogKey) return this.lastScheduledGc;
+      this.lastScheduledGcLogKey = logKey;
+      logStructuredError('event_gc_orphans_detected', new Error('orphaned event subscriptions'), {
+        identity: this.identity,
+        orphanCandidateCount: candidateIds.length,
+        orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+        orphanedWithPendingEventCount,
+        orphanedWithPendingOldestAt: this.lastScheduledGc.orphanedWithPendingOldestAt,
+        nextAction: 'reattach_or_explicit_ack',
+      });
+    } else {
+      this.lastScheduledGcLogKey = null;
+    }
+    return this.lastScheduledGc;
+  }
+
+  // Background inspection never calls broker.garbageCollect(): that method is
+  // an explicit operator API and may prune when --apply is requested. Read
+  // the in-memory snapshot in bounded turns so a large backlog yields to RPCs.
+  async scheduledEventGarbageCollectionAsync({
+    nowMs = Date.now(),
+    olderThanMs = DEFAULT_SCHEDULED_GC_AGE_MS,
+    batchSize = SCHEDULED_GC_BATCH_SIZE,
+  } = {}) {
+    if (!this.eventBroker || !this.eventListenerInspector) return null;
+    const subscriptions = [...this.eventBroker.state.subscriptions];
+    const candidateIds = [];
+    const orphanedWithPending = [];
+    const boundedBatchSize = Number.isFinite(Number(batchSize))
+      ? Math.max(1, Math.floor(Number(batchSize)))
+      : SCHEDULED_GC_BATCH_SIZE;
+    for (let offset = 0; offset < subscriptions.length; offset += boundedBatchSize) {
+      const end = Math.min(subscriptions.length, offset + boundedBatchSize);
+      for (let index = offset; index < end; index += 1) {
+        const subscription = subscriptions[index];
+        if (!subscription || this.eventListenerInspector(subscription.id) === true) continue;
+        const pending = Array.isArray(subscription.pending) ? subscription.pending : [];
+        const pendingSince = pending[0]?.receivedAt ?? subscription.createdAt ?? null;
+        if (nowMs - Date.parse(pendingSince || '') < olderThanMs) continue;
+        if (pending.length > 0) {
+          orphanedWithPending.push({
+            id: subscription.id,
+            agentId: subscription.agentId,
+            repo: subscription.repo,
+            resource: subscription.resource,
+            number: subscription.number ?? null,
+            runId: subscription.runId ?? null,
+            pendingCount: pending.length,
+            pendingState: pending[0]?.state ?? null,
+            pendingSince: pending[0]?.receivedAt ?? null,
+          });
+        } else {
+          candidateIds.push(subscription.id);
+        }
+      }
+      if (end < subscriptions.length) {
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+      }
+    }
+    return this.recordScheduledEventGarbageCollection({
+      nowMs,
+      olderThanMs,
+      candidateIds,
+      orphanedWithPending,
+    });
   }
 
   // Dry-run only: removal stays an explicit `events gc --apply`. The report is
@@ -2557,6 +2661,7 @@ function readTokenAndStart(identity) {
       legacyStateFile,
       webhookSecret,
       initialState,
+      canPersist: () => ownsCoordinatorLock(ownerLock),
     });
     coordinator.eventBroker = eventBroker;
     coordinator.eventBrokerLoading = false;
@@ -2664,9 +2769,21 @@ function readTokenAndStart(identity) {
     detachConnectionListeners(connection);
     destroyConnection(connection);
   };
-  coordinator.setEventListenerInspector((subscriptionId) => (eventListeners.get(String(subscriptionId))?.size || 0) > 0);
+  const listenerConnectionAlive = (listener) => !listener.connection.destroyed
+    && !listener.connection.writableEnded
+    && !listener.connection.readableEnded
+    && listener.connection.readable !== false
+    && listener.connection.writable !== false
+    && (listener.connection.readyState === undefined || listener.connection.readyState === 'open');
+  coordinator.setEventListenerInspector((subscriptionId) => [...(
+    eventListeners.get(String(subscriptionId)) || []
+  )].some(listenerConnectionAlive));
   coordinator.setEventListenerCountInspector(
-    () => [...eventListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
+    () => [...eventListeners.values()].reduce(
+      (total, listeners) => total + [...listeners]
+        .filter(listenerConnectionAlive).length,
+      0,
+    ),
   );
   coordinator.setEventListenerInfoInspector((subscriptionId) => [...(
     eventListeners.get(String(subscriptionId)) || []
@@ -2965,9 +3082,14 @@ function readTokenAndStart(identity) {
           // not expose a transient "secret missing" result while the worker
           // is still attaching the durable broker; ping remains the cheap
           // liveness probe for callers that do not need event state.
-          result = eventBrokerReady.then(() => ({
-            ok: true,
-            status: coordinator.status({ compact: Boolean(request.compact) }),
+          result = eventBrokerReady.then(() => new Promise((resolvePromise) => {
+            // Let a just-closed listener deliver its close/end callbacks
+            // before taking the liveness snapshot. This is one event-loop
+            // turn, not a backlog scan or a polling delay.
+            setImmediate(() => resolvePromise({
+              ok: true,
+              status: coordinator.status({ compact: Boolean(request.compact) }),
+            }));
           }));
         } else if (request.type === 'shutdown') {
           result = Promise.resolve({ ok: true });
@@ -3057,6 +3179,13 @@ function readTokenAndStart(identity) {
       closingConnections.delete(connection);
       detachConnectionListeners(connection, listener);
     });
+    connection.on('end', () => {
+      // A listener supervisor can close its half of the socket without
+      // producing an error. Detach it immediately so the next status cannot
+      // report a dead listener during the close-event turn.
+      detachConnectionListeners(connection, listener);
+      listener = null;
+    });
   });
 
   let terminating = false;
@@ -3073,6 +3202,7 @@ function readTokenAndStart(identity) {
     if (firstSweepTimer) clearTimeout(firstSweepTimer);
     if (scheduledGcTimer) clearInterval(scheduledGcTimer);
     if (firstGcTimer) clearTimeout(firstGcTimer);
+    if (coordinator.scheduledGcBootstrapTimer) clearImmediate(coordinator.scheduledGcBootstrapTimer);
     eventBrokerLoader.worker.terminate().catch(() => {});
     for (const listeners of eventListeners.values()) {
       for (const listener of listeners) {
@@ -3131,6 +3261,12 @@ function readTokenAndStart(identity) {
   server.on('listening', () => {
     try { chmodSync(socket, 0o600); } catch { /* best effort */ }
     try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
+    // The first orphan inspection is strictly post-listen. Status and ping
+    // stay independent of this diagnostic, even while the worker-backed
+    // broker is attaching a large persisted snapshot.
+    eventBrokerReady.then(() => {
+      if (!terminating) coordinator.ensureScheduledEventGarbageCollection();
+    }).catch(() => {});
   });
   server.on('close', cleanUp);
   process.on('SIGTERM', () => terminate(0));
@@ -3164,9 +3300,16 @@ function readTokenAndStart(identity) {
       .finally(() => { sweepRunning = false; });
   };
   const runScheduledGc = () => {
+    if (coordinator.scheduledGcBootstrapInProgress) return;
+    coordinator.scheduledGcBootstrapInProgress = true;
     try {
-      coordinator.scheduledEventGarbageCollection();
+      coordinator.scheduledEventGarbageCollectionAsync()
+        .catch((error) => logStructuredError('event_scheduled_gc_failed', error))
+        .finally(() => {
+          coordinator.scheduledGcBootstrapInProgress = false;
+        });
     } catch (error) {
+      coordinator.scheduledGcBootstrapInProgress = false;
       logStructuredError('event_scheduled_gc_failed', error);
     }
   };

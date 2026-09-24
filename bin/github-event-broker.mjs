@@ -1111,12 +1111,14 @@ export class GitHubEventBroker {
     now = () => Date.now(),
     legacyStateFile = null,
     initialState = null,
+    canPersist = null,
   }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
     this.legacyStateFile = legacyStateFile && legacyStateFile !== stateFile ? legacyStateFile : null;
     this.webhookSecret = normalizedString(webhookSecret);
     this.now = now;
+    this.canPersist = typeof canPersist === 'function' ? canPersist : null;
     this.metrics = {
       subscriptionsCreated: 0,
       subscriptionsExpired: 0,
@@ -1234,6 +1236,12 @@ export class GitHubEventBroker {
   }
 
   persist() {
+    if (this.canPersist && this.canPersist() !== true) {
+      throw brokerError(
+        'event_state_owner_lost',
+        'event broker state owner lock is no longer held; refusing to overwrite newer state',
+      );
+    }
     const temporary = `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(temporary, `${JSON.stringify(this.state)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -1353,9 +1361,14 @@ export class GitHubEventBroker {
     compact = false,
     ...filters
   } = {}) {
-    if (this.prune()) this.persist();
-    const allSubscriptions = this.state.subscriptions;
     const nowMs = this.now();
+    // Keep status observational while presenting the same active view that a
+    // pruning read used to expose. Pending subscriptions remain visible past
+    // expiry; only empty expired records are hidden until the expiry timer
+    // persists their removal.
+    const allSubscriptions = this.state.subscriptions.filter((subscription) => (
+      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
+    ));
     const subscriptions = allSubscriptions.filter((subscription) => (
       selectedSubscription(subscription, filters, listenerAttached, nowMs)
     ));
@@ -1437,9 +1450,11 @@ export class GitHubEventBroker {
   }
 
   status({ listenerAttached = null, listenerInfo = null, limit, ...filters } = {}) {
-    if (this.prune()) this.persist();
     const nowMs = this.now();
-    const allSubscriptions = this.state.subscriptions.filter((subscription) => (
+    const activeSubscriptions = this.state.subscriptions.filter((subscription) => (
+      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
+    ));
+    const allSubscriptions = activeSubscriptions.filter((subscription) => (
       selectedSubscription(subscription, filters, listenerAttached, nowMs)
     ));
     const numericLimit = limit === undefined || limit === null ? null : Number(limit);
@@ -1581,7 +1596,10 @@ export class GitHubEventBroker {
     if (!Number.isFinite(grace) || grace <= 0) {
       throw brokerError('event_gc_age_invalid', 'event garbage collection age must be positive');
     }
-    this.prune();
+    // A dry-run must be observational. In particular, status/health and the
+    // scheduled orphan inspection must never prune an expired subscription or
+    // rewrite the durable snapshot while a listener is being reattached.
+    const pruned = apply ? this.prune() : false;
     const nowMs = this.now();
     const duplicateCounts = this.duplicateSubscriptionCounts();
     const eligibility = new Map();
@@ -1619,7 +1637,7 @@ export class GitHubEventBroker {
     ));
     const candidateIds = candidates.map(({ id }) => id);
     const removedIds = apply ? candidateIds : [];
-    if (apply && removedIds.length > 0) {
+    if (apply && (pruned || removedIds.length > 0)) {
       const removed = new Set(removedIds);
       this.state.subscriptions = this.state.subscriptions.filter(({ id }) => !removed.has(id));
       this.metrics.subscriptionsGarbageCollected += removedIds.length;
