@@ -45,6 +45,10 @@ import {
 } from '../bin/github-coordinator-client.mjs';
 import {
   alertOnlyHealthReport,
+  alertOnlyFingerprint,
+  clearAlertOnlyState,
+  HEALTH_PROBE_TIMEOUT_MS,
+  shouldEmitAlertOnly,
   LAUNCHD_SPAWN_SCHEDULED_STATE,
   eventLifecycleHealth,
   launchdHealthFindings,
@@ -132,6 +136,7 @@ const args = process.argv.slice(2);
 const mode = args[0] === 'pr' && args[1] === 'review' ? 'review'
   : args.includes('large') ? 'large'
     : args.includes('stdin-eof') ? 'stdin-eof'
+      : args.includes('secret-body') ? 'secret-body'
       : 'read';
 const logFile = join(process.cwd(), 'invocations.jsonl');
 let record = { args };
@@ -159,6 +164,11 @@ if (mode === 'large') {
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => { input += chunk; });
   process.stdin.on('end', () => process.stdout.write('stdin-eof:' + input.length + '\\n'));
+} else if (mode === 'secret-body') {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { input += chunk; });
+  process.stdin.on('end', () => process.stdout.write('secret-body:' + input.length + '\\n'));
 } else {
   process.stdout.write('read\\n');
 }
@@ -305,6 +315,10 @@ test('health classifica residui lifecycle come warning indipendentemente dal vol
   ]);
 });
 
+test('health usa una soglia probe piu tollerante del client operativo', () => {
+  assert.equal(HEALTH_PROBE_TIMEOUT_MS, 10_000);
+});
+
 test('health mantiene alert solo per eventi pending senza listener oltre la grace period', () => {
   const findings = eventLifecycleHealth({
     orphanedSubscriptions: 69,
@@ -383,6 +397,66 @@ test('health alert-only limita il report ai finding senza serializzare lo stato'
   });
 });
 
+test('health alert-only deduplica un incidente persistente e lo ripete dopo un ora', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-health-dedupe-');
+  const statePath = join(stateDirectory, 'health.json');
+  const report = {
+    ok: false,
+    checkedAt: '2026-09-24T07:00:00.000Z',
+    alerts: [{
+      code: 'orphaned_pending_events',
+      count: 123,
+      subscriptionCount: 70,
+      message: 'default: 123 pending events across 70 subscriptions have had no listener for over an hour',
+      nextAction: 'reattach_or_explicit_ack',
+    }],
+    warnings: [{
+      code: 'pending_events',
+      count: 123,
+      message: 'default: 123 webhook events await acknowledgement',
+    }],
+  };
+  try {
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 1_000 }), true);
+    assert.equal(shouldEmitAlertOnly({
+      ...report,
+      checkedAt: '2026-09-24T07:00:30.000Z',
+      alerts: [{ ...report.alerts[0], count: 124, subscriptionCount: 71,
+        message: 'default: 124 pending events across 71 subscriptions have had no listener for over an hour' }],
+      warnings: [{ ...report.warnings[0], count: 124, message: 'default: 124 webhook events await acknowledgement' }],
+    }, { statePath, nowMs: 30_000 }), false);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 3_600_999 }), false);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 3_601_000 }), true);
+    assert.equal(alertOnlyFingerprint(report), alertOnlyFingerprint({
+      ...report,
+      checkedAt: 'later',
+      alerts: [{ ...report.alerts[0], count: 999, message: 'default: 999 pending events across 999 subscriptions have had no listener for over an hour' }],
+      warnings: [{ ...report.warnings[0], count: 999, message: 'default: 999 webhook events await acknowledgement' }],
+    }));
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('health alert-only riapre subito un incidente dopo un intervallo sano', () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-health-recovery-');
+  const statePath = join(stateDirectory, 'health.json');
+  const report = {
+    ok: false,
+    alerts: [{
+      code: 'coordinator_probe_failed',
+      message: 'default: probe failed',
+    }],
+    warnings: [],
+  };
+  try {
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 1_000 }), true);
+    assert.equal(clearAlertOnlyState({ statePath }), true);
+    assert.equal(shouldEmitAlertOnly(report, { statePath, nowMs: 2_000 }), true);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
 test('invalida i check di protocollo quando cambia il daemon', async () => {
   const stateDirectory = mkdtempSync('/tmp/pm-');
   const identity = `pm-${process.pid}`;
@@ -575,6 +649,37 @@ test('chiude stdin per le CLI che lo usano come input', async () => {
   try {
     assert.equal(response.ok, true);
     assert.match(response.stdout, /^stdin-eof:0\n$/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('inoltra a gh il body del secret da un file locale senza inserirlo negli argomenti', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'frontaliere-secret-body-'));
+  const realGh = createFakeGh(directory);
+  const secretFile = join(directory, 'auth.json');
+  writeFileSync(secretFile, 'credential-payload');
+  chmodSync(secretFile, 0o600);
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh,
+    socket: join(directory, 'coordinator.sock'),
+  });
+
+  try {
+    const response = await coordinator.submit({
+      type: 'exec',
+      identity: 'test',
+      args: ['secret', 'set', 'CODEX_AUTH_JSON', '--body-file', secretFile, 'secret-body'],
+      cwd: directory,
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.stdout, 'secret-body:18\n');
+    const invocation = JSON.parse(readFileSync(join(directory, 'invocations.jsonl'), 'utf8').trim());
+    assert.deepEqual(invocation.args, ['secret', 'set', 'CODEX_AUTH_JSON', 'secret-body']);
+    assert.equal(invocation.args.includes(secretFile), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -1900,11 +2005,11 @@ test('il ciclo di expiry raccoglie i duplicati sicuri e protegge l unico pending
 
     coordinator.expireEventSubscriptions();
 
-    assert.equal(broker.getSubscription(duplicate.id), null);
+    assert.ok(broker.getSubscription(duplicate.id), 'automatic expiry must not run orphan GC');
     assert.ok(broker.getSubscription(primary.id));
     assert.ok(broker.getSubscription(protectedUnique.id));
     assert.equal(broker.pendingEvent(protectedUnique.id).id, event.id);
-    assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
+    assert.equal(broker.metrics.subscriptionsGarbageCollected, 0);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

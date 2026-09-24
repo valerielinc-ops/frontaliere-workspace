@@ -8,7 +8,7 @@
  */
 
 import { createServer } from 'node:http';
-import { watch } from 'node:fs';
+import { readFileSync, watch } from 'node:fs';
 import cluster from 'node:cluster';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -188,8 +188,28 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0, con
   let triggered = false;
   let watcher;
   let scheduler;
+  const sourceSnapshots = new Map();
+  for (const name of WATCHED_SOURCE_NAMES) {
+    try {
+      sourceSnapshots.set(name, readFileSync(resolve(THIS_DIR, name)));
+    } catch {
+      sourceSnapshots.set(name, null);
+    }
+  }
+  const sourceContentChanged = (name) => {
+    let current;
+    try {
+      current = readFileSync(resolve(THIS_DIR, name));
+    } catch {
+      current = null;
+    }
+    const previous = sourceSnapshots.get(name);
+    if (current === null || previous === null) return current !== previous;
+    return !current.equals(previous);
+  };
   const triggerReload = () => {
     if (triggered) return;
+    if (![...WATCHED_SOURCE_NAMES].some(sourceContentChanged)) return;
     if (!continuous) {
       triggered = true;
       scheduler.stop();
@@ -202,7 +222,7 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0, con
   try {
     watcher = watch(THIS_DIR, { persistent: false }, (_eventType, filename) => {
       const name = String(filename || '');
-      if (triggered || !WATCHED_SOURCE_NAMES.has(name)) return;
+      if (triggered || !WATCHED_SOURCE_NAMES.has(name) || !sourceContentChanged(name)) return;
       if (scheduler.request()) {
         process.stderr.write(
           `github-webhook-receiver: source changed; restart scheduled (debounce=${SOURCE_RELOAD_DEBOUNCE_MS}ms, quiescence=${SOURCE_RELOAD_QUIESCENCE_MS}ms)\n`,

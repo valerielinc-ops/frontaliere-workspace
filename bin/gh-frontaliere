@@ -80,6 +80,7 @@ function printHelp(topic = '') {
           '     bin/gh-frontaliere health [--identity default|nanako] [--alert-only] [--strict]',
           '     bin/gh-frontaliere confirm-cancel <request-id>',
           '',
+          'Per aggiornare un secret senza esporne il contenuto: gh secret set NAME --body-file /percorso/0600.',
           'Le richieste GitHub passano sempre dal coordinatore locale.',
         ].join('\n');
   process.stdout.write(`${help}\n`);

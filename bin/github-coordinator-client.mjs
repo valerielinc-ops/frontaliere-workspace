@@ -45,6 +45,17 @@ const NETWORK_REQUEST_TYPES = new Set([
 ]);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
+const TRANSIENT_REQUEST_RETRY_DELAY_MS = 100;
+const RETRYABLE_LOCAL_REQUEST_TYPES = new Set([
+  'ping',
+  'status',
+  'cancellation-details',
+  'events-status',
+  'events-summary',
+  'events-audit',
+  'events-subscription',
+  'events-subscription-target',
+]);
 const protocolChecks = new Map();
 
 export function requestTimeoutMilliseconds(request) {
@@ -192,9 +203,43 @@ function connectOnce(request, { identity, timeoutMs = CONNECT_TIMEOUT_MS } = {})
     });
     socket.on('error', rejectOnce);
     socket.on('close', () => {
-      if (!settled) rejectOnce(new Error(`github_coordinator_unavailable: ${targetSocket}`));
+      if (settled) return;
+      const error = new Error(`github_coordinator_unavailable: ${targetSocket}`);
+      error.code = 'github_coordinator_unavailable';
+      rejectOnce(error);
     });
   });
+}
+
+function transientCoordinatorError(error) {
+  return new Set([
+    'GITHUB_COORDINATOR_TIMEOUT',
+    'github_coordinator_unavailable',
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EPIPE',
+  ]).has(error?.code);
+}
+
+function retryableLocalRequest(request) {
+  if (RETRYABLE_LOCAL_REQUEST_TYPES.has(String(request?.type || ''))) return true;
+  if (request?.type !== 'api') return false;
+  return ['GET', 'HEAD'].includes(String(request.method || 'GET').toUpperCase());
+}
+
+async function connectWithTransientRetry(request, { identity, timeoutMs, retry = false } = {}) {
+  const attempts = retry ? 2 : 1;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await connectOnce(request, { identity, timeoutMs });
+    } catch (error) {
+      lastError = error;
+      if (!retry || attempt + 1 >= attempts || !transientCoordinatorError(error)) throw error;
+      await sleep(TRANSIENT_REQUEST_RETRY_DELAY_MS);
+    }
+  }
+  throw lastError;
 }
 
 function claimStartLock(identity) {
@@ -295,9 +340,9 @@ export async function waitForCoordinatorStop(identity = normalizeIdentity(), tim
 
 export async function probeCoordinator(identity = normalizeIdentity(), timeoutMs = CONNECT_TIMEOUT_MS) {
   const normalized = normalizeIdentity(identity);
-  const response = await connectOnce(
+  const response = await connectWithTransientRetry(
     { type: 'status', identity: normalized, compact: true },
-    { identity: normalized, timeoutMs },
+    { identity: normalized, timeoutMs, retry: true },
   );
   rememberProtocolStatus(normalized, response);
   return response;
@@ -333,9 +378,9 @@ async function ensureCancellationConfirmationProtocol(identity, status = null) {
   if (memo?.cancellationConfirmed) return;
   const response = status
     ? { status }
-    : await connectOnce(
+    : await connectWithTransientRetry(
       { type: 'status', identity, compact: true },
-      { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+      { identity, timeoutMs: CONNECT_TIMEOUT_MS, retry: true },
     );
   const currentStatus = statusFromResponse(response);
   memo = rememberProtocolStatus(identity, currentStatus);
@@ -356,11 +401,17 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false, sta
   let memo = rememberProtocolStatus(identity, status);
   if (memo?.eventProtocolConfirmed
     && (!requireWebhookSecret || memo.webhookSecretConfigured)) return;
-  const response = status
-    ? { status }
-    : await connectOnce(
+  // `ensureCoordinator` intentionally starts with a cheap ping.  During the
+  // worker-backed broker bootstrap that ping reports `loading: true`; do not
+  // treat its temporary `webhookSecretConfigured: false` as the final event
+  // protocol result.  The status RPC waits for the broker and is the real
+  // preflight in that narrow window.
+  const readyStatus = status?.events?.loading === true ? null : status;
+  const response = readyStatus
+    ? { status: readyStatus }
+    : await connectWithTransientRetry(
       { type: 'status', identity, compact: true },
-      { identity, timeoutMs: CONNECT_TIMEOUT_MS },
+      { identity, timeoutMs: CONNECT_TIMEOUT_MS, retry: true },
     );
   const currentStatus = statusFromResponse(response);
   memo = rememberProtocolStatus(identity, currentStatus);
@@ -398,7 +449,14 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
     });
   }
   const timeoutMs = requestTimeoutMilliseconds(request);
-  const response = await connectOnce({ ...request, identity: normalized }, { identity: normalized, timeoutMs });
+  const response = await connectWithTransientRetry(
+    { ...request, identity: normalized },
+    {
+      identity: normalized,
+      timeoutMs,
+      retry: retryableLocalRequest(request),
+    },
+  );
   if (response?.ok === false && response?.error) {
     const error = new Error(response.error.message || response.error.code || 'github_coordinator_error');
     Object.assign(error, response.error);

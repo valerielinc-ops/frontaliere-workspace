@@ -3,6 +3,13 @@
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+# launchd inherits macOS's conservative 256-descriptor soft limit. The
+# coordinator owns a socket, source watcher, state files and worker pipes;
+# raise only this daemon's soft limit so clients are not starved by unrelated
+# shell limits. Keep this bounded and best-effort for non-macOS test runners.
+ulimit -n 4096 2>/dev/null || true
 
 # Client auto-starts must load the same Remote Config secret as the persistent
 # launch agent.  Keep an explicit test/workflow override when one is present.
@@ -25,5 +32,4 @@ if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -n "${GITHUB_PAT:-}" ]; then
   export FRONTALIERE_GH_TOKEN="$GITHUB_PAT"
 fi
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "$@"

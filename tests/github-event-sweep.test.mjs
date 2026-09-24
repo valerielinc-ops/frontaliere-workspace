@@ -256,7 +256,7 @@ test('lo status compatto espone i contatori pending senza materializzare i detta
   }
 });
 
-test('il primo status dopo un riavvio rileva subito il backlog pending senza cancellarlo', () => {
+test('il primo status dopo un riavvio non avvia GC sincrona e il bootstrap post-listen conserva il backlog', async () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-restart-gc-'));
   const originalWrite = process.stderr.write;
   const logged = [];
@@ -286,31 +286,37 @@ test('il primo status dopo un riavvio rileva subito il backlog pending senza can
     // no in-memory scheduled GC report yet.
     const { broker, coordinator } = makeCoordinator(stateDirectory);
     coordinator.setEventListenerInspector(() => false);
-    let gcCalls = 0;
-    const scheduledGc = coordinator.scheduledEventGarbageCollection.bind(coordinator);
-    coordinator.scheduledEventGarbageCollection = (...args) => {
-      gcCalls += 1;
-      return scheduledGc(...args);
-    };
     process.stderr.write = (chunk) => { logged.push(String(chunk)); return true; };
 
     const compact = coordinator.status({ compact: true });
-    const health = eventLifecycleHealth(compact.events, 'test');
-    assert.equal(gcCalls, 1, 'il primo probe deve eseguire una sola ispezione GC locale');
+    assert.equal(coordinator.lastScheduledGc, null, 'status non deve avviare la scansione GC');
     assert.equal(compact.events.pendingEvents, 1);
     assert.equal(compact.events.pendingSubscriptionCount, 1);
     assert.equal(compact.events.oldestPendingAt, receivedAt);
-    assert.equal(compact.events.scheduledGc.orphanedWithPendingSubscriptionCount, 1);
-    assert.equal(compact.events.scheduledGc.orphanedWithPendingEventCount, 1);
-    assert.equal(Object.prototype.hasOwnProperty.call(compact.events.scheduledGc, 'orphanedWithPending'), false);
+    assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
+
+    coordinator.ensureScheduledEventGarbageCollection();
+    await new Promise((resolve) => {
+      const waitForBootstrap = () => {
+        if (coordinator.lastScheduledGc) {
+          resolve();
+          return;
+        }
+        setImmediate(waitForBootstrap);
+      };
+      waitForBootstrap();
+    });
+
+    const health = eventLifecycleHealth({ scheduledGc: coordinator.lastScheduledGc }, 'test');
+    assert.equal(coordinator.lastScheduledGc.orphanedWithPendingSubscriptionCount, 1);
+    assert.equal(coordinator.lastScheduledGc.orphanedWithPendingEventCount, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(coordinator.lastScheduledGc, 'orphanedWithPending'), true);
     assert.deepEqual(health.alerts.map(({ code }) => code), ['orphaned_pending_events']);
     assert.equal(health.alerts[0].eventCount, 1);
     assert.equal(health.alerts[0].subscriptionCount, 1);
-    assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
     assert.ok(logged.some((line) => line.includes('event_gc_orphans_detected')));
 
     const secondCompact = coordinator.status({ compact: true });
-    assert.equal(gcCalls, 1, 'le probe successive non devono rieseguire il bootstrap GC');
     assert.equal(secondCompact.events.scheduledGc.orphanedWithPendingEventCount, 1);
 
     const full = coordinator.status();
@@ -319,6 +325,60 @@ test('il primo status dopo un riavvio rileva subito il backlog pending senza can
     assert.equal(full.events.scheduledGc.orphanedWithPending[0].id, created.id);
   } finally {
     process.stderr.write = originalWrite;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('una GC post-listen a backlog grande cede il loop e non riscrive lo snapshot', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-large-gc-'));
+  const { broker, coordinator } = makeCoordinator(stateDirectory);
+  try {
+    coordinator.setEventListenerInspector(() => false);
+    const seed = broker.subscribe({
+      agentId: 'large-backlog-seed',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: '35989253158',
+      waitFor: ['completed'],
+      ttlSeconds: 36_000,
+      allowDuplicate: true,
+    });
+    const seedRecord = broker.getSubscriptionRecord(seed.id);
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    for (let index = 0; index < 256; index += 1) {
+      const copy = structuredClone(seedRecord);
+      copy.id = `sub-large-${index}`;
+      copy.agentId = `large-agent-${index}`;
+      copy.runId = `large-run-${index}`;
+      copy.createdAt = receivedAt;
+      copy.pending = [{
+        id: `event-large-${index}`,
+        deliveryId: `delivery-large-${index}`,
+        receivedAt,
+        state: 'completed',
+      }];
+      broker.state.subscriptions.push(copy);
+    }
+    broker.persist();
+    const beforeIds = broker.state.subscriptions.map(({ id }) => id);
+
+    let statusTurnYielded = false;
+    setImmediate(() => { statusTurnYielded = true; });
+    const compact = coordinator.status({ compact: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(statusTurnYielded, true);
+    assert.equal(coordinator.lastScheduledGc, null, 'status non deve eseguire GC');
+    assert.equal(compact.events.pendingEvents, 256);
+
+    let gcTurnYielded = false;
+    const gcPromise = coordinator.scheduledEventGarbageCollectionAsync({ batchSize: 8 });
+    setImmediate(() => { gcTurnYielded = true; });
+    const report = await gcPromise;
+    assert.equal(gcTurnYielded, true, 'la scansione deve cedere il loop tra i batch');
+    assert.equal(report.orphanedWithPendingSubscriptionCount, 256);
+    assert.deepEqual(broker.state.subscriptions.map(({ id }) => id), beforeIds);
+    assert.ok(broker.getSubscriptionRecord(seed.id), 'la subscription del run resta presente');
+  } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }
 });

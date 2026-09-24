@@ -6,14 +6,34 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { accessSync, constants as fsConstants } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 
-import { normalizeIdentity, probeCoordinator, socketPath } from './github-coordinator-client.mjs';
+import {
+  normalizeIdentity,
+  probeCoordinator,
+  socketPath,
+  stateDirectory,
+} from './github-coordinator-client.mjs';
 
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
 export const LAUNCHD_SPAWN_SCHEDULED_STATE = 'spawn scheduled';
+// The compact status serializes the durable event summary. Keep the ordinary
+// client connect timeout strict, but give the periodic health probe enough
+// room for one transient event-loop/status burst before raising an alert.
+export const HEALTH_PROBE_TIMEOUT_MS = 10_000;
+export const ALERT_ONLY_REPEAT_MS = 60 * 60 * 1_000;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
+const ALERT_ONLY_STATE_FILE = 'github-coordinator-health-alert-only.json';
 
 export function launchdHealthFindings(
   identity,
@@ -164,7 +184,7 @@ export async function checkCoordinatorHealth(identity) {
 
   let status = null;
   try {
-    const response = await probeCoordinator(normalized);
+    const response = await probeCoordinator(normalized, HEALTH_PROBE_TIMEOUT_MS);
     status = response?.status || response;
   } catch (error) {
     alerts.push({ code: 'coordinator_probe_failed', message: `${normalized}: ${error.message}` });
@@ -183,7 +203,12 @@ export async function checkCoordinatorHealth(identity) {
         message: `${normalized}: protocol ${status.protocolVersion} is below ${REQUIRED_COORDINATOR_PROTOCOL}`,
       });
     }
-    if (status.events?.webhookSecretConfigured !== true) {
+    if (status.events?.loading === true) {
+      warnings.push({
+        code: 'event_state_loading',
+        message: `${normalized}: event broker state is still loading in its worker`,
+      });
+    } else if (status.events?.webhookSecretConfigured !== true) {
       alerts.push({ code: 'webhook_secret_unconfigured', message: `${normalized}: webhook secret is not configured` });
     }
     const eventSummary = status.events || {};
@@ -297,6 +322,85 @@ export function alertOnlyHealthReport(result) {
   };
 }
 
+function normalizedFinding(finding) {
+  return {
+    code: String(finding?.code || ''),
+    // Counts and timestamps are useful in the emitted report but should not
+    // turn a persistent incident into a new log line every 30 seconds.
+    message: String(finding?.message || '').replace(/\b\d+(?:\.\d+)?\b/g, '#'),
+    nextAction: String(finding?.nextAction || ''),
+  };
+}
+
+export function alertOnlyFingerprint(report) {
+  return JSON.stringify({
+    ok: report?.ok === true,
+    alerts: Array.isArray(report?.alerts) ? report.alerts.map(normalizedFinding) : [],
+    warnings: Array.isArray(report?.warnings) ? report.warnings.map(normalizedFinding) : [],
+  });
+}
+
+function alertOnlyStatePath() {
+  return join(stateDirectory(), ALERT_ONLY_STATE_FILE);
+}
+
+function readAlertOnlyState(path) {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'));
+    const emittedAtMs = Number(value?.emittedAtMs);
+    return typeof value?.fingerprint === 'string' && Number.isFinite(emittedAtMs)
+      ? { fingerprint: value.fingerprint, emittedAtMs }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAlertOnlyState(path, state) {
+  const directory = dirname(path);
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, `${JSON.stringify(state)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporary, path);
+  } catch {
+    try { unlinkSync(temporary); } catch { /* best effort: the report remains useful */ }
+  }
+}
+
+export function clearAlertOnlyState({ statePath = alertOnlyStatePath() } = {}) {
+  try {
+    unlinkSync(statePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return false;
+  }
+  return true;
+}
+
+/**
+ * Return whether an alert-only report should be written by a periodic probe.
+ *
+ * The health check remains read-only with respect to coordinator state. This
+ * tiny local marker only suppresses duplicate log lines from a launchd timer;
+ * it contains finding codes/messages, never credentials or event payloads.
+ */
+export function shouldEmitAlertOnly(
+  report,
+  {
+    nowMs = Date.now(),
+    repeatMs = ALERT_ONLY_REPEAT_MS,
+    statePath = alertOnlyStatePath(),
+  } = {},
+) {
+  const fingerprint = alertOnlyFingerprint(report);
+  const previous = readAlertOnlyState(statePath);
+  if (previous
+    && previous.fingerprint === fingerprint
+    && nowMs - previous.emittedAtMs < repeatMs) return false;
+  writeAlertOnlyState(statePath, { fingerprint, emittedAtMs: nowMs });
+  return true;
+}
+
 function optionValue(args, name) {
   const index = args.findIndex((value) => value === name || value.startsWith(`${name}=`));
   if (index < 0) return null;
@@ -308,9 +412,14 @@ if (process.argv[1] && process.argv[1].endsWith('/github-coordinator-health.mjs'
   const identityOption = optionValue(args, '--identity');
   const identities = identityOption ? [identityOption] : DEFAULT_IDENTITIES;
   const result = await checkHealth(identities);
-  if (!args.includes('--alert-only') || !result.ok) {
-    const output = args.includes('--alert-only') ? alertOnlyHealthReport(result) : result;
-    process.stdout.write(`${JSON.stringify(output)}\n`);
+  const alertOnly = args.includes('--alert-only');
+  const dedupe = alertOnly && ['1', 'true', 'yes'].includes(
+    String(process.env.FRONTALIERE_GH_HEALTH_DEDUPE || '').toLowerCase(),
+  );
+  if (alertOnly && dedupe && result.ok) clearAlertOnlyState();
+  if (!alertOnly || !result.ok) {
+    const output = alertOnly ? alertOnlyHealthReport(result) : result;
+    if (!dedupe || shouldEmitAlertOnly(output)) process.stdout.write(`${JSON.stringify(output)}\n`);
   }
   process.exitCode = result.ok ? 0 : 1;
 }
