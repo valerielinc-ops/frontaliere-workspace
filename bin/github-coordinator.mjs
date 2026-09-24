@@ -219,24 +219,44 @@ export const WATCHED_SOURCE_NAMES = new Set([
   'github-coordinator-launcher',
 ]);
 
-function describeError(error) {
+function describeError(error, { includeStack = true } = {}) {
   if (error instanceof Error) {
     return {
       name: error.name,
       message: error.message,
       ...(error.code ? { code: error.code } : {}),
-      ...(error.stack ? { stack: error.stack } : {}),
+      ...(includeStack && error.stack ? { stack: error.stack } : {}),
     };
   }
   return { name: typeof error, message: String(error) };
 }
 
+const CLIENT_ERROR_LOG_DEDUPE_MS = 1_000;
+const clientErrorLogAt = new Map();
+
 function logStructuredError(event, error, details = {}) {
   try {
+    const isClientRequestError = event === 'client_request_failed';
+    if (isClientRequestError) {
+      const code = error?.code || 'coordinator_error';
+      const key = `${code}:${error?.message || String(error)}`;
+      const nowMs = Date.now();
+      const previousAt = clientErrorLogAt.get(key) || 0;
+      if (nowMs - previousAt < CLIENT_ERROR_LOG_DEDUPE_MS) return;
+      clientErrorLogAt.set(key, nowMs);
+      if (clientErrorLogAt.size > 512) {
+        for (const [candidate, observedAt] of clientErrorLogAt) {
+          if (nowMs - observedAt >= CLIENT_ERROR_LOG_DEDUPE_MS) clientErrorLogAt.delete(candidate);
+        }
+      }
+    }
     process.stderr.write(`${JSON.stringify({
       component: 'github-coordinator',
       event,
-      error: describeError(error),
+      // Client validation/webhook failures are expected RPC outcomes. Avoid
+      // formatting a deep V8 stack for every rejected delivery: a burst of
+      // invalid requests must not starve ping/status on the same loop.
+      error: describeError(error, { includeStack: !isClientRequestError }),
       ...details,
     })}\n`);
   } catch {
