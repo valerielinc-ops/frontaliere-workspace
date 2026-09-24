@@ -1953,11 +1953,11 @@ test('il ciclo di expiry raccoglie i duplicati sicuri e protegge l unico pending
 
     coordinator.expireEventSubscriptions();
 
-    assert.equal(broker.getSubscription(duplicate.id), null);
+    assert.ok(broker.getSubscription(duplicate.id), 'automatic expiry must not run orphan GC');
     assert.ok(broker.getSubscription(primary.id));
     assert.ok(broker.getSubscription(protectedUnique.id));
     assert.equal(broker.pendingEvent(protectedUnique.id).id, event.id);
-    assert.equal(broker.metrics.subscriptionsGarbageCollected, 1);
+    assert.equal(broker.metrics.subscriptionsGarbageCollected, 0);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

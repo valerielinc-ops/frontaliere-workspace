@@ -1616,15 +1616,10 @@ export class GitHubCoordinator {
     for (const subscriptionId of expiredIds) {
       this.eventNotifier?.(subscriptionId, { expired: true });
     }
-    if (this.eventListenerInspector) {
-      const garbageCollection = this.eventBroker.garbageCollect({
-        listenerAttached: this.eventListenerInspector,
-        apply: true,
-      });
-      for (const subscriptionId of garbageCollection.removedIds || []) {
-        this.eventNotifier?.(subscriptionId, { removed: true });
-      }
-    }
+    // Orphan cleanup is an explicit operator action (`events gc --apply`),
+    // never a one-second background side effect.  Applying GC while the
+    // control plane is degraded can delete an orphan subscription before its
+    // listener is reattached and makes the expiry timer compete with RPCs.
     return expiredIds;
   }
 
