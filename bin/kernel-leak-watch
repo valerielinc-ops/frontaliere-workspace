@@ -1,0 +1,314 @@
+#!/bin/bash
+
+# Sentinella del leak kernel di macOS 26.x da script annidati.
+#
+# Se un processo discende (anche via fork/exec) da uno script `#!` ed esegue un
+# altro script `#!`, il kernel perde ~1 KiB nella zona data_shared.kalloc.1024
+# (data.kalloc.1024 da macOS 26.4). La memoria resta wired fino al reboot: il
+# 2026-09-24 tre loop bash orfani ne avevano accumulati 10,6 GB in 3,4 giorni.
+# Il gocciolio normale e' ~32 MB/giorno; questa sentinella deve accorgersi di
+# un loop entro un'ora, non dopo giorni.
+#
+# launchd la avvia come `/bin/bash <path>` e non eseguendo lo script: cosi'
+# bash non nasce da un exec `#!` e l'albero della sentinella non puo' mai
+# alimentare il leak che misura. Tutti i binari chiamati sono Mach-O con path
+# assoluto (nessuno script `#!` fra i figli).
+#
+# Non uccide mai processi: segnala e basta. Esce 0 anche sugli errori di
+# misura (e' un job periodico senza KeepAlive); solo un uso sbagliato esce 64.
+#
+# Colonne del TSV: ts_utc epoch data_shared_1024 data_1024 wired_mb
+# swap_used_mb load1. Un campo vuoto significa sonda non disponibile.
+
+set -u
+
+usage() {
+  printf 'uso: %s [--help]\n' "kernel-leak-watch"
+  printf '  configurazione solo via env: KLW_STATE_DIR, KLW_RATE_ALERT_PER_H,\n'
+  printf '  KLW_TOTAL_ALERT, KLW_NOTIFY_COOLDOWN_S, KLW_NOW e i KLW_*_BIN\n'
+}
+
+case "${1:-}" in
+  '') ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 64 ;;
+esac
+
+home_dir=${HOME:-~}
+state_dir=${KLW_STATE_DIR:-$home_dir/Library/Logs/frontaliere}
+tsv="$state_dir/kernel-leak-watch.tsv"
+alert_file="$state_dir/kernel-leak-watch.alert"
+notify_stamp="$state_dir/kernel-leak-watch.notified"
+
+zprint_bin=${KLW_ZPRINT_BIN:-/usr/bin/zprint}
+ps_bin=${KLW_PS_BIN:-/bin/ps}
+notify_bin=${KLW_NOTIFY_BIN:-/usr/bin/osascript}
+vm_stat_bin=${KLW_VM_STAT_BIN:-/usr/bin/vm_stat}
+sysctl_bin=${KLW_SYSCTL_BIN:-/usr/sbin/sysctl}
+date_bin=/bin/date
+
+rate_alert=${KLW_RATE_ALERT_PER_H:-100000}
+total_alert=${KLW_TOTAL_ALERT:-3000000}
+cooldown_s=${KLW_NOTIFY_COOLDOWN_S:-21600}
+sample_count=${KLW_SAMPLES:-5}
+sample_interval_s=${KLW_SAMPLE_INTERVAL_S:-1}
+orphan_min_age_s=${KLW_ORPHAN_MIN_AGE_S:-1800}
+max_rows=5000
+keep_rows=4000
+# Finestra del tasso: la riga piu' recente di almeno 50 minuti fa; sotto i
+# 10 minuti il tasso e' rumore (un burst di exec lecito sembra un leak).
+ref_min_age_s=3000
+min_window_s=600
+
+# Le soglie arrivano dall'ambiente: un valore non numerico e' un errore d'uso,
+# non una misura fallita, e non deve passare in silenzio a un confronto vuoto.
+for pair in "KLW_RATE_ALERT_PER_H=$rate_alert" "KLW_TOTAL_ALERT=$total_alert" \
+  "KLW_NOTIFY_COOLDOWN_S=$cooldown_s" "KLW_SAMPLES=$sample_count" \
+  "KLW_SAMPLE_INTERVAL_S=$sample_interval_s" "KLW_ORPHAN_MIN_AGE_S=$orphan_min_age_s" \
+  "KLW_NOW=${KLW_NOW:-0}"; do
+  case "${pair#*=}" in
+    ''|*[!0-9]*)
+      printf '%s %s non è un intero non negativo: %s\n' "kernel-leak-watch:" "${pair%%=*}" "${pair#*=}" >&2
+      exit 64
+      ;;
+  esac
+done
+
+now=${KLW_NOW:-$($date_bin -u +%s)}
+
+log() {
+  printf '%s kernel-leak-watch %s\n' "$($date_bin -u -r "$now" '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+if ! /bin/mkdir -p "$state_dir"; then
+  log "action=abort reason=state_dir_unwritable state_dir=$state_dir exit_code=0" >&2
+  exit 0
+fi
+
+# --- misura -----------------------------------------------------------------
+
+# Senza root le colonne size di zprint sono 0K, ma la 7a colonna (cur inuse,
+# elementi in uso) e' leggibile. Match esatto sul nome: altre zone contengono
+# "kalloc.1024" come sottostringa.
+zprint_out=$("$zprint_bin" 2>/dev/null)
+read -r ds_1024 d_1024 <<EOF
+$(printf '%s\n' "$zprint_out" | /usr/bin/awk '
+  $1 == "data_shared.kalloc.1024" { ds = $7 }
+  $1 == "data.kalloc.1024" { d = $7 }
+  END { printf "%s %s\n", (ds == "" ? "-" : ds), (d == "" ? "-" : d) }')
+EOF
+[ "$ds_1024" = "-" ] && ds_1024=""
+[ "$d_1024" = "-" ] && d_1024=""
+
+case "$ds_1024$d_1024" in
+  ''|*[!0-9]*)
+    log "action=abort reason=zones_missing zprint=$zprint_bin data_shared_1024=$ds_1024 data_1024=$d_1024 exit_code=0"
+    exit 0
+    ;;
+esac
+total=$(( ${ds_1024:-0} + ${d_1024:-0} ))
+
+wired_mb=""
+if [ -x "$vm_stat_bin" ]; then
+  wired_mb=$("$vm_stat_bin" 2>/dev/null | /usr/bin/awk '
+    /page size of/ { for (i = 1; i <= NF; i++) if ($i == "of") ps = $(i + 1) }
+    /^Pages wired down:/ { w = $NF; sub(/\.$/, "", w) }
+    END { if (ps != "" && w != "") printf "%d\n", w * ps / 1048576 }')
+fi
+
+swap_used_mb=""
+load1=""
+if [ -x "$sysctl_bin" ]; then
+  # "total = 8192.00M  used = 7428.81M  free = 763.19M  (encrypted)"
+  swap_used_mb=$("$sysctl_bin" -n vm.swapusage 2>/dev/null | /usr/bin/awk '
+    { for (i = 1; i <= NF; i++) if ($i == "used" && $(i + 1) == "=") v = $(i + 2) }
+    END {
+      if (v == "") exit
+      mult = 1
+      if (v ~ /G$/) mult = 1024
+      if (v ~ /K$/) mult = 1 / 1024
+      sub(/[KMG]$/, "", v)
+      printf "%d\n", v * mult
+    }')
+  load1=$("$sysctl_bin" -n vm.loadavg 2>/dev/null | /usr/bin/awk '{ print $2 }')
+fi
+
+# --- tasso --------------------------------------------------------------------
+
+# Il riferimento si cerca prima di appendere la riga corrente.
+ref_line=""
+if [ -s "$tsv" ]; then
+  ref_line=$(/usr/bin/awk -F '\t' -v now="$now" -v min_age="$ref_min_age_s" '
+    $2 ~ /^[0-9]+$/ && $2 < now {
+      if (oldest == "") oldest = $0
+      if (now - $2 >= min_age) recent = $0
+    }
+    END { if (recent != "") print recent; else if (oldest != "") print oldest }' "$tsv")
+fi
+
+rate=""
+window_s=""
+ref_ts=""
+if [ -n "$ref_line" ]; then
+  read -r ref_ts ref_epoch ref_ds ref_d <<EOF
+$(printf '%s\n' "$ref_line" | /usr/bin/awk -F '\t' '{ printf "%s %s %s %s\n", $1, $2, ($3 == "" ? 0 : $3), ($4 == "" ? 0 : $4) }')
+EOF
+  window_s=$((now - ref_epoch))
+  if [ "$window_s" -ge "$min_window_s" ]; then
+    rate=$(( (total - ref_ds - ref_d) * 3600 / window_s ))
+  fi
+fi
+
+ts=$($date_bin -u -r "$now" '+%Y-%m-%dT%H:%M:%SZ')
+if ! printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$now" "$ds_1024" "$d_1024" \
+  "$wired_mb" "$swap_used_mb" "$load1" >>"$tsv"; then
+  log "action=abort reason=tsv_unwritable tsv=$tsv exit_code=0" >&2
+  exit 0
+fi
+
+# Isteresi: si riscrive una volta ogni ~1000 esecuzioni, non a ogni giro.
+rows=$(/usr/bin/awk 'END { print NR }' "$tsv")
+if [ "$rows" -ge "$max_rows" ]; then
+  if /usr/bin/tail -n "$keep_rows" "$tsv" >"$tsv.tmp.$$" && /bin/mv -f "$tsv.tmp.$$" "$tsv"; then
+    log "action=trim tsv=$tsv rows_before=$rows rows_after=$keep_rows"
+  else
+    /bin/rm -f "$tsv.tmp.$$"
+    log "action=trim_failed tsv=$tsv rows=$rows" >&2
+  fi
+fi
+
+reasons=""
+if [ -n "$rate" ] && [ "$rate" -gt "$rate_alert" ]; then
+  reasons="rate"
+fi
+if [ "$total" -gt "$total_alert" ]; then
+  reasons="${reasons:+$reasons,}total"
+fi
+
+log "action=sample data_shared_1024=$ds_1024 data_1024=$d_1024 total=$total rate_per_h=${rate:-na} window_s=${window_s:-na} wired_mb=$wired_mb swap_used_mb=$swap_used_mb load1=$load1 alert=${reasons:-none}"
+
+if [ -z "$reasons" ]; then
+  # .alert presente = allarme in corso; dopo il reboot (totale di nuovo
+  # basso) il vecchio resta leggibile come .alert.resolved.
+  if [ -f "$alert_file" ] && /bin/mv -f "$alert_file" "$alert_file.resolved"; then
+    log "action=resolved alert=$alert_file.resolved"
+  fi
+  exit 0
+fi
+
+# --- sospetti -----------------------------------------------------------------
+
+# A: shell orfane (ppid 1) che eseguono uno script o un -c da almeno 30 min.
+# E' la forma del caso del 2026-09-24: loop di un test sopravvissuti al padre.
+suspects_a=$("$ps_bin" -Ao pid=,ppid=,etime=,command= 2>/dev/null | /usr/bin/awk \
+  -v self="$$" -v min_age="$orphan_min_age_s" '
+  function secs(e,   d, n, p) {
+    d = 0
+    if (index(e, "-") > 0) { d = substr(e, 1, index(e, "-") - 1); e = substr(e, index(e, "-") + 1) }
+    n = split(e, p, ":")
+    if (n == 3) return d * 86400 + p[1] * 3600 + p[2] * 60 + p[3]
+    if (n == 2) return d * 86400 + p[1] * 60 + p[2]
+    return 0
+  }
+  $2 == 1 && $1 != self {
+    shell = $4; sub(/.*\//, "", shell)
+    if (shell != "bash" && shell != "sh" && shell != "zsh" && shell != "dash") next
+    runs = 0
+    for (i = 5; i <= NF; i++) if ($i !~ /^-/ || $i ~ /^-[A-Za-z]*c[A-Za-z]*$/) { runs = 1; break }
+    if (!runs) next
+    age = secs($3)
+    if (age < min_age) next
+    cmd = $0; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]+/, "", cmd)
+    line = sprintf("pid=%s age_s=%d %s", $1, age, cmd)
+    print substr(line, 1, 200)
+    if (++shown >= 20) exit
+  }')
+
+# B: ricambio di processi. Un loop che esegue script a raffica fa nascere PID
+# nuovi sotto lo stesso padre a ogni campione; si esclude il ricambio della
+# sentinella stessa (i suoi figli e i nipoti di una sua subshell).
+samples=""
+i=0
+while [ "$i" -lt "$sample_count" ]; do
+  if [ "$i" -gt 0 ]; then
+    /bin/sleep "$sample_interval_s"
+  fi
+  samples="$samples
+@@sample
+$("$ps_bin" -Ao pid=,ppid= 2>/dev/null)"
+  i=$((i + 1))
+done
+churn=$(printf '%s\n' "$samples" | /usr/bin/awk -v self="$$" '
+  /^@@sample$/ { n++; next }
+  NF >= 2 && $1 ~ /^[0-9]+$/ {
+    if (n > 1 && !($1 in seen) && $2 != self && $1 != self && $2 != 0) fresh[$2]++
+    seen[$1] = 1
+    parent[$1] = $2
+  }
+  END { for (p in fresh) if (parent[p] != self) printf "%d %s\n", fresh[p], p }' | /usr/bin/sort -rn | /usr/bin/head -n 5)
+
+suspects_b=""
+if [ -n "$churn" ]; then
+  while read -r count ppid; do
+    [ -n "$ppid" ] || continue
+    cmd=$("$ps_bin" -o command= -p "$ppid" 2>/dev/null | /usr/bin/head -n 1)
+    line="ppid=$ppid nuovi_pid=$count ${cmd:-?}"
+    suspects_b="$suspects_b$(printf '%.200s' "$line")
+"
+  done <<EOF
+$churn
+EOF
+fi
+
+# --- allarme ------------------------------------------------------------------
+
+total_mb=$((total / 1024))
+tmp_alert="$alert_file.tmp.$$"
+{
+  printf 'kernel-leak-watch ALLARME %s (motivo: %s)\n' "$ts" "$reasons"
+  printf 'data_shared.kalloc.1024 in uso: %s\n' "${ds_1024:-n/d}"
+  printf 'data.kalloc.1024 in uso: %s\n' "${d_1024:-n/d}"
+  printf 'totale: %s elementi (~%s MB wired), soglia %s\n' "$total" "$total_mb" "$total_alert"
+  if [ -n "$rate" ]; then
+    printf 'tasso: %s elementi/h su %s s (riferimento %s), soglia %s/h\n' "$rate" "$window_s" "$ref_ts" "$rate_alert"
+  else
+    printf 'tasso: non valutato (finestra %s s, minimo %s s)\n' "${window_s:-0}" "$min_window_s"
+  fi
+  printf 'wired_mb: %s  swap_used_mb: %s  load1: %s\n' "${wired_mb:-n/d}" "${swap_used_mb:-n/d}" "${load1:-n/d}"
+  printf '\n'
+  printf 'Bug kernel macOS 26.x: ogni exec di uno script #! da un processo che discende da un altro script #! perde ~1 KiB in kalloc.1024; la memoria resta wired e solo il reboot la libera (fermare il processo blocca la crescita, non la recupera).\n'
+  printf '\n'
+  printf 'Sospetti A (shell orfane con ppid 1 che eseguono uno script o -c da almeno %s s):\n' "$orphan_min_age_s"
+  if [ -n "$suspects_a" ]; then printf '%s\n' "$suspects_a"; else printf '(nessuno)\n'; fi
+  printf '\n'
+  printf 'Sospetti B (padri con più PID nuovi in %s campioni a %s s):\n' "$sample_count" "$sample_interval_s"
+  if [ -n "$suspects_b" ]; then printf '%s' "$suspects_b"; else printf '(nessuno)\n'; fi
+} >"$tmp_alert" && /bin/mv -f "$tmp_alert" "$alert_file"
+if [ -f "$tmp_alert" ]; then
+  /bin/rm -f "$tmp_alert"
+  log "action=alert_write_failed alert=$alert_file" >&2
+fi
+log "action=alert reasons=$reasons alert=$alert_file suspects_a=$(printf '%s' "$suspects_a" | /usr/bin/awk 'END { print NR }')"
+
+last_notify=0
+if [ -s "$notify_stamp" ]; then
+  last_notify=$(/usr/bin/head -n 1 "$notify_stamp")
+  case "$last_notify" in ''|*[!0-9]*) last_notify=0 ;; esac
+fi
+if [ $((now - last_notify)) -lt "$cooldown_s" ]; then
+  log "action=notify_skipped reason=cooldown last_notify=$last_notify cooldown_s=$cooldown_s"
+  exit 0
+fi
+
+# osascript riceve il testo dentro doppi apici: si tolgono quelli dei dati.
+message="kalloc.1024: $total elementi (~$total_mb MB wired), tasso ${rate:-n/d}/h. Dettagli: $alert_file"
+message=${message//\"/}
+message=${message//\\/}
+if "$notify_bin" -e "display notification \"$message\" with title \"Leak kernel macOS\"" >/dev/null 2>&1; then
+  printf '%s\n' "$now" >"$notify_stamp.tmp.$$" && /bin/mv -f "$notify_stamp.tmp.$$" "$notify_stamp"
+  log "action=notified notify=$notify_bin"
+else
+  # Nessuno stamp: si riprova al prossimo giro invece di tacere per 6 ore.
+  log "action=notify_failed notify=$notify_bin" >&2
+fi
+exit 0
