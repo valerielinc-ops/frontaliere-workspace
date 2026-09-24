@@ -141,11 +141,15 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 - I coordinatori `default` e `nanako` sono servizi launchd persistenti con label
   `ch.frontaliere.github-coordinator-default` e
   `ch.frontaliere.github-coordinator-nanako`; il launcher carica Remote Config
-  anche quando un client deve avviare il daemon automaticamente. Dopo una
-  modifica agli script riavvia i due servizi con `launchctl kickstart -k` e
-  verifica `bin/gh-frontaliere status --compact`. Receiver e coordinatore
-  osservano i propri sorgenti e chiedono un reload a launchd quando cambia il
-  client: non lasciare in memoria un processo con il vecchio protocollo.
+  anche quando un client deve avviare il daemon automaticamente. launchd non
+  esegue `bin/` della root ma una release congelata
+  (`~/.local/share/frontaliere/github-coordinator/current`): modificare `bin/`
+  non riavvia più coordinator e receiver. Dopo il merge di una modifica agli
+  script esegui `bin/github-coordinator-release deploy` (release di
+  `origin/main`, symlink atomico, riavvio uno alla volta con verifica di owner
+  e ping); `status` mostra release e PID. Non avviare copie del coordinator
+  fuori da launchd: il processo supervisionato resta in standby finché l'owner
+  estraneo non esce.
 - Per una diagnosi sintetica senza auto-avvio usa
   `bin/gh-frontaliere health --alert-only` (oppure
   `bin/github-coordinator-health`). Deve risultare un solo processo per

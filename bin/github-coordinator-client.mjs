@@ -526,8 +526,12 @@ export async function eventSubscriptionTarget(options = {}, { identity } = {}) {
   return sendRequest({ type: 'events-subscription-target', options }, { identity });
 }
 
-export async function unsubscribeFromEvents(subscriptionId, { identity } = {}) {
-  return sendRequest({ type: 'events-unsubscribe', subscriptionId }, { identity });
+export async function unsubscribeFromEvents(subscriptionId, { identity, agentId = null } = {}) {
+  return sendRequest({
+    type: 'events-unsubscribe',
+    subscriptionId,
+    ...(agentId ? { agentId } : {}),
+  }, { identity });
 }
 
 export async function reconcileEvents(subscriptionId, { identity } = {}) {

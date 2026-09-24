@@ -1,0 +1,316 @@
+#!/bin/bash
+#
+# Frozen releases for the launchd-managed GitHub control plane.
+#
+# launchd used to run bin/ straight from the workspace checkout. Every edit,
+# checkout or rebase of those files made the coordinator and the webhook
+# receivers reload themselves, dropping every `events listen` of the
+# workspace. A release is an immutable copy of bin/ at one commit; launchd runs
+# `current/bin/...` and nothing changes under a running process until an
+# explicit `deploy` flips the symlink and restarts the services one at a time.
+#
+#   bin/github-coordinator-release status
+#   bin/github-coordinator-release install  [--ref <git-ref>]
+#   bin/github-coordinator-release activate <sha>
+#   bin/github-coordinator-release migrate-launchd [--dry-run] [--label <label>]...
+#   bin/github-coordinator-release restart  [--label <label>]...
+#   bin/github-coordinator-release deploy   [--ref <git-ref>] [--no-restart]
+#
+# Default ref: origin/main. Releases live in
+# ${FRONTALIERE_GH_RELEASE_ROOT:-~/.local/share/frontaliere/github-coordinator}
+# (no spaces, so launchd shell strings need no quoting gymnastics).
+
+set -eu
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+WORKSPACE="${WORKSPACE:-$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || (cd "$script_dir/.." && pwd -P))}"
+# A linked worktree deploys from the main checkout's object store; the path
+# that launchd and rc-env.sh need is the main workspace, not the worktree.
+common_dir="$(git -C "$WORKSPACE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$common_dir" ] && [ "$(basename "$common_dir")" = ".git" ]; then
+  WORKSPACE="$(dirname "$common_dir")"
+fi
+RELEASE_ROOT="${FRONTALIERE_GH_RELEASE_ROOT:-$HOME/.local/share/frontaliere/github-coordinator}"
+RELEASES="$RELEASE_ROOT/releases"
+CURRENT="$RELEASE_ROOT/current"
+STATE_DIR="${FRONTALIERE_GH_STATE_DIR:-$HOME/Library/Application Support/frontaliere}"
+AGENTS_DIR="${FRONTALIERE_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+DOMAIN="gui/$(id -u)"
+LABELS="ch.frontaliere.github-coordinator-default ch.frontaliere.github-coordinator-nanako ch.frontaliere.github-webhook-default ch.frontaliere.github-webhook-nanako ch.frontaliere.github-coordinator-health"
+
+die() { echo "github-coordinator-release: $*" >&2; exit 1; }
+note() { echo "github-coordinator-release: $*" >&2; }
+
+resolve_sha() {
+  git -C "$WORKSPACE" rev-parse --verify "$1^{commit}" 2>/dev/null || die "ref non risolvibile: $1"
+}
+
+current_sha() {
+  if [ -L "$CURRENT" ]; then basename "$(readlink "$CURRENT")"; fi
+}
+
+install_release() {
+  ref="$1"
+  sha="$(resolve_sha "$ref")"
+  target="$RELEASES/$sha"
+  if [ -d "$target" ]; then
+    note "release gia' presente: $sha"
+    echo "$sha"
+    return 0
+  fi
+  git -C "$WORKSPACE" cat-file -e "$sha:bin/github-coordinator.mjs" 2>/dev/null \
+    || die "$sha non contiene bin/github-coordinator.mjs"
+  mkdir -p "$RELEASES"
+  staging="$RELEASES/.staging-$sha-$$"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  git -C "$WORKSPACE" archive --format=tar "$sha" bin | tar -x -C "$staging"
+  printf '{"sha":"%s","ref":"%s","installedAt":"%s","workspace":"%s"}\n' \
+    "$sha" "$ref" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WORKSPACE" > "$staging/RELEASE.json"
+  node --check "$staging/bin/github-coordinator.mjs" >/dev/null || die "sintassi non valida in $sha"
+  # Read-only: an edit in place would recreate the very reload this avoids.
+  chmod -R a-w "$staging/bin"
+  mv "$staging" "$target"
+  note "release installata: $target"
+  echo "$sha"
+}
+
+activate_release() {
+  sha="$1"
+  [ -d "$RELEASES/$sha/bin" ] || die "release assente: $sha (esegui install)"
+  link="$RELEASE_ROOT/.current-$$"
+  rm -f "$link"
+  ln -s "releases/$sha" "$link"
+  # rename(2) replaces the symlink atomically; `ln -sfn` is unlink + symlink.
+  node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$link" "$CURRENT"
+  note "current -> releases/$sha"
+}
+
+label_plist() { echo "$AGENTS_DIR/$1.plist"; }
+
+# Rewrites one existing plist so it runs from $CURRENT. Keys that are not the
+# program path or the release environment are preserved as they are.
+render_plist() {
+  label="$1"
+  source_plist="$2"
+  output="$3"
+  json="$output.json"
+  plutil -convert json -o "$json" "$source_plist"
+  node - "$json" "$label" "$WORKSPACE" "$CURRENT" <<'NODE'
+const fs = require('node:fs');
+const [file, label, workspace, current] = process.argv.slice(2);
+const plist = JSON.parse(fs.readFileSync(file, 'utf8'));
+const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Any previous program path: the workspace checkout or an older release root.
+const binPattern = new RegExp(`(?:${escape(workspace)}|${escape(current)})/bin/([A-Za-z0-9._-]+)`, 'g');
+const rewrite = (value) => value.replace(binPattern, (_match, name) => `${current}/bin/${name}`);
+if (!Array.isArray(plist.ProgramArguments)) throw new Error(`${label}: ProgramArguments mancante`);
+plist.ProgramArguments = plist.ProgramArguments.map((value) => rewrite(String(value)));
+if (!plist.ProgramArguments.some((value) => value.includes(`${current}/bin/`))) {
+  throw new Error(`${label}: nessun percorso bin/ da riscrivere`);
+}
+plist.EnvironmentVariables = { ...(plist.EnvironmentVariables || {}), WORKSPACE: workspace };
+const isHealth = label === 'ch.frontaliere.github-coordinator-health';
+if (label.startsWith('ch.frontaliere.github-coordinator-') && !isHealth) {
+  plist.EnvironmentVariables.FRONTALIERE_GH_SUPERVISED = '1';
+}
+// ProcessType=Background clamps the task to the darwin background band
+// (priority 4, throttled I/O). Under a load average of ~88 the coordinator
+// got 2 s of CPU in 12 min: every agent's gh call timed out and webhooks were
+// answered with 500. The control plane uses little CPU but every agent waits
+// on it synchronously, so it runs as Interactive; the periodic probe as
+// Standard.
+plist.ProcessType = isHealth ? 'Standard' : 'Interactive';
+plist.WorkingDirectory = workspace;
+fs.writeFileSync(file, `${JSON.stringify(plist, null, 2)}\n`);
+NODE
+  plutil -convert xml1 -o "$output" "$json"
+  rm -f "$json"
+  plutil -lint "$output" >/dev/null
+}
+
+service_pid() {
+  launchctl print "$DOMAIN/$1" 2>/dev/null | awk '/^\tpid = /{print $3; exit}'
+}
+
+owner_pid() {
+  sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$STATE_DIR/github-coordinator-$1.sock.owner" 2>/dev/null || true
+}
+
+ping_ms() {
+  node - "$STATE_DIR/github-coordinator-$1.sock" <<'NODE'
+const { createConnection } = require('node:net');
+const started = Date.now();
+const socket = createConnection(process.argv[2]);
+let buffer = '';
+const timer = setTimeout(() => { socket.destroy(); process.exit(2); }, 3000);
+socket.on('connect', () => socket.write(`${JSON.stringify({ type: 'ping', compact: true })}\n`));
+socket.on('data', (chunk) => {
+  buffer += chunk;
+  if (!buffer.includes('\n')) return;
+  clearTimeout(timer);
+  try { JSON.parse(buffer.slice(0, buffer.indexOf('\n'))); } catch { process.exit(3); }
+  console.log(Date.now() - started);
+  socket.end();
+  process.exit(0);
+});
+socket.on('error', () => { clearTimeout(timer); process.exit(1); });
+NODE
+}
+
+webhook_port() {
+  case "$1" in
+    *-default) echo 18787 ;;
+    *-nanako) echo 18788 ;;
+  esac
+}
+
+# Waits until the service answers from a process other than $2.
+verify_service() {
+  label="$1"
+  previous="$2"
+  deadline=$(( $(date +%s) + 60 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    case "$label" in
+      ch.frontaliere.github-coordinator-health)
+        note "$label caricato (job a intervallo)"
+        return 0
+        ;;
+      ch.frontaliere.github-coordinator-*)
+        identity="${label#ch.frontaliere.github-coordinator-}"
+        owner="$(owner_pid "$identity")"
+        service="$(service_pid "$label")"
+        # The previous process may still hold the lock for a moment after
+        # kickstart/bootout: only a different owner proves the handover.
+        if [ -n "$owner" ] && [ "$owner" != "$previous" ] && ms="$(ping_ms "$identity" 2>/dev/null)"; then
+          if [ "$owner" = "$service" ]; then
+            note "$label: owner pid $owner (launchd), ping ${ms} ms"
+          else
+            note "$label: ATTENZIONE socket servito da pid $owner fuori da launchd (launchd pid ${service:-nessuno}); ping ${ms} ms"
+          fi
+          return 0
+        fi
+        ;;
+      ch.frontaliere.github-webhook-*)
+        port="$(webhook_port "$label")"
+        service="$(service_pid "$label")"
+        if [ -n "$service" ] && [ "$service" != "$previous" ] \
+          && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+          note "$label: pid $service in ascolto su $port"
+          return 0
+        fi
+        ;;
+    esac
+    sleep 1
+  done
+  return 1
+}
+
+bootstrap_with_retry() {
+  plist="$1"
+  attempt=0
+  while [ "$attempt" -lt 10 ]; do
+    if launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then return 0; fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  launchctl bootstrap "$DOMAIN" "$plist"
+}
+
+selected_labels() {
+  if [ -n "${SELECTED:-}" ]; then echo "$SELECTED"; else echo "$LABELS"; fi
+}
+
+migrate_launchd() {
+  [ -L "$CURRENT" ] || die "nessuna release attiva: esegui deploy --no-restart prima"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup="$RELEASE_ROOT/launchd-backup/$stamp"
+  staging="$RELEASE_ROOT/launchd-staging/$stamp"
+  mkdir -p "$backup" "$staging"
+  for label in $(selected_labels); do
+    plist="$(label_plist "$label")"
+    [ -f "$plist" ] || die "plist assente: $plist"
+    render_plist "$label" "$plist" "$staging/$label.plist"
+  done
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    for label in $(selected_labels); do
+      echo "== $label"
+      diff -u "$(label_plist "$label")" "$staging/$label.plist" || true
+    done
+    return 0
+  fi
+  for label in $(selected_labels); do
+    plist="$(label_plist "$label")"
+    cp -p "$plist" "$backup/$label.plist"
+    previous="$(service_pid "$label")"
+    note "$label: bootout (pid ${previous:-nessuno})"
+    launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    cp "$staging/$label.plist" "$plist"
+    if ! bootstrap_with_retry "$plist"; then
+      note "$label: bootstrap fallito, ripristino il plist precedente"
+      cp -p "$backup/$label.plist" "$plist"
+      bootstrap_with_retry "$plist" || true
+      die "$label: migrazione annullata (backup in $backup)"
+    fi
+    verify_service "$label" "$previous" || die "$label: nessuna risposta entro 60 s (backup in $backup)"
+  done
+  note "plist migrati; backup in $backup"
+}
+
+restart_services() {
+  for label in $(selected_labels); do
+    previous="$(service_pid "$label")"
+    note "$label: kickstart -k (pid ${previous:-nessuno})"
+    launchctl kickstart -k "$DOMAIN/$label"
+    verify_service "$label" "$previous" || die "$label: nessuna risposta entro 60 s"
+  done
+}
+
+show_status() {
+  echo "workspace: $WORKSPACE"
+  echo "release root: $RELEASE_ROOT"
+  echo "current: $(current_sha || true)"
+  if [ -d "$RELEASES" ]; then
+    for release in "$RELEASES"/*; do
+      [ -d "$release" ] && echo "  release $(basename "$release")"
+    done
+  fi
+  for label in $LABELS; do
+    plist="$(label_plist "$label")"
+    program="$(plutil -extract ProgramArguments json -o - "$plist" 2>/dev/null | tr -d '\n' | cut -c1-160)"
+    echo "$label pid=$(service_pid "$label") program=$program"
+  done
+  for identity in default nanako; do
+    echo "owner $identity: pid=$(owner_pid "$identity")"
+  done
+}
+
+command="${1:-status}"
+[ "$#" -gt 0 ] && shift
+REF="origin/main"
+RESTART=1
+DRY_RUN=0
+SELECTED=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ref) REF="$2"; shift 2 ;;
+    --no-restart) RESTART=0; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --label) SELECTED="${SELECTED:+$SELECTED }$2"; shift 2 ;;
+    *) ARG="$1"; shift ;;
+  esac
+done
+
+case "$command" in
+  status) show_status ;;
+  install) install_release "$REF" >/dev/null ;;
+  activate) activate_release "${ARG:-$(resolve_sha "$REF")}" ;;
+  migrate-launchd) migrate_launchd ;;
+  restart) restart_services ;;
+  deploy)
+    sha="$(install_release "$REF")"
+    activate_release "$sha"
+    if [ "$RESTART" = "1" ]; then restart_services; fi
+    ;;
+  *) die "comando sconosciuto: $command" ;;
+esac

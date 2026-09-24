@@ -12,6 +12,10 @@ try {
     stateFile: workerData.stateFile,
     legacyStateFile: workerData.legacyStateFile || null,
     webhookSecret: null,
+    // The worker only reads. A legacy migration is persisted by the owner
+    // process once it holds the lock, never by this unguarded bootstrap.
+    canPersist: () => false,
+    deferMigrationPersist: true,
   });
   parentPort.postMessage({ ok: true, state: broker.state });
 } catch (error) {
