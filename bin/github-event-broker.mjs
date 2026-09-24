@@ -1333,7 +1333,13 @@ export class GitHubEventBroker {
       .length;
   }
 
-  summary({ listenerAttached = null, listenerInfo = null, includePendingDetails = true, ...filters } = {}) {
+  summary({
+    listenerAttached = null,
+    listenerInfo = null,
+    includePendingDetails = true,
+    compact = false,
+    ...filters
+  } = {}) {
     if (this.prune()) this.persist();
     const allSubscriptions = this.state.subscriptions;
     const nowMs = this.now();
@@ -1347,19 +1353,42 @@ export class GitHubEventBroker {
       if (!latencyByResource.has(sample.resource)) latencyByResource.set(sample.resource, []);
       latencyByResource.get(sample.resource).push(sample);
     }
-    const publicSubscriptions = subscriptions.map((subscription) => this.publicSubscription(subscription, {
-      nowMs,
-      listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
-      listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
-    }));
+    // The coordinator's liveness/status probe is called by every local client.
+    // Do not build a public representation (and its historical ETA sort) for
+    // every persisted subscription when the caller only needs counters.
+    const publicSubscriptions = compact
+      ? null
+      : subscriptions.map((subscription) => this.publicSubscription(subscription, {
+        nowMs,
+        listenerAttached: listenerAttachedValue(listenerAttached, subscription.id),
+        listenerInfo: listenerInfoValue(listenerInfo, subscription.id),
+      }));
     const listenerCount = listenerAttached === null
       ? null
-      : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
-    const stalledSubscriptions = publicSubscriptions.filter(({ targetStalled }) => targetStalled);
+      : compact
+        ? subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) === true).length
+        : publicSubscriptions.filter(({ listenerAttached: attached }) => attached === true).length;
+    const stalledSubscriptions = compact
+      ? subscriptions.filter((subscription) => subscriptionIsStalled(subscription, nowMs))
+      : publicSubscriptions.filter(({ targetStalled }) => targetStalled);
     const { pendingEvents, pendingSubscriptionCount, oldestPendingAt } = pendingEventSummary(subscriptions);
     const orphanedSubscriptions = subscriptions.filter(({ id }) => listenerAttachedValue(listenerAttached, id) !== true).length;
-    const listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
-    const listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
+    let listenerAliveSubscriptions = 0;
+    let listenerDeadSubscriptions = 0;
+    if (compact) {
+      for (const subscription of subscriptions) {
+        const liveness = listenerLiveness(
+          listenerAttachedValue(listenerAttached, subscription.id),
+          listenerInfoValue(listenerInfo, subscription.id),
+          nowMs,
+        );
+        if (liveness.alive === true) listenerAliveSubscriptions += 1;
+        if (liveness.dead === true) listenerDeadSubscriptions += 1;
+      }
+    } else {
+      listenerAliveSubscriptions = publicSubscriptions.filter(({ listenerAlive }) => listenerAlive === true).length;
+      listenerDeadSubscriptions = publicSubscriptions.filter(({ listenerDead }) => listenerDead === true).length;
+    }
     const duplicateSubscriptions = duplicateGroups.reduce((total, group) => total + group.count - 1, 0);
     const alerts = [];
     if (pendingEvents > 0) alerts.push({ code: 'pending_events', count: pendingEvents });
@@ -1370,9 +1399,9 @@ export class GitHubEventBroker {
     if (stalledSubscriptions.length > 0) {
       alerts.push({ code: 'stalled_subscriptions', scope: 'target', count: stalledSubscriptions.length });
     }
-    const summaryLine = publicSubscriptions.length === 1
+    const summaryLine = !compact && publicSubscriptions.length === 1
       ? publicSubscriptions[0].compactLine
-      : String(publicSubscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
+      : String(subscriptions.length) + ' subscription · ' + String(listenerCount === null ? 'n/d' : listenerCount)
         + ' listener attivi · ' + String(pendingEvents) + ' eventi pending';
     return {
       stateFile: this.stateFile,

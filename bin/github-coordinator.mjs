@@ -78,6 +78,8 @@ export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
 export const EVENT_SWEEP_MAX_PER_RUN = 10;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
 export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
+export const SCHEDULED_GC_BOOTSTRAP_DELAY_MS = 250;
+export const SOCKET_IDLE_TIMEOUT_MS = 10 * 1_000;
 
 function reconcilableSubscription(subscription) {
   if (subscription.resource === 'pull_request') return Boolean(subscription.number);
@@ -267,14 +269,34 @@ function readOwnerRecord(lockPath) {
     return parsed;
   } catch (error) {
     if (error.code === 'ENOENT') return null;
+    if (error instanceof SyntaxError) {
+      throw Object.assign(new Error('coordinator owner lock is not valid JSON'), {
+        code: 'coordinator_owner_lock_invalid',
+        cause: error,
+      });
+    }
     throw error;
   }
 }
 
 function claimCoordinatorOwner(identity, socket) {
   const lockPath = coordinatorOwnerLockPath(identity);
-  const existing = readOwnerRecord(lockPath);
-  if (existing && processIsAlive(existing.pid)) return null;
+  let existing;
+  try {
+    existing = readOwnerRecord(lockPath);
+  } catch (error) {
+    if (error.code !== 'coordinator_owner_lock_invalid') throw error;
+    // A killed process can leave a truncated owner record behind. It cannot
+    // identify a live owner, so treat it exactly like a stale lock.
+    try { unlinkSync(lockPath); } catch (unlinkError) {
+      if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    }
+    existing = null;
+  }
+  if (existing
+    && existing.identity === identity
+    && existing.socket === socket
+    && processIsAlive(existing.pid)) return null;
   if (existing) unlinkSync(lockPath);
   try {
     const fd = openSync(lockPath, 'wx', 0o600);
@@ -287,8 +309,20 @@ function claimCoordinatorOwner(identity, socket) {
     return { fd, lockPath, socket };
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    const competing = readOwnerRecord(lockPath);
-    if (competing && processIsAlive(competing.pid)) return null;
+    let competing;
+    try {
+      competing = readOwnerRecord(lockPath);
+    } catch (readError) {
+      if (readError.code !== 'coordinator_owner_lock_invalid') throw readError;
+      try { unlinkSync(lockPath); } catch (unlinkError) {
+        if (unlinkError.code !== 'ENOENT') throw unlinkError;
+      }
+      return claimCoordinatorOwner(identity, socket);
+    }
+    if (competing
+      && competing.identity === identity
+      && competing.socket === socket
+      && processIsAlive(competing.pid)) return null;
     if (competing) unlinkSync(lockPath);
     return claimCoordinatorOwner(identity, socket);
   }
@@ -1013,6 +1047,7 @@ export class GitHubCoordinator {
       socketConnections: 0,
       socketErrors: 0,
       socketDisconnects: 0,
+      socketTimeouts: 0,
       eventListenerHeartbeats: 0,
       eventListenerTimeouts: 0,
       sourceReloads: 0,
@@ -1025,6 +1060,8 @@ export class GitHubCoordinator {
     this.lastScheduledGc = null;
     this.scheduledGcBootstrapAttempted = false;
     this.scheduledGcBootstrapInProgress = false;
+    this.scheduledGcBootstrapTimer = null;
+    this.lastScheduledGcLogKey = null;
   }
 
   status({ compact = false } = {}) {
@@ -1036,6 +1073,7 @@ export class GitHubCoordinator {
         listenerAttached: this.eventListenerInspector,
         listenerInfo: this.eventListenerInfoInspector,
         includePendingDetails: !compact,
+        compact,
       });
       const signatureFailures = Number(this.eventBroker.metrics.webhookSignatureFailures || 0);
       if (compact && signatureFailures === 0 && summary.metrics) {
@@ -1221,17 +1259,23 @@ export class GitHubCoordinator {
       || this.scheduledGcBootstrapInProgress) return;
     this.scheduledGcBootstrapAttempted = true;
     this.scheduledGcBootstrapInProgress = true;
-    try {
-      // This is a local, dry-run inspection only. Pending events remain
-      // protected and no GitHub/network operation is performed.
-      this.scheduledEventGarbageCollection();
-    } catch (error) {
-      // A first status probe must stay useful even if the local persisted
-      // state is temporarily unreadable; the normal scheduled timer retries.
-      logStructuredError('event_initial_gc_failed', error);
-    } finally {
-      this.scheduledGcBootstrapInProgress = false;
-    }
+    // This is a local, dry-run inspection only. Pending events remain
+    // protected and no GitHub/network operation is performed. Keep it out of
+    // the status RPC: the persisted backlog can be large and synchronous
+    // sorting there makes every local socket client wait behind the scan.
+    this.scheduledGcBootstrapTimer = setTimeout(() => {
+      this.scheduledGcBootstrapTimer = null;
+      try {
+        this.scheduledEventGarbageCollection();
+      } catch (error) {
+        // A first status probe must stay useful even if the local persisted
+        // state is temporarily unreadable; the normal scheduled timer retries.
+        logStructuredError('event_initial_gc_failed', error);
+      } finally {
+        this.scheduledGcBootstrapInProgress = false;
+      }
+    }, SCHEDULED_GC_BOOTSTRAP_DELAY_MS);
+    this.scheduledGcBootstrapTimer.unref?.();
   }
 
   setEventListenerCountInspector(inspector) {
@@ -1339,6 +1383,7 @@ export class GitHubCoordinator {
       },
       ...this.eventBroker.summary({
         ...options,
+        compact: options.compact !== false,
         includePendingDetails: options.includePendingDetails === true,
         listenerAttached: this.eventListenerInspector,
         listenerInfo: this.eventListenerInfoInspector,
@@ -1597,18 +1642,29 @@ export class GitHubCoordinator {
         .sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null,
       nextAction: 'reattach_or_explicit_ack',
     };
+    const orphanedWithPendingEventCount = orphanedWithPending.reduce(
+      (total, subscription) => total + Number(subscription.pendingCount || 1),
+      0,
+    );
+    const logKey = JSON.stringify({
+      orphanCandidateCount: report.candidateCount,
+      orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
+      orphanedWithPendingEventCount,
+      orphanedWithPendingOldestAt: this.lastScheduledGc.orphanedWithPendingOldestAt,
+    });
     if (report.candidateCount > 0 || orphanedWithPending.length > 0) {
+      if (logKey === this.lastScheduledGcLogKey) return this.lastScheduledGc;
+      this.lastScheduledGcLogKey = logKey;
       logStructuredError('event_gc_orphans_detected', new Error('orphaned event subscriptions'), {
         identity: this.identity,
         orphanCandidateCount: report.candidateCount,
         orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
-        orphanedWithPendingEventCount: orphanedWithPending.reduce(
-          (total, subscription) => total + Number(subscription.pendingCount || 1),
-          0,
-        ),
+        orphanedWithPendingEventCount,
         orphanedWithPendingOldestAt: this.lastScheduledGc.orphanedWithPendingOldestAt,
         nextAction: 'reattach_or_explicit_ack',
       });
+    } else {
+      this.lastScheduledGcLogKey = null;
     }
     return this.lastScheduledGc;
   }
@@ -2510,6 +2566,12 @@ function readTokenAndStart(identity) {
       destroyConnection(connection);
     }
   };
+  const closeIdleConnection = (connection) => {
+    if (closingConnections.has(connection) || connection.destroyed) return;
+    coordinator.metrics.socketTimeouts += 1;
+    detachConnectionListeners(connection);
+    destroyConnection(connection);
+  };
   coordinator.setEventListenerInspector((subscriptionId) => (eventListeners.get(String(subscriptionId))?.size || 0) > 0);
   coordinator.setEventListenerCountInspector(
     () => [...eventListeners.values()].reduce((total, listeners) => total + listeners.size, 0),
@@ -2753,6 +2815,12 @@ function readTokenAndStart(identity) {
   const server = createServer((connection) => {
     connections.add(connection);
     coordinator.metrics.socketConnections += 1;
+    connection.setTimeout(SOCKET_IDLE_TIMEOUT_MS, () => {
+      // Listener sockets are intentionally long-lived. A regular RPC socket
+      // must, however, either send its JSON line or disappear; otherwise a
+      // client killed during startup leaves an FD around forever.
+      if (!handled && !listener) closeIdleConnection(connection);
+    });
     let buffer = '';
     const decodeChunk = createUtf8ChunkDecoder();
     let handled = false;
@@ -2786,6 +2854,7 @@ function readTokenAndStart(identity) {
           return;
         }
         handled = true;
+        connection.setTimeout(0);
         if (request.type === 'event-listen') {
           listener = attachEventListener(connection, request);
           finishRequest();
