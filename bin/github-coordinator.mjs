@@ -43,7 +43,6 @@ import {
   GitHubEventBroker,
   normalizeReconciliationEvent,
   shaMatches,
-  workflowSelectorMatchesRun,
 } from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 
@@ -873,7 +872,16 @@ function workflowSelectorForms(value) {
 function workflowSelectorMatchesRun(run, selector) {
   const expected = new Set(workflowSelectorForms(selector));
   if (expected.size === 0) return true;
-  const candidates = [run?.name, run?.workflow_name, run?.path, run?.workflow_path, run?.workflow_id]
+  const candidates = [
+    run?.workflow,
+    run?.name,
+    run?.workflow_name,
+    run?.workflowPath,
+    run?.workflow_path,
+    run?.path,
+    run?.workflowId,
+    run?.workflow_id,
+  ]
     .flatMap((value) => workflowSelectorForms(value));
   return candidates.some((candidate) => expected.has(candidate));
 }
