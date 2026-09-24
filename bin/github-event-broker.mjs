@@ -11,7 +11,10 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -40,6 +43,20 @@ function brokerError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function syncDirectory(directory) {
+  let fd = null;
+  try {
+    fd = openSync(directory, 'r');
+    fsyncSync(fd);
+  } catch {
+    // Directory fsync is best effort (not supported everywhere).
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
 }
 
 function unique(values) {
@@ -1114,6 +1131,7 @@ export class GitHubEventBroker {
     legacyStateFile = null,
     initialState = null,
     canPersist = null,
+    deferMigrationPersist = false,
   }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
@@ -1141,7 +1159,7 @@ export class GitHubEventBroker {
     // worker has already validated/normalized this snapshot; the ordinary
     // synchronous path remains the default for library callers and tests.
     this.state = initialState || this.loadState();
-    if (this.state.migratedLegacyFiles?.length > 0) this.persist();
+    if (this.state.migratedLegacyFiles?.length > 0 && !deferMigrationPersist) this.persist();
   }
 
   loadState() {
@@ -1245,12 +1263,24 @@ export class GitHubEventBroker {
       );
     }
     const temporary = `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
+    let fd = null;
     try {
-      writeFileSync(temporary, `${JSON.stringify(this.state)}\n`, { encoding: 'utf8', mode: 0o600 });
+      // fsync before rename: after a crash or a full disk (ENOSPC was seen in
+      // production) the state file is either the old or the new snapshot,
+      // never an empty or truncated one that would fail the next load.
+      fd = openSync(temporary, 'wx', 0o600);
+      writeFileSync(fd, `${JSON.stringify(this.state)}\n`, { encoding: 'utf8' });
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
       chmodSync(temporary, 0o600);
       renameSync(temporary, this.stateFile);
       chmodSync(this.stateFile, 0o600);
+      syncDirectory(dirname(this.stateFile));
     } catch (error) {
+      if (fd !== null) {
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
       try { unlinkSync(temporary); } catch { /* no temporary file */ }
       throw error;
     }
@@ -1580,11 +1610,29 @@ export class GitHubEventBroker {
     return this.status().subscriptions;
   }
 
-  unsubscribe(subscriptionId) {
+  unsubscribe(subscriptionId, { agentId = null } = {}) {
+    const id = String(subscriptionId || '');
+    const subscription = this.state.subscriptions.find((candidate) => candidate.id === id);
+    if (subscription && agentId && subscription.shared) {
+      // A shared subscription belongs to every agent that joined it. An agent
+      // leaving (e.g. `events wait` cleaning up after an error) must not take
+      // it away from the others, whose listeners would otherwise reconnect to
+      // a subscription that no longer exists.
+      const leaving = String(agentId);
+      const others = unique([subscription.agentId, ...(subscription.sharedAgentIds || [])])
+        .filter((participant) => participant && String(participant) !== leaving);
+      if (others.length > 0) {
+        const before = (subscription.sharedAgentIds || []).length;
+        subscription.sharedAgentIds = (subscription.sharedAgentIds || [])
+          .filter((participant) => String(participant) !== leaving);
+        if (subscription.sharedAgentIds.length !== before) this.persist();
+        return { ok: true, subscriptionId: id, removed: false, detached: true, remainingAgents: others.length };
+      }
+    }
     const before = this.state.subscriptions.length;
-    this.state.subscriptions = this.state.subscriptions.filter(({ id }) => id !== String(subscriptionId || ''));
+    this.state.subscriptions = this.state.subscriptions.filter((candidate) => candidate.id !== id);
     if (before !== this.state.subscriptions.length) this.persist();
-    return { ok: true, subscriptionId: String(subscriptionId || ''), removed: before !== this.state.subscriptions.length };
+    return { ok: true, subscriptionId: id, removed: before !== this.state.subscriptions.length };
   }
 
   garbageCollect({ listenerAttached = null, olderThanMs = DEFAULT_ORPHAN_GRACE_MS, apply = false, includeUnique = false } = {}) {

@@ -21,7 +21,7 @@ import {
   standbyForCoordinatorOwner,
   supervisedStandbyEnabled,
 } from '../bin/github-coordinator.mjs';
-import { workflowSelectorMatchesRun } from '../bin/github-event-broker.mjs';
+import { GitHubEventBroker, workflowSelectorMatchesRun } from '../bin/github-event-broker.mjs';
 import { waitForCoordinatorStop } from '../bin/github-coordinator-client.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -303,3 +303,131 @@ test('github-coordinator-release riscrive i plist verso la release corrente in d
     rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+test('unsubscribe con agentId stacca solo quell agente da una subscription condivisa', () => {
+  const directory = mkdtempSync('/tmp/frontaliere-broker-unsubscribe-');
+  try {
+    const broker = new GitHubEventBroker({ stateFile: join(directory, 'events.json'), webhookSecret: 'secret' });
+    const spec = { repo: 'owner/repo', resource: 'pull_request', number: 7, waitFor: ['merged'], shared: true };
+    const first = broker.subscribe({ ...spec, agentId: 'agent-a' });
+    const joined = broker.subscribe({ ...spec, agentId: 'agent-b' });
+    assert.equal(joined.id, first.id);
+    assert.equal(joined.sharedJoin, true);
+
+    const detached = broker.unsubscribe(first.id, { agentId: 'agent-b' });
+    assert.equal(detached.removed, false);
+    assert.equal(detached.detached, true);
+    assert.ok(broker.getSubscriptionRecord(first.id), 'la subscription resta per agent-a');
+
+    const last = broker.unsubscribe(first.id, { agentId: 'agent-a' });
+    assert.equal(last.removed, true);
+    assert.equal(broker.getSubscriptionRecord(first.id), null);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('il broker del worker di load non riscrive lo stato migrato', () => {
+  const directory = mkdtempSync('/tmp/frontaliere-broker-loader-');
+  try {
+    const stateFile = join(directory, 'events.json');
+    const seed = new GitHubEventBroker({ stateFile, webhookSecret: 'secret' });
+    seed.subscribe({ repo: 'owner/repo', resource: 'pull_request', number: 1, waitFor: ['merged'], agentId: 'a' });
+    const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    state.migratedLegacyFiles = ['/legacy/github-events-test.json'];
+    writeFileSync(stateFile, `${JSON.stringify(state)}\n`);
+    const before = statSync(stateFile).mtimeMs;
+    const bytes = readFileSync(stateFile, 'utf8');
+    const loaded = new GitHubEventBroker({
+      stateFile,
+      webhookSecret: null,
+      canPersist: () => false,
+      deferMigrationPersist: true,
+    });
+    assert.equal(loaded.state.subscriptions.length, 1);
+    assert.equal(statSync(stateFile).mtimeMs, before);
+    assert.equal(readFileSync(stateFile, 'utf8'), bytes);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function rawRequest(identity, request, timeoutMs = 5_000) {
+  const socket = join(process.env.FRONTALIERE_GH_STATE_DIR, `github-coordinator-${identity}.sock`);
+  return new Promise((resolvePromise, rejectPromise) => {
+    const started = Date.now();
+    const connection = createConnection(socket);
+    let buffer = '';
+    const timer = setTimeout(() => {
+      connection.destroy();
+      rejectPromise(new Error(`timeout ${request.type}`));
+    }, timeoutMs);
+    connection.on('connect', () => connection.write(`${JSON.stringify(request)}\n`));
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes('\n')) return;
+      clearTimeout(timer);
+      connection.end();
+      const line = buffer.slice(0, buffer.indexOf('\n'));
+      resolvePromise({ response: JSON.parse(line), bytes: line.length, ms: Date.now() - started });
+    });
+    connection.on('error', (error) => { clearTimeout(timer); rejectPromise(error); });
+  });
+}
+
+test('la barriera di readiness degli eventi risponde con lo status compatto', withStateDirectory(
+  'frontaliere-coordinator-readiness',
+  async (stateDirectory, children) => {
+    const identity = `readiness-${process.pid}`;
+    const child = startServe(stateDirectory, identity);
+    children.push(child);
+    await waitUntil(() => pingOk(identity), 8_000, () => child.stderrText);
+    const barrier = await rawRequest(identity, { type: 'status', compact: true, waitForEventBroker: true });
+    assert.equal(barrier.response.ok, true);
+    assert.equal(barrier.response.status.events.webhookSecretConfigured, true);
+    assert.equal(barrier.response.status.events.loading, false);
+    assert.equal(barrier.response.status.events.subscriptions, undefined);
+    const full = await rawRequest(identity, { type: 'status' });
+    assert.ok(Array.isArray(full.response.status.events.subscriptions), 'lo status completo resta disponibile');
+    child.kill('SIGTERM');
+    await child.exited;
+  },
+));
+
+// Replay of the production backlog: set FRONTALIERE_GH_REPLAY_STATE to a copy
+// of github-events-<identity>.json. Skipped when the snapshot is absent.
+test('replay: un backlog di produzione non blocca ping e non perde stato', {
+  skip: !process.env.FRONTALIERE_GH_REPLAY_STATE,
+}, withStateDirectory('frontaliere-coordinator-replay', async (stateDirectory, children) => {
+  const identity = `replay-${process.pid}`;
+  const stateFile = join(stateDirectory, `github-events-${identity}.json`);
+  writeFileSync(stateFile, readFileSync(process.env.FRONTALIERE_GH_REPLAY_STATE));
+  const original = JSON.parse(readFileSync(stateFile, 'utf8'));
+  const pendingOf = (state) => state.subscriptions.reduce((sum, item) => sum + (item.pending?.length || 0), 0);
+  const child = startServe(stateDirectory, identity);
+  children.push(child);
+  const pings = [];
+  const deadline = Date.now() + 20_000;
+  let ready = null;
+  while (Date.now() < deadline && !ready) {
+    try {
+      const ping = await rawRequest(identity, { type: 'ping', compact: true }, 3_000);
+      pings.push(ping.ms);
+      if (ping.response.status.events.loading === false) {
+        ready = await rawRequest(identity, { type: 'status', compact: true, waitForEventBroker: true }, 3_000);
+      }
+    } catch {
+      await sleep(20);
+    }
+  }
+  assert.ok(ready, `broker mai pronto: ${child.stderrText}`);
+  assert.ok(Math.max(...pings) < 1_000, `ping lenti durante il load: ${pings.join(',')}`);
+  assert.ok(ready.bytes < 8_192, `barriera troppo grande: ${ready.bytes} byte`);
+  child.kill('SIGTERM');
+  assert.deepEqual(await child.exited, { code: 0, signal: null });
+  const after = JSON.parse(readFileSync(stateFile, 'utf8'));
+  assert.equal(after.subscriptions.length, original.subscriptions.length);
+  assert.equal(pendingOf(after), pendingOf(original));
+  console.log(`replay: ${original.subscriptions.length} subscription, ${pendingOf(original)} pending, `
+    + `ping max ${Math.max(...pings)} ms su ${pings.length}, barriera ${ready.bytes} B in ${ready.ms} ms`);
+}));

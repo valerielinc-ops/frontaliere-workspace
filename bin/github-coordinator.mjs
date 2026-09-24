@@ -1709,10 +1709,10 @@ export class GitHubCoordinator {
     };
   }
 
-  eventUnsubscribe(subscriptionId) {
+  eventUnsubscribe(subscriptionId, { agentId = null } = {}) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
-    const result = this.eventBroker.unsubscribe(subscriptionId);
-    this.eventNotifier?.(String(subscriptionId), { removed: true });
+    const result = this.eventBroker.unsubscribe(subscriptionId, { agentId });
+    if (result.removed) this.eventNotifier?.(String(subscriptionId), { removed: true });
     return result;
   }
 
@@ -3321,6 +3321,12 @@ function startWithOwnerLock(identity, socket, ownerLock) {
           // explicit diagnostic request and may wait for the broker.
           if (request.compact && request.waitForEventBroker !== true) {
             result = Promise.resolve({ ok: true, status: coordinator.status({ compact: true }) });
+          } else if (request.compact) {
+            // The event readiness barrier every `events listen` and reconnect
+            // runs: it needs the broker attached, not the backlog. Serializing
+            // the full status here (hundreds of subscriptions and pending
+            // events per call) turned a reconnect storm into 3 s timeouts.
+            result = eventBrokerReady.then(() => ({ ok: true, status: coordinator.status({ compact: true }) }));
           } else {
             result = eventBrokerReady.then(() => new Promise((resolvePromise) => {
               setImmediate(() => resolvePromise({
@@ -3350,7 +3356,9 @@ function startWithOwnerLock(identity, socket, ownerLock) {
         } else if (request.type === 'events-subscription-target') {
           result = eventBrokerReady.then(() => coordinator.eventSubscriptionTarget(request.options || {}));
         } else if (request.type === 'events-unsubscribe') {
-          result = eventBrokerReady.then(() => coordinator.eventUnsubscribe(request.subscriptionId));
+          result = eventBrokerReady.then(() => coordinator.eventUnsubscribe(request.subscriptionId, {
+            agentId: request.agentId || null,
+          }));
         } else if (request.type === 'events-renew') {
           result = eventBrokerReady.then(() => coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
         } else if (request.type === 'events-webhook') {

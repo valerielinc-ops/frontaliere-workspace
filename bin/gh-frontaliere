@@ -230,10 +230,16 @@ async function runWaitCommand(optionArgs, identity) {
     followLatest,
   };
   let currentSubscriptionId = subscriptionId;
+  // Only a subscription this invocation created on its own may be cleaned up:
+  // one passed with --subscription-id or joined from another agent's
+  // observer keeps serving those agents' listeners.
+  let ownsSubscription = false;
   let resumes = 0;
   while (true) {
     if (!currentSubscriptionId) {
-      currentSubscriptionId = (await subscribeToEvents(spec, { identity })).subscription.id;
+      const created = (await subscribeToEvents(spec, { identity })).subscription;
+      currentSubscriptionId = created.id;
+      ownsSubscription = created.sharedJoin !== true;
     }
     try {
       const event = await listenForEvent(currentSubscriptionId, {
@@ -256,8 +262,10 @@ async function runWaitCommand(optionArgs, identity) {
         currentSubscriptionId = null;
         continue;
       }
-      if (!keep) {
-        try { await unsubscribeFromEvents(currentSubscriptionId, { identity }); } catch { /* già scaduta o rimossa */ }
+      if (!keep && ownsSubscription) {
+        try {
+          await unsubscribeFromEvents(currentSubscriptionId, { identity, agentId });
+        } catch { /* già scaduta o rimossa */ }
       }
       throw error;
     }
