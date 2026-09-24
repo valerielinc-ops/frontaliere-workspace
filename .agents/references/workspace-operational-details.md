@@ -578,6 +578,41 @@ ed e' previsto dal design.
 
 Non clonare altri shard.
 
+## Leak kernel da script annidati (macOS 26.x)
+
+**Sintomo.** Memoria wired che cresce e non scende piu': il 2026-09-24 erano
+13 GB wired, swap quasi pieno e macchina in thrashing, senza nessun processo
+con RSS grande.
+
+**Zona.** `data_shared.kalloc.1024` fino a macOS 26.3 (su questo Mac, 26.2
+build 25C56), `data.kalloc.1024` da 26.4. Un elemento = ~1 KiB wired.
+
+**Meccanismo.** Un processo che discende, anche via fork o exec, da uno script
+`#!` ed esegue un altro script `#!` fa perdere al kernel ~1 KiB a ogni exec
+(Photon, 2026-08-07; anthropics/claude-code#66020; kubernetes/kubectl#1798).
+Il caso del 2026-09-24: tre loop bash orfani di un test hanno eseguito uno stub
+`#!` ~36 volte al secondo per 3,4 giorni, cioe' 10,9 milioni di elementi
+(10,6 GB). Il gocciolio normale della macchina e' ~32 MB/giorno.
+
+**Misura** (niente root: le colonne size valgono 0K, la 7a "cur inuse" no):
+
+```bash
+zprint | awk '$1=="data_shared.kalloc.1024"{print $7}'
+```
+
+**Sentinella.** `bin/kernel-leak-watch`, avviata ogni 15 minuti da
+`config/launchd/ch.frontaliere.kernel-leak-watch.plist` come
+`/bin/bash <path>` (cosi' non discende da un `#!` e non alimenta il leak). Scrive
+una riga per giro in `~/Library/Logs/frontaliere/kernel-leak-watch.tsv`; se il
+tasso supera 100.000 elementi/h o il totale 3.000.000, scrive
+`kernel-leak-watch.alert` nella stessa cartella con i sospetti (shell orfane
+con ppid 1 da almeno 30 minuti; padri con piu' PID nuovi in 5 secondi) e manda
+una notifica macOS al massimo ogni 6 ore. Non uccide processi.
+
+**Rimedio.** Fermare il loop blocca la crescita ma non restituisce niente:
+**solo il reboot libera la memoria**. Il bug risulta corretto in macOS 27.0
+secondo segnalazioni di utenti, non da note di rilascio Apple.
+
 ## Aggiungere un terzo repo qui dentro
 
 Procedura spostata nella skill `add-repo-workspace` (`.claude/skills/add-repo-workspace/SKILL.md`),
