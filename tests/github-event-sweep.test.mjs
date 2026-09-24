@@ -209,7 +209,7 @@ test('il gc programmato in dry-run segnala l evento pending senza listener e non
   }
 });
 
-test('lo status compatto espone i contatori pending senza materializzare i dettagli del gc', () => {
+test('lo status compatto è liveness-only e non materializza il backlog', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-compact-status-'));
   const { broker, coordinator } = makeCoordinator(stateDirectory);
   try {
@@ -236,9 +236,9 @@ test('lo status compatto espone i contatori pending senza materializzare i detta
     coordinator.scheduledEventGarbageCollection();
 
     const compact = coordinator.status({ compact: true });
-    assert.equal(compact.events.pendingEvents, 1);
-    assert.equal(compact.events.pendingSubscriptionCount, 1);
-    assert.equal(compact.events.oldestPendingAt, receivedAt);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'subscriptionCount'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingEvents'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingSubscriptionCount'), false);
     assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingEventDetails'), false);
     assert.equal(Object.prototype.hasOwnProperty.call(compact.events.scheduledGc, 'orphanedWithPending'), false);
     assert.equal(compact.events.scheduledGc.orphanedWithPendingSubscriptionCount, 1);
@@ -246,6 +246,9 @@ test('lo status compatto espone i contatori pending senza materializzare i detta
     assert.equal(compact.events.scheduledGc.nextAction, 'reattach_or_explicit_ack');
 
     const eventSummary = coordinator.eventSubscriptionSummary();
+    assert.equal(eventSummary.pendingEvents, 1);
+    assert.equal(eventSummary.pendingSubscriptionCount, 1);
+    assert.equal(eventSummary.oldestPendingAt, receivedAt);
     assert.equal(Object.prototype.hasOwnProperty.call(eventSummary, 'pendingEventDetails'), false);
 
     const full = coordinator.status();
@@ -290,9 +293,8 @@ test('il primo status dopo un riavvio non avvia GC sincrona e il bootstrap post-
 
     const compact = coordinator.status({ compact: true });
     assert.equal(coordinator.lastScheduledGc, null, 'status non deve avviare la scansione GC');
-    assert.equal(compact.events.pendingEvents, 1);
-    assert.equal(compact.events.pendingSubscriptionCount, 1);
-    assert.equal(compact.events.oldestPendingAt, receivedAt);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingEvents'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingSubscriptionCount'), false);
     assert.equal(broker.getSubscriptionRecord(created.id).pending.length, 1, 'il probe non deve ackare o rimuovere pending');
 
     coordinator.ensureScheduledEventGarbageCollection();
@@ -308,8 +310,12 @@ test('il primo status dopo un riavvio non avvia GC sincrona e il bootstrap post-
     });
 
     const health = eventLifecycleHealth({ scheduledGc: coordinator.lastScheduledGc }, 'test');
+    const eventSummary = coordinator.eventSubscriptionSummary();
     assert.equal(coordinator.lastScheduledGc.orphanedWithPendingSubscriptionCount, 1);
     assert.equal(coordinator.lastScheduledGc.orphanedWithPendingEventCount, 1);
+    assert.equal(eventSummary.pendingEvents, 1);
+    assert.equal(eventSummary.pendingSubscriptionCount, 1);
+    assert.equal(eventSummary.oldestPendingAt, receivedAt);
     assert.equal(Object.prototype.hasOwnProperty.call(coordinator.lastScheduledGc, 'orphanedWithPending'), true);
     assert.deepEqual(health.alerts.map(({ code }) => code), ['orphaned_pending_events']);
     assert.equal(health.alerts[0].eventCount, 1);
@@ -368,7 +374,8 @@ test('una GC post-listen a backlog grande cede il loop e non riscrive lo snapsho
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(statusTurnYielded, true);
     assert.equal(coordinator.lastScheduledGc, null, 'status non deve eseguire GC');
-    assert.equal(compact.events.pendingEvents, 256);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'pendingEvents'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.events, 'subscriptionCount'), false);
 
     let gcTurnYielded = false;
     const gcPromise = coordinator.scheduledEventGarbageCollectionAsync({ batchSize: 8 });

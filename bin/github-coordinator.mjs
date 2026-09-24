@@ -1273,46 +1273,35 @@ export class GitHubCoordinator {
     this.lastScheduledGcLogKey = null;
   }
 
+  eventLivenessStatus() {
+    const signatureFailures = Number(this.eventBroker?.metrics?.webhookSignatureFailures || 0);
+    const activeListeners = this.eventListenerCountInspector?.() ?? null;
+    return {
+      enabled: Boolean(this.eventBroker?.webhookSecret),
+      loading: this.eventBrokerLoading === true,
+      webhookSecretConfigured: Boolean(this.eventBroker?.webhookSecret),
+      activeListeners,
+      // This is a process-local count, not a subscription scan. Keep the
+      // alias for older health consumers while compact status remains a
+      // liveness snapshot rather than an event report.
+      listenerCount: activeListeners,
+      listenerHeartbeatMetrics: {
+        heartbeats: this.metrics.eventListenerHeartbeats,
+        timeouts: this.metrics.eventListenerTimeouts,
+      },
+      scheduledGc: scheduledGcView(this.lastScheduledGc, true),
+      ...(signatureFailures > 0
+        ? {
+          webhookSignatureFailures: signatureFailures,
+          lastWebhookSignatureFailureAt: this.eventBroker?.metrics?.lastWebhookSignatureFailureAt || null,
+        }
+        : {}),
+    };
+  }
+
   status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
-    const eventSummary = this.eventBroker ? (() => {
-      const summary = this.eventBroker.summary({
-        listenerAttached: this.eventListenerInspector,
-        listenerInfo: this.eventListenerInfoInspector,
-        includePendingDetails: !compact,
-        compact,
-      });
-      const signatureFailures = Number(this.eventBroker.metrics.webhookSignatureFailures || 0);
-      if (compact && signatureFailures === 0 && summary.metrics) {
-        const {
-          webhookSignatureFailures: _webhookSignatureFailures,
-          lastWebhookSignatureFailureAt: _lastWebhookSignatureFailureAt,
-          ...metrics
-        } = summary.metrics;
-        summary.metrics = metrics;
-      }
-      return {
-        enabled: Boolean(this.eventBroker.webhookSecret),
-        webhookSecretConfigured: Boolean(this.eventBroker.webhookSecret),
-        activeListeners: this.eventListenerCountInspector?.() ?? null,
-        listenerHeartbeatMetrics: {
-          heartbeats: this.metrics.eventListenerHeartbeats,
-          timeouts: this.metrics.eventListenerTimeouts,
-        },
-        ...summary,
-        scheduledGc: scheduledGcView(this.lastScheduledGc, compact),
-        ...(compact && signatureFailures === 0
-          ? {}
-          : {
-            webhookSignatureFailures: signatureFailures,
-            lastWebhookSignatureFailureAt: this.eventBroker.metrics.lastWebhookSignatureFailureAt,
-          }),
-      };
-    })() : {
-      enabled: false,
-      loading: this.eventBrokerLoading === true,
-    };
     if (compact) {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
@@ -1327,7 +1316,10 @@ export class GitHubCoordinator {
         metrics: { ...this.metrics },
         cacheEntries: this.cache.size,
         cliCacheEntries: this.cliCache.size,
-        events: eventSummary,
+        // Compact status is deliberately liveness-only. Event counts and
+        // subscription details belong to the explicit events-summary/status
+        // RPCs; neither this path nor the socket preflight scans the backlog.
+        events: this.eventLivenessStatus(),
         pendingCancellations: this.pendingCancellations.size,
         anonymous: {
           budget: ANONYMOUS_BUDGET,
@@ -3192,19 +3184,19 @@ function readTokenAndStart(identity) {
         if (request.type === 'ping') {
           result = Promise.resolve({ ok: true, status: coordinator.ping() });
         } else if (request.type === 'status') {
-          // Status is the event-protocol preflight for subscribe/listen.  Do
-          // not expose a transient "secret missing" result while the worker
-          // is still attaching the durable broker; ping remains the cheap
-          // liveness probe for callers that do not need event state.
-          result = eventBrokerReady.then(() => new Promise((resolvePromise) => {
-            // Let a just-closed listener deliver its close/end callbacks
-            // before taking the liveness snapshot. This is one event-loop
-            // turn, not a backlog scan or a polling delay.
-            setImmediate(() => resolvePromise({
-              ok: true,
-              status: coordinator.status({ compact: Boolean(request.compact) }),
+          // Compact status is a liveness snapshot and must answer while the
+          // worker is still loading a large durable state. Full status is an
+          // explicit diagnostic request and may wait for the broker.
+          if (request.compact && request.waitForEventBroker !== true) {
+            result = Promise.resolve({ ok: true, status: coordinator.status({ compact: true }) });
+          } else {
+            result = eventBrokerReady.then(() => new Promise((resolvePromise) => {
+              setImmediate(() => resolvePromise({
+                ok: true,
+                status: coordinator.status({ compact: false }),
+              }));
             }));
-          }));
+          }
         } else if (request.type === 'shutdown') {
           result = Promise.resolve({ ok: true });
         } else if (request.type === 'cancellation-details') {

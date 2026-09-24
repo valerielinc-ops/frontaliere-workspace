@@ -410,7 +410,10 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false, sta
   const response = readyStatus
     ? { status: readyStatus }
     : await connectWithTransientRetry(
-      { type: 'status', identity, compact: true },
+      // Compact status normally stays liveness-only. Event operations need a
+      // separate readiness barrier so they do not observe the temporary
+      // loading/secret-missing snapshot from the worker bootstrap.
+      { type: 'status', identity, compact: true, waitForEventBroker: true },
       { identity, timeoutMs: CONNECT_TIMEOUT_MS, retry: true },
     );
   const currentStatus = statusFromResponse(response);

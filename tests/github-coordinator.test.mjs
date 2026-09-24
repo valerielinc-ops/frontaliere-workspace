@@ -2602,6 +2602,81 @@ test('recupera un endpoint Unix residuo prima di riavviare il coordinator', asyn
   }
 });
 
+test('startup e status compatto restano reattivi con un backlog grande', async () => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-large-backlog-');
+  const identity = `large-backlog-status-${process.pid}`;
+  const previousEnvironment = {
+    FRONTALIERE_GH_STATE_DIR: process.env.FRONTALIERE_GH_STATE_DIR,
+    FRONTALIERE_GH_IDENTITY: process.env.FRONTALIERE_GH_IDENTITY,
+    FRONTALIERE_GH_TOKEN: process.env.FRONTALIERE_GH_TOKEN,
+    FRONTALIERE_REAL_GH: process.env.FRONTALIERE_REAL_GH,
+    FRONTALIERE_GH_WEBHOOK_SECRET: process.env.FRONTALIERE_GH_WEBHOOK_SECRET,
+  };
+  Object.assign(process.env, {
+    FRONTALIERE_GH_STATE_DIR: stateDirectory,
+    FRONTALIERE_GH_IDENTITY: identity,
+    FRONTALIERE_GH_TOKEN: 'test-token-not-real',
+    FRONTALIERE_REAL_GH: '/bin/echo',
+    FRONTALIERE_GH_WEBHOOK_SECRET: 'large-backlog-secret',
+  });
+
+  try {
+    const broker = new GitHubEventBroker({
+      stateFile: join(stateDirectory, `github-events-${identity}.json`),
+      webhookSecret: 'large-backlog-secret',
+    });
+    const seed = broker.subscribe({
+      agentId: 'large-backlog-seed',
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      runId: 'large-backlog-seed-run',
+      waitFor: ['completed'],
+      ttlSeconds: 36_000,
+      allowDuplicate: true,
+    });
+    const seedRecord = broker.getSubscriptionRecord(seed.id);
+    const receivedAt = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    for (let index = 0; index < 512; index += 1) {
+      const copy = structuredClone(seedRecord);
+      copy.id = `sub-large-status-${index}`;
+      copy.agentId = `large-status-agent-${index}`;
+      copy.runId = `large-status-run-${index}`;
+      copy.createdAt = receivedAt;
+      copy.pending = [{
+        id: `event-large-status-${index}`,
+        deliveryId: `delivery-large-status-${index}`,
+        receivedAt,
+        state: 'completed',
+        action: 'completed',
+      }];
+      broker.state.subscriptions.push(copy);
+    }
+    broker.persist();
+
+    await ensureCoordinator(identity);
+    const statusStartedAt = Date.now();
+    const compact = await sendRequest({ type: 'status', compact: true }, { identity });
+    const statusElapsedMs = Date.now() - statusStartedAt;
+    assert.equal(compact.ok, true);
+    assert.ok(statusElapsedMs < 2_000, `status compatto troppo lento: ${statusElapsedMs}ms`);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.status.events, 'subscriptionCount'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(compact.status.events, 'pendingEvents'), false);
+    assert.equal((await sendRequest({ type: 'ping' }, { identity })).ok, true);
+  } finally {
+    try {
+      await sendRequest({ type: 'shutdown' }, { identity });
+      await waitForCoordinatorStop(identity, 5_000);
+    } catch {
+      // Il daemon può non aver raggiunto l'avvio; il cleanup resta sicuro.
+    }
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('non lascia il socket quando una connessione resta aperta durante lo shutdown', async () => {
   const stateDirectory = mkdtempSync('/tmp/frontaliere-coordinator-shutdown-');
   const identity = `shutdown-idle-${process.pid}`;
@@ -2689,7 +2764,7 @@ test('consegna un webhook al listener Unix e chiude la subscription dopo ack', a
     const body = JSON.stringify(payload);
     const cleanStatus = await sendRequest({ type: 'status', compact: true }, { identity });
     assert.equal(Object.prototype.hasOwnProperty.call(cleanStatus.status.events, 'webhookSignatureFailures'), false);
-    assert.equal(Object.prototype.hasOwnProperty.call(cleanStatus.status.events.metrics, 'webhookSignatureFailures'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(cleanStatus.status.events, 'metrics'), false);
     const rejectedWebhookResponse = await fetch(`http://127.0.0.1:${address.port}/github/webhook`, {
       method: 'POST',
       headers: {
@@ -2898,7 +2973,10 @@ test('scollega un listener caduto senza terminare il coordinatore e segnala la s
 
     const status = await sendRequest({ type: 'status', compact: true }, { identity });
     assert.equal(status.status.events.listenerCount, 0);
-    assert.equal(status.status.events.orphanedSubscriptions, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(status.status.events, 'orphanedSubscriptions'), false);
+    const eventStatus = await eventSubscriptions({ identity });
+    assert.equal(eventStatus.summary.listenerCount, 0);
+    assert.equal(eventStatus.summary.orphanedSubscriptions, 1);
     assert.equal(status.status.metrics.socketErrors, 0, 'un reset del listener non è un errore del coordinatore');
 
     const expiring = (await subscribeToEvents({

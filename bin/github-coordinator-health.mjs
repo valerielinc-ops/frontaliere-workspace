@@ -18,6 +18,7 @@ import {
 import { dirname, join } from 'node:path';
 
 import {
+  eventSummary as requestEventSummary,
   normalizeIdentity,
   probeCoordinator,
   socketPath,
@@ -27,9 +28,10 @@ import {
 export const REQUIRED_COORDINATOR_PROTOCOL = 5;
 export const WEBHOOK_SIGNATURE_ALERT_THRESHOLD = 10;
 export const LAUNCHD_SPAWN_SCHEDULED_STATE = 'spawn scheduled';
-// The compact status serializes the durable event summary. Keep the ordinary
-// client connect timeout strict, but give the periodic health probe enough
-// room for one transient event-loop/status burst before raising an alert.
+// The liveness probe is intentionally independent from the durable event
+// summary. Keep the ordinary client connect timeout strict, but give the
+// periodic health probe enough room for one transient event-loop burst before
+// raising an alert.
 export const HEALTH_PROBE_TIMEOUT_MS = 10_000;
 export const ALERT_ONLY_REPEAT_MS = 60 * 60 * 1_000;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
@@ -197,21 +199,40 @@ export async function checkCoordinatorHealth(identity) {
   alerts.push(...launchdHealth.alerts);
   warnings.push(...launchdHealth.warnings);
   if (status) {
+    let eventState = status.events || {};
+    // Compact status is liveness-only. Fetch the counters only as an explicit
+    // health diagnostic, so a large backlog can never delay the socket probe.
+    // A failed diagnostic is a warning; the daemon itself remains healthy if
+    // its liveness response succeeded.
+    if (eventState.loading !== true) {
+      try {
+        const summary = await requestEventSummary({}, { identity: normalized });
+        if (summary?.ok === false) {
+          throw new Error(summary.error?.message || 'event summary unavailable');
+        }
+        eventState = { ...eventState, ...summary };
+      } catch (error) {
+        warnings.push({
+          code: 'event_summary_probe_failed',
+          message: `${normalized}: event summary unavailable: ${error.message}`,
+        });
+      }
+    }
     if (Number(status.protocolVersion) < REQUIRED_COORDINATOR_PROTOCOL) {
       alerts.push({
         code: 'coordinator_protocol_outdated',
         message: `${normalized}: protocol ${status.protocolVersion} is below ${REQUIRED_COORDINATOR_PROTOCOL}`,
       });
     }
-    if (status.events?.loading === true) {
+    if (eventState.loading === true) {
       warnings.push({
         code: 'event_state_loading',
         message: `${normalized}: event broker state is still loading in its worker`,
       });
-    } else if (status.events?.webhookSecretConfigured !== true) {
+    } else if (eventState.webhookSecretConfigured !== true) {
       alerts.push({ code: 'webhook_secret_unconfigured', message: `${normalized}: webhook secret is not configured` });
     }
-    const eventSummary = status.events || {};
+    const eventSummary = eventState;
     const signatureFailures = Number(eventSummary.webhookSignatureFailures || 0);
     if (signatureFailures > 0) {
       // The ingress is reachable from the public internet, so stray unsigned POSTs
