@@ -110,9 +110,17 @@ if (!plist.ProgramArguments.some((value) => value.includes(`${current}/bin/`))) 
   throw new Error(`${label}: nessun percorso bin/ da riscrivere`);
 }
 plist.EnvironmentVariables = { ...(plist.EnvironmentVariables || {}), WORKSPACE: workspace };
-if (label.startsWith('ch.frontaliere.github-coordinator-') && label !== 'ch.frontaliere.github-coordinator-health') {
+const isHealth = label === 'ch.frontaliere.github-coordinator-health';
+if (label.startsWith('ch.frontaliere.github-coordinator-') && !isHealth) {
   plist.EnvironmentVariables.FRONTALIERE_GH_SUPERVISED = '1';
 }
+// ProcessType=Background clamps the task to the darwin background band
+// (priority 4, throttled I/O). Under a load average of ~88 the coordinator
+// got 2 s of CPU in 12 min: every agent's gh call timed out and webhooks were
+// answered with 500. The control plane uses little CPU but every agent waits
+// on it synchronously, so it runs as Interactive; the periodic probe as
+// Standard.
+plist.ProcessType = isHealth ? 'Standard' : 'Interactive';
 plist.WorkingDirectory = workspace;
 fs.writeFileSync(file, `${JSON.stringify(plist, null, 2)}\n`);
 NODE
