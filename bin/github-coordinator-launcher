@@ -2,7 +2,7 @@
 
 set -eu
 
-script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 # launchd inherits macOS's conservative 256-descriptor soft limit. The

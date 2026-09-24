@@ -467,6 +467,100 @@ function removeStaleCoordinatorSocket(socket) {
   }
 }
 
+export const SUPERVISED_STANDBY_POLL_MS = 2_000;
+const SOCKET_ENDPOINT_CHECK_MS = 5_000;
+
+export function socketEndpointVerdict(socket, boundInode, stat = statSync) {
+  let current;
+  try {
+    current = stat(socket);
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    return 'ok';
+  }
+  if (!current.isSocket()) return 'replaced';
+  if (boundInode !== null && boundInode !== undefined && current.ino !== boundInode) return 'replaced';
+  return 'ok';
+}
+
+// launchd sets FRONTALIERE_GH_SUPERVISED=1 (see github-coordinator-release).
+// Without it, a second `serve` keeps the historical contract: exit at once.
+export function supervisedStandbyEnabled(env = process.env) {
+  return env.FRONTALIERE_GH_SUPERVISED === '1';
+}
+
+function describeOwnerProcess(pid) {
+  try {
+    const result = spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 2_000,
+    });
+    return String(result.stdout || '').trim().slice(0, 200) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Under launchd KeepAlive, returning while another live process owns the lock
+// exits 0 and is respawned every ThrottleInterval: 4,123 respawns on nanako,
+// each one reloading Remote Config, while a copy started outside launchd kept
+// the socket. The supervised process waits instead and claims the lock as soon
+// as that owner is gone, so the control plane returns to launchd by itself.
+export function standbyForCoordinatorOwner({
+  identity,
+  socket,
+  claim = () => claimCoordinatorOwner(identity, socket),
+  onClaimed,
+  pollMs = SUPERVISED_STANDBY_POLL_MS,
+  lockPath = coordinatorOwnerLockPath(identity),
+  log = (line) => process.stderr.write(`${line}\n`),
+  describeOwner = describeOwnerProcess,
+} = {}) {
+  let announcedOwner = null;
+  let lastClaimError = null;
+  let timer = null;
+  const announce = () => {
+    let record = null;
+    try { record = readOwnerRecord(lockPath); } catch { record = null; }
+    const key = record ? `${record.pid}:${record.ownerId || ''}` : null;
+    if (!key || key === announcedOwner) return;
+    announcedOwner = key;
+    const command = describeOwner(record.pid);
+    log(`github-coordinator: standby; ${identity} socket owned by pid ${record.pid}`
+      + `${command ? ` (${command})` : ''}; waiting to take over`);
+  };
+  const tick = () => {
+    let ownerLock = null;
+    try {
+      ownerLock = claim();
+      lastClaimError = null;
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (message !== lastClaimError) log(`github-coordinator: standby claim failed: ${message}`);
+      lastClaimError = message;
+    }
+    if (!ownerLock) {
+      announce();
+      return;
+    }
+    clearInterval(timer);
+    timer = null;
+    log(`github-coordinator: standby over; pid ${process.pid} owns the ${identity} socket`);
+    onClaimed(ownerLock);
+  };
+  announce();
+  timer = setInterval(tick, pollMs);
+  return {
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+    isWaiting() {
+      return timer !== null;
+    },
+  };
+}
+
 function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0 } = {}) {
   let triggered = false;
   let watcher;
@@ -2742,8 +2836,35 @@ function readTokenAndStart(identity) {
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   try { chmodSync(parent, 0o700); } catch { /* best effort */ }
   const ownerLock = claimCoordinatorOwner(identity, socket);
-  if (!ownerLock) return;
+  if (ownerLock) {
+    startWithOwnerLock(identity, socket, ownerLock);
+    return;
+  }
+  if (!supervisedStandbyEnabled()) return;
+  const standby = standbyForCoordinatorOwner({
+    identity,
+    socket,
+    onClaimed: (claimed) => {
+      process.removeListener('SIGTERM', leaveStandby);
+      process.removeListener('SIGINT', leaveStandby);
+      try {
+        startWithOwnerLock(identity, socket, claimed);
+      } catch (error) {
+        process.stderr.write(`github-coordinator: ${error.message}\n`);
+        process.exit(1);
+      }
+    },
+  });
+  // No lock, socket or worker is held while waiting: leave at once.
+  const leaveStandby = () => {
+    standby.stop();
+    process.exit(0);
+  };
+  process.on('SIGTERM', leaveStandby);
+  process.on('SIGINT', leaveStandby);
+}
 
+function startWithOwnerLock(identity, socket, ownerLock) {
   let realGh;
   let token;
   try {
@@ -2791,6 +2912,9 @@ function readTokenAndStart(identity) {
   let eventSweepTimer = null;
   let firstSweepTimer = null;
   let scheduledGcTimer = null;
+  let socketEndpointTimer = null;
+  let socketEndpointLost = false;
+  let boundSocketInode = null;
   let firstGcTimer = null;
   const eventListeners = new Map();
   const connections = new Set();
@@ -3316,6 +3440,7 @@ function readTokenAndStart(identity) {
     if (firstSweepTimer) clearTimeout(firstSweepTimer);
     if (scheduledGcTimer) clearInterval(scheduledGcTimer);
     if (firstGcTimer) clearTimeout(firstGcTimer);
+    if (socketEndpointTimer) clearInterval(socketEndpointTimer);
     if (coordinator.scheduledGcBootstrapTimer) clearImmediate(coordinator.scheduledGcBootstrapTimer);
     eventBrokerLoader.worker.terminate().catch(() => {});
     for (const listeners of eventListeners.values()) {
@@ -3333,6 +3458,13 @@ function readTokenAndStart(identity) {
       cleanUp();
       process.exit(exitCode);
     };
+    // libuv unlinks a Unix server's path when the handle closes. If the path
+    // is no longer the inode this process bound, closing would delete the
+    // socket of whichever coordinator replaced it: that one would keep
+    // running, healthy by PID, with no endpoint (ENOENT for every client).
+    if (boundSocketInode !== null && socketEndpointVerdict(socket, boundSocketInode) !== 'ok') {
+      socketEndpointLost = true;
+    }
     try {
       // Do not wait for a half-closed listener or an idle RPC connection. A
       // source reload must hand the owner lock to launchd as one operation;
@@ -3340,7 +3472,7 @@ function readTokenAndStart(identity) {
       // old process alive without a usable control plane.
       for (const connection of connections) destroyConnection(connection);
       server.closeAllConnections?.();
-      server.close();
+      if (!socketEndpointLost) server.close();
     } catch (error) {
       logStructuredError('server_close_failed', error);
     }
@@ -3354,7 +3486,8 @@ function readTokenAndStart(identity) {
 
   const cleanUp = () => {
     if (ownsCoordinatorLock(ownerLock)) {
-      releaseCoordinatorOwner(ownerLock, { removeSocket: true });
+      // A lost endpoint may already belong to another process: never unlink it.
+      releaseCoordinatorOwner(ownerLock, { removeSocket: !socketEndpointLost });
       try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
     } else {
       releaseCoordinatorOwner(ownerLock);
@@ -3369,6 +3502,21 @@ function readTokenAndStart(identity) {
   server.on('listening', () => {
     try { chmodSync(socket, 0o600); } catch { /* best effort */ }
     try { unlinkSync(`${socket}.start`); } catch { /* no start lock */ }
+    // A live process whose socket file was unlinked or replaced answers no
+    // client (ENOENT/ECONNREFUSED) while every liveness check on the PID stays
+    // green. Hand the identity back to launchd instead of serving a ghost.
+    try { boundSocketInode = statSync(socket).ino; } catch { /* checked below */ }
+    socketEndpointTimer = setInterval(() => {
+      const verdict = socketEndpointVerdict(socket, boundSocketInode);
+      if (verdict === 'ok') return;
+      socketEndpointLost = true;
+      logStructuredError('socket_endpoint_lost', new Error(`coordinator socket ${verdict}`), {
+        identity,
+        pid: process.pid,
+      });
+      terminate(1);
+    }, SOCKET_ENDPOINT_CHECK_MS);
+    socketEndpointTimer.unref?.();
     // The first orphan inspection is strictly post-listen. Status and ping
     // stay independent of this diagnostic, even while the worker-backed
     // broker is attaching a large persisted snapshot.

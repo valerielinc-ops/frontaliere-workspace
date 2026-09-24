@@ -973,6 +973,8 @@ export function workflowSelectorMatchesRun(run, selector) {
   const candidates = [
     run?.workflow,
     run?.workflow_name,
+    // REST runs used by reconciliation carry the display name only in `name`.
+    run?.name,
     run?.workflowPath,
     run?.workflow_path,
     run?.path,
