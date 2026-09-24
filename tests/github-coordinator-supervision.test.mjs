@@ -434,3 +434,44 @@ test('replay: un backlog di produzione non blocca ping e non perde stato', {
   console.log(`replay: ${original.subscriptions.length} subscription, ${pendingOf(original)} pending, `
     + `ping max ${Math.max(...pings)} ms su ${pings.length}, barriera ${ready.bytes} B in ${ready.ms} ms`);
 }));
+
+test('github-coordinator-release attende un coordinator inattivo prima di fermarlo', withStateDirectory(
+  'frontaliere-coordinator-idle',
+  async (stateDirectory, children) => {
+    const identity = `idle-${process.pid}`;
+    // The fake gh sleeps: an exec request keeps the coordinator busy.
+    const child = startServe(stateDirectory, identity, { FRONTALIERE_REAL_GH: '/bin/sleep' });
+    children.push(child);
+    await waitUntil(() => pingOk(identity), 8_000, () => child.stderrText);
+    const runRelease = (env) => new Promise((resolvePromise) => {
+      const release = spawn(join(ROOT, 'bin', 'github-coordinator-release'), ['wait-idle', '--identity', identity], {
+        env: { ...process.env, FRONTALIERE_GH_STATE_DIR: stateDirectory, ...env },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      release.stderr.on('data', (chunk) => { stderr += chunk; });
+      release.on('exit', (code) => resolvePromise({ code, stderr }));
+    });
+
+    assert.equal((await runRelease({})).code, 0, 'un coordinator inattivo non fa attendere');
+
+    const busy = createConnection(join(stateDirectory, `github-coordinator-${identity}.sock`));
+    busy.on('error', () => {});
+    busy.on('connect', () => busy.write(`${JSON.stringify({ type: 'exec', args: ['4'], cwd: '/tmp' })}\n`));
+    await waitUntil(async () => {
+      const status = await rawRequest(identity, { type: 'status', compact: true });
+      return status.response.status.active > 0 || status.response.status.queueLength > 0;
+    }, 5_000, () => child.stderrText);
+
+    const impatient = await runRelease({ IDLE_TIMEOUT_S: '1' });
+    assert.notEqual(impatient.code, 0);
+    assert.match(impatient.stderr, /mai inattivo/);
+
+    const patient = await runRelease({ IDLE_TIMEOUT_S: '30' });
+    assert.equal(patient.code, 0, patient.stderr);
+    assert.match(patient.stderr, /attendo che si svuotino/);
+    busy.destroy();
+    child.kill('SIGTERM');
+    await child.exited;
+  },
+));
