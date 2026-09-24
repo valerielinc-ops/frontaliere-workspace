@@ -46,6 +46,7 @@ const NETWORK_REQUEST_TYPES = new Set([
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
 const TRANSIENT_REQUEST_RETRY_DELAY_MS = 100;
+export const LOCAL_EVENT_DETAIL_TIMEOUT_MS = 15_000;
 const RETRYABLE_LOCAL_REQUEST_TYPES = new Set([
   'ping',
   'status',
@@ -59,6 +60,7 @@ const RETRYABLE_LOCAL_REQUEST_TYPES = new Set([
 const protocolChecks = new Map();
 
 export function requestTimeoutMilliseconds(request) {
+  if (request?.type === 'events-subscription') return LOCAL_EVENT_DETAIL_TIMEOUT_MS;
   return NETWORK_REQUEST_TYPES.has(String(request?.type || ''))
     ? EXEC_TIMEOUT_MS
     : CONNECT_TIMEOUT_MS;

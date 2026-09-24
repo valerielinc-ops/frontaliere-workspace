@@ -172,6 +172,7 @@ export const WATCHED_SOURCE_NAMES = new Set([
   'github-event-broker.mjs',
   'github-event-routing.mjs',
   'github-coordinator-launcher',
+  'github-coordinator-rc-cache.mjs',
 ]);
 
 function describeError(error) {

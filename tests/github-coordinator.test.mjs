@@ -35,6 +35,7 @@ import {
   eventSubscriptions,
   ingestGitHubWebhook,
   listenForEvent,
+  LOCAL_EVENT_DETAIL_TIMEOUT_MS,
   normalizeIdentity,
   requestTimeoutMilliseconds,
   sendRequest,
@@ -278,7 +279,6 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
     'events-summary',
     'events-audit',
     'events-gc',
-    'events-subscription',
     'events-subscription-target',
     'events-unsubscribe',
     'events-renew',
@@ -291,6 +291,7 @@ test('usa il timeout lungo solo per le richieste che possono fare I/O GitHub', (
   for (const type of ['api', 'exec', 'events-subscribe', 'events-reconcile', 'confirm-cancellation']) {
     assert.equal(requestTimeoutMilliseconds({ type }), 15 * 60 * 1_000, type);
   }
+  assert.equal(requestTimeoutMilliseconds({ type: 'events-subscription' }), LOCAL_EVENT_DETAIL_TIMEOUT_MS);
 });
 
 test('health classifica residui lifecycle come warning indipendentemente dal volume', () => {
