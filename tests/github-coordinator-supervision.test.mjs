@@ -217,6 +217,72 @@ test('il processo supervisionato resta in standby e subentra quando l owner term
   },
 ));
 
+test('lo standby recupera il socket da una copia non supervisionata solo quando è inattiva', withStateDirectory(
+  'frontaliere-coordinator-reclaim',
+  async (stateDirectory, children) => {
+    const identity = `reclaim-${process.pid}`;
+    const manual = startServe(stateDirectory, identity, { FRONTALIERE_REAL_GH: '/bin/sleep' });
+    children.push(manual);
+    await waitUntil(() => pingOk(identity), 8_000, () => manual.stderrText);
+    const owner = JSON.parse(readFileSync(join(stateDirectory, `github-coordinator-${identity}.sock.owner`), 'utf8'));
+    assert.equal(owner.supervised, false);
+
+    // Keep the manual copy busy: an exec on the fake gh sleeps 4 s.
+    const busy = createConnection(join(stateDirectory, `github-coordinator-${identity}.sock`));
+    busy.on('error', () => {});
+    busy.on('connect', () => busy.write(`${JSON.stringify({ type: 'exec', args: ['4'], cwd: '/tmp' })}\n`));
+    await waitUntil(async () => (await rawRequest(identity, { type: 'status', compact: true })).response.status.active > 0,
+      5_000, () => manual.stderrText);
+
+    const supervised = startServe(stateDirectory, identity, {
+      FRONTALIERE_GH_SUPERVISED: '1',
+      FRONTALIERE_GH_RECLAIM_GRACE_MS: '200',
+    });
+    children.push(supervised);
+    await sleep(2_500);
+    assert.equal(manual.exitCode, null, 'una copia occupata non va interrotta');
+    assert.equal(ownerPid(stateDirectory, identity), manual.pid);
+
+    assert.deepEqual(await Promise.race([manual.exited, sleep(15_000).then(() => 'still-running')]),
+      { code: 0, signal: null });
+    await waitUntil(
+      async () => ownerPid(stateDirectory, identity) === supervised.pid && await pingOk(identity),
+      10_000,
+      () => supervised.stderrText,
+    );
+    assert.match(supervised.stderrText, new RegExp(`reclaims ${identity} socket from unsupervised pid ${manual.pid}`));
+    const reclaimed = JSON.parse(readFileSync(join(stateDirectory, `github-coordinator-${identity}.sock.owner`), 'utf8'));
+    assert.equal(reclaimed.supervised, true);
+    busy.destroy();
+    supervised.kill('SIGTERM');
+    await supervised.exited;
+  },
+));
+
+test('lo standby non recupera mai il socket da un owner supervisionato', withStateDirectory(
+  'frontaliere-coordinator-no-reclaim',
+  async (stateDirectory, children) => {
+    const identity = `no-reclaim-${process.pid}`;
+    const first = startServe(stateDirectory, identity, { FRONTALIERE_GH_SUPERVISED: '1' });
+    children.push(first);
+    await waitUntil(() => pingOk(identity), 8_000, () => first.stderrText);
+    const second = startServe(stateDirectory, identity, {
+      FRONTALIERE_GH_SUPERVISED: '1',
+      FRONTALIERE_GH_RECLAIM_GRACE_MS: '0',
+    });
+    children.push(second);
+    await waitUntil(() => second.stderrText.includes('standby;'), 5_000, () => second.stderrText);
+    await sleep(4_500);
+    assert.equal(first.exitCode, null);
+    assert.equal(ownerPid(stateDirectory, identity), first.pid);
+    assert.doesNotMatch(second.stderrText, /reclaims/);
+    second.kill('SIGTERM');
+    await second.exited;
+    first.kill('SIGTERM');
+    await first.exited;
+  },
+));
+
 test('uno standby senza lock esce subito su SIGTERM', withStateDirectory(
   'frontaliere-coordinator-standby-term',
   async (stateDirectory, children) => {
