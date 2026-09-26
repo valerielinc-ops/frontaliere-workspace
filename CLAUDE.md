@@ -71,6 +71,9 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   varianti (e Firebase Analytics per la misurazione quando serve). Non usare
   PostHog per creare nuovi esperimenti, assegnare varianti o decidere il
   comportamento prodotto.
+- Ogni nuovo flag deve avere un default locale sicuro e una strategia esplicita
+  di `fetchAndActivate`/attivazione Remote Config prima di essere usato in
+  produzione; non si introducono fallback sperimentali a PostHog.
 - Il codice PostHog esistente può essere letto per compatibilità o telemetria
   storica, ma non va esteso come sistema di esperimenti senza una richiesta
   esplicita del proprietario.
