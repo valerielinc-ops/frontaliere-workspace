@@ -64,6 +64,17 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
 
+## Esperimenti e feature flag
+
+- Gli esperimenti futuri degli agenti devono passare sempre da Firebase,
+  usando Firebase Remote Config per flag, rollout e assegnazione delle
+  varianti (e Firebase Analytics per la misurazione quando serve). Non usare
+  PostHog per creare nuovi esperimenti, assegnare varianti o decidere il
+  comportamento prodotto.
+- Il codice PostHog esistente può essere letto per compatibilità o telemetria
+  storica, ma non va esteso come sistema di esperimenti senza una richiesta
+  esplicita del proprietario.
+
 ## Gate PII locale
 
 - La blocklist PII è un file non tracciato, per-clone, in `info/pii-blocklist.txt` sotto la directory Git comune. Nei linked worktree `.git` è un file: non usare mai il percorso letterale `.git/info/pii-blocklist.txt`.
