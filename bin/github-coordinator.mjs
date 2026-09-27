@@ -1305,6 +1305,9 @@ export function parseGhApiArguments(args) {
   }
 
   if (!endpoint || endpoint.includes('{') || endpoint.includes('}')) return null;
+  // The real CLI rejects `--slurp` with `--jq` and `--slurp` without
+  // `--paginate`: hand both to it so a local run fails exactly like CI.
+  if (slurp && (jq !== null || !paginate)) return null;
   const isGraphql = endpoint === 'graphql';
   const normalizedMethod = String(method || (isGraphql ? 'POST' : fields.length ? 'GET' : 'GET')).toUpperCase();
   let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
@@ -1351,18 +1354,10 @@ function renderGhApiResponse(pages, parsed) {
   const bodies = pages.map((page) => page.body || '');
   let output;
   if (parsed.jq) {
-    if (parsed.slurp) {
-      let values;
-      try { values = bodies.map((body) => JSON.parse(body)); } catch { return { ok: false, error: 'cannot slurp non-JSON response' }; }
-      const rendered = renderJq(`${JSON.stringify(values)}\n`, parsed.jq);
-      if (!rendered.ok) return rendered;
-      output = rendered.output;
-    } else {
-      const rendered = bodies.map((body) => renderJq(body, parsed.jq));
-      const failed = rendered.find((item) => !item.ok);
-      if (failed) return failed;
-      output = rendered.map((item) => item.output).join('');
-    }
+    const rendered = bodies.map((body) => renderJq(body, parsed.jq));
+    const failed = rendered.find((item) => !item.ok);
+    if (failed) return failed;
+    output = rendered.map((item) => item.output).join('');
   } else if (parsed.slurp) {
     try { output = `${JSON.stringify(bodies.map((body) => JSON.parse(body)))}\n`; }
     catch { return { ok: false, error: 'cannot slurp non-JSON response' }; }
