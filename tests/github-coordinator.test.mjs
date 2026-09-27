@@ -55,6 +55,7 @@ import {
   launchdHealthFindings,
 } from '../bin/github-coordinator-health.mjs';
 import {
+  ABANDONED_PENDING_GRACE_MS,
   GitHubEventBroker,
   DEFAULT_STALLED_AFTER_MS,
   DEFAULT_ORPHAN_GRACE_MS,
@@ -1554,6 +1555,57 @@ test('conserva una subscription scaduta finché contiene un evento pending', () 
     assert.equal(acknowledgement.ok, true);
     assert.equal(acknowledgement.subscriptionRemoved, true);
     assert.equal(broker.getSubscription(subscription.id), null);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('una subscription scaduta non accumula eventi e viene ritirata dopo la grace', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-events-abandoned-'));
+  const stateFile = join(stateDirectory, 'events.json');
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const broker = new GitHubEventBroker({ stateFile, webhookSecret: 'abandoned-secret', now: () => nowMs });
+  const mergedEvent = (deliveryId) => normalizeWebhookEvent({
+    eventName: 'pull_request',
+    deliveryId,
+    receivedAt: new Date(nowMs).toISOString(),
+    payload: {
+      action: 'closed',
+      repository: { full_name: 'owner/repo' },
+      pull_request: { number: 106, merged: true },
+    },
+  });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'pull_request',
+      number: 106,
+      waitFor: ['merged'],
+      ttlSeconds: 1,
+      allowDuplicate: true,
+    });
+    const first = mergedEvent('abandoned-106-a');
+    assert.deepEqual(broker.recordEvent(first).matchedSubscriptionIds, [subscription.id]);
+
+    nowMs += 2_000;
+    assert.deepEqual(broker.recordEvent(mergedEvent('abandoned-106-b')).matchedSubscriptionIds, []);
+    assert.equal(broker.getSubscription(subscription.id).pendingEvents, 1);
+
+    // Expired at +1 s: now +grace-1 s after the expiry, then exactly +grace.
+    nowMs += ABANDONED_PENDING_GRACE_MS - 2_000;
+    assert.deepEqual(broker.expireSubscriptions(), []);
+    assert.equal(broker.pendingEvent(subscription.id).id, first.id);
+
+    nowMs += 1_000;
+    assert.deepEqual(broker.expireSubscriptions(), [subscription.id]);
+    assert.equal(broker.getSubscription(subscription.id), null);
+    assert.equal(broker.metrics.subscriptionsAbandoned, 1);
+    assert.equal(broker.metrics.pendingEventsAbandoned, 1);
+    assert.equal(broker.metrics.subscriptionsExpired, 0);
+
+    const restored = new GitHubEventBroker({ stateFile, webhookSecret: 'abandoned-secret', now: () => nowMs });
+    assert.equal(restored.getSubscription(subscription.id), null);
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

@@ -27,6 +27,12 @@ export const DEFAULT_SUBSCRIPTION_TTL_MS = 6 * 60 * 60 * 1_000;
 export const MAX_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const DEFAULT_ORPHAN_GRACE_MS = 60 * 60 * 1_000;
 export const DEFAULT_STALLED_AFTER_MS = 4 * 60 * 60 * 1_000;
+// An expired subscription keeps its pending events so that a listener which
+// reconnects late still receives them. A listener of a dead session never
+// comes back: past this grace the record and its events are retired, or they
+// would stay in the durable state forever (303 of 370 subscriptions, 661
+// events, measured on 2026-09-27).
+export const ABANDONED_PENDING_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
@@ -1153,6 +1159,8 @@ export class GitHubEventBroker {
       pendingOverflow: 0,
       latencySamplesRecorded: 0,
       subscriptionsGarbageCollected: 0,
+      subscriptionsAbandoned: 0,
+      pendingEventsAbandoned: 0,
     };
     // A coordinator may load the durable state in a worker so that a large
     // persisted backlog cannot block its Unix socket during startup. The
@@ -1287,14 +1295,23 @@ export class GitHubEventBroker {
   }
 
   pruneExpiredSubscriptions(nowMs = this.now()) {
-    const subscriptionsBefore = this.state.subscriptions.length;
-    const expiredIds = this.state.subscriptions
-      .filter((subscription) => subscription.expiresAtMs <= nowMs && subscription.pending.length === 0)
-      .map((subscription) => subscription.id);
-    this.state.subscriptions = this.state.subscriptions.filter((subscription) => (
-      subscription.expiresAtMs > nowMs || subscription.pending.length > 0
-    ));
-    this.metrics.subscriptionsExpired += subscriptionsBefore - this.state.subscriptions.length;
+    const expiredIds = [];
+    const kept = [];
+    for (const subscription of this.state.subscriptions) {
+      if (subscription.expiresAtMs > nowMs) {
+        kept.push(subscription);
+      } else if (subscription.pending.length === 0) {
+        expiredIds.push(subscription.id);
+        this.metrics.subscriptionsExpired += 1;
+      } else if (nowMs - subscription.expiresAtMs >= ABANDONED_PENDING_GRACE_MS) {
+        expiredIds.push(subscription.id);
+        this.metrics.subscriptionsAbandoned += 1;
+        this.metrics.pendingEventsAbandoned += subscription.pending.length;
+      } else {
+        kept.push(subscription);
+      }
+    }
+    this.state.subscriptions = kept;
     return expiredIds;
   }
 
@@ -1800,10 +1817,14 @@ export class GitHubEventBroker {
       return { ok: true, ignored: true, matchedSubscriptionIds: [] };
     }
     if (this.prune()) this.persist();
+    const recordedAtMs = this.now();
     const matchedSubscriptionIds = [];
     const targetMatchedSubscriptionIds = [];
     let changed = false;
     for (const subscription of this.state.subscriptions) {
+      // Only an expired record that still holds pending events survives the
+      // prune above: it waits for a late listener, not for new events.
+      if (subscription.expiresAtMs <= recordedAtMs) continue;
       if (!eventMatchesSubscriptionTarget(event, subscription)) continue;
       targetMatchedSubscriptionIds.push(subscription.id);
       const receivedAtMs = Date.parse(event.receivedAt || '');
