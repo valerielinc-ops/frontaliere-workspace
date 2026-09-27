@@ -2274,7 +2274,7 @@ test('la riconciliazione per workflow accetta il path REST del workflow', async 
 
 test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', () => {
   const parsed = parseGhApiArguments([
-    'api', 'repos/octocat/Hello-World', '--jq', '.full_name', '--paginate', '--slurp',
+    'api', 'repos/octocat/Hello-World', '--jq', '.full_name', '--paginate',
   ]);
   assert.deepEqual(
     {
@@ -2289,10 +2289,25 @@ test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', 
       method: 'GET',
       jq: '.full_name',
       paginate: true,
-      slurp: true,
+      slurp: false,
     },
   );
+  assert.equal(
+    parseGhApiArguments(['api', 'repos/octocat/Hello-World', '--paginate', '--slurp']).slurp,
+    true,
+  );
   assert.equal(parseGhApiArguments(['api', '--input', 'payload.json', 'repos/o/r']), null);
+});
+
+test('lascia al gh reale le combinazioni di --slurp che il CLI rifiuta', () => {
+  // gh 2.x: "the `--slurp` option is not supported with `--jq` or `--template`"
+  // e "`--paginate` required when passing `--slurp`". Se lo shim le accettasse,
+  // un comando verde in locale si romperebbe sul runner di Actions.
+  assert.equal(
+    parseGhApiArguments(['api', 'repos/o/r/issues/1/comments', '--paginate', '--slurp', '--jq', 'map(length) | add']),
+    null,
+  );
+  assert.equal(parseGhApiArguments(['api', 'repos/o/r', '--slurp']), null);
 });
 
 test('rispetta retry-after e reset prima del backoff euristico', () => {
