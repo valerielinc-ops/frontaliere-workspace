@@ -9,6 +9,11 @@ hooks = true
 multi_agent = true
 
 [agents]
+# Tetto misurato per questo host, non per il coordinatore GitHub: la sua
+# concorrenza (8 letture) non e' il vincolo. Il runtime Codex e' condiviso fra
+# le sessioni e regge ~5 job in tutto; con 16 GB lo swap supera gia' l'80%
+# durante una flotta, e i comandi pesanti restano serializzati dal lease di
+# bin/agent-resource-guard.mjs, quindi thread in piu' aspettano senza rendere.
 max_concurrent_threads_per_session = 4
 
 [shell_environment_policy]

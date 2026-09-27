@@ -287,26 +287,6 @@ Se modifichi gli hook nel sito, aggiorna anche entrambe le configurazioni della
 root. Per il contratto completo leggi la sezione `Hook: sollevati nella root`
 del riferimento.
 
-## Stile compresso: ponytail
-
-Il plugin `ponytail` e' attivo in permanenza: `defaultMode: "full"` in
-`~/.config/ponytail/config.json`. Comprime la prosa; codice, comandi, nomi di
-API e stringhe d'errore restano verbatim.
-
-Va spento con `/ponytail off` in tre casi:
-
-- Mentre componi il body di una PR. Il contratto vuole `## Implementato` e
-  `## Non implementato (ancora)` con bullet sostanziosi, e un body compresso
-  viene respinto da `scripts/ci/pr-body-check-gate.mjs`.
-- Mentre analizzi il fallimento di una PR: gate rosso, review, check-runs.
-- Mentre analizzi il fallimento di un test vitest.
-
-Nei due casi di analisi la ragione e' la stessa: la diagnosi si fa citando
-l'output esatto, mentre la compressione sopprime i dump di log lunghi. Qui la
-distinzione fra un rosso vero e un falso rosso sta proprio in quelle righe.
-
-Riaccendi con `/ponytail full` quando l'analisi e' chiusa.
-
 Per vedere cosa occupa la context window usa `unclog` (installato con `uv tool
 install unclog`): elenca agenti, skill, comandi e server MCP col loro costo in
 token e segnala gli MCP non invocati da 30 giorni. E' di sola lettura e non
