@@ -1677,6 +1677,19 @@ export class GitHubCoordinator {
     this.scheduledGcBootstrapTimer.unref?.();
   }
 
+  // A pending event with a live listener is being drained through the control
+  // plane, and the recovery sweep must not compete with it. Pending events of
+  // an orphaned subscription wait for a listener that may never come back:
+  // counting them kept the sweep disabled for every subscription as long as
+  // one dead session had left an unacknowledged event behind.
+  pendingBacklogNeedsControlPlane() {
+    if (!this.eventBroker) return false;
+    return this.eventBroker.state.subscriptions.some((subscription) => (
+      (subscription.pending?.length || 0) > 0
+      && this.eventListenerInspector?.(subscription.id) !== false
+    ));
+  }
+
   setEventListenerCountInspector(inspector) {
     this.eventListenerCountInspector = typeof inspector === 'function' ? inspector : null;
   }
@@ -3650,7 +3663,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
     // plane first; an active foreground RPC means a client is already using
     // it.  The explicit events reconcile command remains available for the
     // one-shot webhook-missing case and does not mutate unrelated state.
-    if (eventBroker.state.subscriptions.some((subscription) => (subscription.pending?.length || 0) > 0)) return;
+    if (coordinator.pendingBacklogNeedsControlPlane()) return;
     if (activeRequestCount > 0 || coordinator.active > 0) return;
     sweepRunning = true;
     coordinator.reconcileStaleSubscriptions()
