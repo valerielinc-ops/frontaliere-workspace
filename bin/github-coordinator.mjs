@@ -1350,10 +1350,30 @@ function renderJq(body, expression) {
   return { ok: true, output: result.stdout };
 }
 
-function renderGhApiResponse(pages, parsed) {
+/**
+ * Pagine REST JSON array unite in UN array, come il gh reale con `--paginate`
+ * senza `--jq`/`--slurp`/`--include` (paginatedArrayReader): verificato su
+ * 129 commenti in due pagine, `JSON.parse` dell'output riesce. `null` quando
+ * il gh reale non unirebbe (GraphQL, una pagina sola, pagina non array).
+ */
+function mergedPaginatedArray(bodies, parsed) {
+  if (bodies.length < 2 || parsed.include || parsed.path === '/graphql') return null;
+  const items = [];
+  for (const body of bodies) {
+    let value;
+    try { value = JSON.parse(body); } catch { return null; }
+    if (!Array.isArray(value)) return null;
+    items.push(...value);
+  }
+  return `${JSON.stringify(items)}\n`;
+}
+
+export function renderGhApiResponse(pages, parsed) {
   const bodies = pages.map((page) => page.body || '');
   let output;
   if (parsed.jq) {
+    // Il gh reale applica `--jq` pagina per pagina anche con `--paginate`
+    // (`--jq length` su 129 commenti stampa `100` e `29`).
     const rendered = bodies.map((body) => renderJq(body, parsed.jq));
     const failed = rendered.find((item) => !item.ok);
     if (failed) return failed;
@@ -1362,7 +1382,8 @@ function renderGhApiResponse(pages, parsed) {
     try { output = `${JSON.stringify(bodies.map((body) => JSON.parse(body)))}\n`; }
     catch { return { ok: false, error: 'cannot slurp non-JSON response' }; }
   } else {
-    output = bodies.map((body) => (body.endsWith('\n') ? body : `${body}\n`)).join('');
+    output = mergedPaginatedArray(bodies, parsed)
+      ?? bodies.map((body) => (body.endsWith('\n') ? body : `${body}\n`)).join('');
   }
 
   if (parsed.include && !parsed.silent) {

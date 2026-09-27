@@ -24,6 +24,7 @@ import {
   GitHubCoordinator,
   isSafeRead,
   parseGhApiArguments,
+  renderGhApiResponse,
   RESPONSE_TRUNCATED_CODE,
   RESPONSE_TRUNCATED_EXIT_CODE,
   retryDelayMilliseconds,
@@ -2297,6 +2298,34 @@ test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', 
     true,
   );
   assert.equal(parseGhApiArguments(['api', '--input', 'payload.json', 'repos/o/r']), null);
+});
+
+test('--paginate senza --jq/--slurp unisce le pagine REST in un array, come il gh reale', () => {
+  // Misurato sul gh reale: 129 commenti in due pagine -> un solo array JSON.
+  // Lo shim stampava `[...]\n[...]` e un JSON.parse locale falliva dove in CI
+  // riesce, spingendo a "correggere" letture che su Actions erano giuste.
+  const pages = [
+    { status: 200, headers: {}, body: JSON.stringify([{ id: 1 }, { id: 2 }]) },
+    { status: 200, headers: {}, body: JSON.stringify([{ id: 3 }]) },
+  ];
+  const rest = parseGhApiArguments(['api', 'repos/o/r/issues/1/comments', '--paginate']);
+  const merged = renderGhApiResponse(pages, rest);
+  assert.equal(merged.ok, true);
+  assert.deepEqual(JSON.parse(merged.output).map((item) => item.id), [1, 2, 3]);
+
+  // --jq resta per pagina (il gh reale stampa `100` e `29`), --slurp annida.
+  const perPage = renderGhApiResponse(pages, parseGhApiArguments(['api', 'repos/o/r/issues/1/comments', '--paginate', '--jq', 'length']));
+  assert.equal(perPage.output, '2\n1\n');
+  const slurped = renderGhApiResponse(pages, parseGhApiArguments(['api', 'repos/o/r/issues/1/comments', '--paginate', '--slurp']));
+  assert.deepEqual(JSON.parse(slurped.output).map((page) => page.length), [2, 1]);
+
+  // Pagine non array (oggetti) e una sola pagina restano come prima.
+  const objects = [
+    { status: 200, headers: {}, body: '{"a":1}' },
+    { status: 200, headers: {}, body: '{"b":2}' },
+  ];
+  assert.equal(renderGhApiResponse(objects, rest).output, '{"a":1}\n{"b":2}\n');
+  assert.equal(renderGhApiResponse([pages[0]], rest).output, `${pages[0].body}\n`);
 });
 
 test('lascia al gh reale le combinazioni di --slurp che il CLI rifiuta', () => {
