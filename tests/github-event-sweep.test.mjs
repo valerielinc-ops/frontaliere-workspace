@@ -174,6 +174,36 @@ test('lo sweep rispetta l intervallo minimo e salta i target non riconciliabili'
   }
 });
 
+test('solo un pending con listener vivo sospende lo sweep; quello di un orfano no', () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-sweep-orphan-pending-'));
+  const { broker, coordinator } = makeCoordinator(stateDirectory);
+  try {
+    const orphan = broker.subscribe({
+      repo: 'owner/repo', resource: 'pull_request', number: 77, waitFor: ['merged'], ttlSeconds: 3600,
+    });
+    broker.recordEvent(normalizeWebhookEvent({
+      eventName: 'pull_request',
+      deliveryId: 'orphan-pending-77',
+      payload: {
+        action: 'closed',
+        repository: { full_name: 'owner/repo' },
+        pull_request: { number: 77, merged: true },
+      },
+    }));
+    assert.equal(broker.getSubscription(orphan.id).pendingEvents, 1);
+    // Without a listener inspector the coordinator keeps the conservative block.
+    assert.equal(coordinator.pendingBacklogNeedsControlPlane(), true);
+
+    const listened = new Set();
+    coordinator.setEventListenerInspector((subscriptionId) => listened.has(subscriptionId));
+    assert.equal(coordinator.pendingBacklogNeedsControlPlane(), false);
+    listened.add(orphan.id);
+    assert.equal(coordinator.pendingBacklogNeedsControlPlane(), true);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('il gc programmato in dry-run segnala l evento pending senza listener e non rimuove nulla', () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-scheduled-gc-'));
   const { broker, coordinator } = makeCoordinator(stateDirectory);
