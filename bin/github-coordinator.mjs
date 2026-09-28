@@ -1115,6 +1115,39 @@ function workflowSelectorMatchesRun(run, selector) {
   return candidates.some((candidate) => expected.has(candidate));
 }
 
+// GitHub serves a run listing filtered by `branch` alone from an index that can
+// put months-old runs first: on 28-09 `actions/runs?branch=main` returned June
+// runs, and a follow-latest observer waiting for `success` on main received a
+// green `tests` run from 24-09 while every run of that day was red. A `created`
+// window brings the listing back to recent-first, and the pick below never
+// trusts the API order anyway.
+const RECONCILE_RUN_LOOKBACK_MS = 2 * 24 * 60 * 60 * 1_000;
+
+function reconcileRunsCreatedFilter(subscription, nowMs = Date.now()) {
+  const createdAtMs = Date.parse(subscription?.createdAt || '');
+  const anchorMs = Number.isFinite(createdAtMs) ? createdAtMs : nowMs;
+  return `>=${new Date(anchorMs - RECONCILE_RUN_LOOKBACK_MS).toISOString().slice(0, 10)}`;
+}
+
+// The per-workflow endpoint keeps unrelated workflows from crowding the page.
+// It takes the file name as written (case-sensitive), so only a selector that
+// names a file, or a bare name that the selector forms already read as
+// `<name>.yml`, qualifies.
+function reconcileWorkflowFile(selector) {
+  if (selector === null || selector === undefined) return null;
+  const raw = String(selector).trim();
+  if (!raw) return null;
+  const basename = raw.split('/').pop();
+  if (/\.ya?ml$/i.test(basename)) return basename;
+  return /^[A-Za-z0-9_-]+$/.test(raw) ? `${raw}.yml` : null;
+}
+
+function latestRunFirst(left, right) {
+  const delta = Date.parse(right?.created_at || '') - Date.parse(left?.created_at || '');
+  if (Number.isFinite(delta) && delta !== 0) return delta;
+  return Number(right?.id || 0) - Number(left?.id || 0);
+}
+
 // Headers select the representation (`Accept: …raw` vs JSON) and object bodies
 // must be serialized: `${body}` collapsed every GraphQL query onto
 // "[object Object]".
@@ -2349,15 +2382,29 @@ export class GitHubCoordinator {
     }
     let path;
     let listWorkflowRuns = false;
+    let workflowRunsFallbackPath = null;
     if (subscription.resource === 'pull_request' && subscription.number) {
       path = `/repos/${subscription.repo}/pulls/${subscription.number}`;
     } else if (subscription.resource === 'workflow_run' && subscription.runId) {
       path = `/repos/${subscription.repo}/actions/runs/${subscription.runId}`;
     } else if (subscription.resource === 'workflow_run'
       && (subscription.workflow || subscription.branch || subscription.sha || subscription.followLatest)) {
-      const query = new URLSearchParams({ per_page: '20' });
+      const query = new URLSearchParams({ created: reconcileRunsCreatedFilter(subscription) });
       if (subscription.branch) query.set('branch', subscription.branch);
-      path = `/repos/${subscription.repo}/actions/runs?${query.toString()}`;
+      // `head_sha` only filters on the full SHA; an abbreviated one stays a
+      // client-side prefix match below.
+      if (/^[0-9a-f]{40}$/i.test(String(subscription.sha || ''))) query.set('head_sha', subscription.sha);
+      const workflowFile = reconcileWorkflowFile(subscription.workflow);
+      const listQuery = new URLSearchParams(query);
+      listQuery.set('per_page', '100');
+      const listPath = `/repos/${subscription.repo}/actions/runs?${listQuery.toString()}`;
+      if (workflowFile) {
+        query.set('per_page', '30');
+        path = `/repos/${subscription.repo}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?${query.toString()}`;
+        workflowRunsFallbackPath = listPath;
+      } else {
+        path = listPath;
+      }
       listWorkflowRuns = true;
     } else if (subscription.resource === 'deployment' && subscription.deploymentId) {
       path = `/repos/${subscription.repo}/deployments/${subscription.deploymentId}/statuses?per_page=1`;
@@ -2371,7 +2418,7 @@ export class GitHubCoordinator {
       };
     }
 
-    const response = await this.submit({
+    let response = await this.submit({
       type: 'api',
       identity: this.identity,
       client: EVENT_CLIENT_KEY,
@@ -2379,6 +2426,18 @@ export class GitHubCoordinator {
       path,
       cacheTtlMs: 0,
     });
+    // A bare selector read as `<name>.yml` may not be a file of the repo: the
+    // per-workflow endpoint answers 404 and the generic listing still applies.
+    if (!response.ok && response.status === 404 && workflowRunsFallbackPath) {
+      response = await this.submit({
+        type: 'api',
+        identity: this.identity,
+        client: EVENT_CLIENT_KEY,
+        method: 'GET',
+        path: workflowRunsFallbackPath,
+        cacheTtlMs: 0,
+      });
+    }
     if (!response.ok) return { ok: false, source: 'reconciliation', response };
     let data;
     try {
@@ -2391,11 +2450,13 @@ export class GitHubCoordinator {
     }
     if (listWorkflowRuns) {
       const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
-      data = runs.find((run) => (
-        workflowSelectorMatchesRun(run, subscription.workflow)
-        && (!subscription.sha || shaMatches(run.head_sha, subscription.sha))
-        && (!subscription.branch || run.head_branch === subscription.branch)
-      )) || null;
+      data = runs
+        .filter((run) => (
+          workflowSelectorMatchesRun(run, subscription.workflow)
+          && (!subscription.sha || shaMatches(run.head_sha, subscription.sha))
+          && (!subscription.branch || run.head_branch === subscription.branch)
+        ))
+        .sort(latestRunFirst)[0] || null;
     }
     if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
     const events = [];
@@ -2422,6 +2483,7 @@ export class GitHubCoordinator {
       const headBranch = data.head?.ref || null;
       const query = new URLSearchParams({
         ...(headBranch ? { branch: headBranch } : { head_sha: data.head.sha }),
+        created: reconcileRunsCreatedFilter(subscription),
         per_page: '100',
       });
       const runsResponse = await this.submit({
