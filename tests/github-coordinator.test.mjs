@@ -1199,7 +1199,7 @@ test('recupera un fallimento Actions dopo un webhook mancato della PR', async ()
   try {
     const result = await coordinator.reconcileEvents(subscription.id);
     assert.equal(calls.length, 2);
-    assert.match(calls[1], /\/actions\/runs\?branch=feature-1559&per_page=100$/);
+    assert.match(calls[1], /\/actions\/runs\?branch=feature-1559&created=%3E%3D\d{4}-\d{2}-\d{2}&per_page=100$/);
     assert.equal(result.event.state, 'failed');
     assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
     assert.deepEqual(notified, [subscription.id]);
@@ -2284,8 +2284,9 @@ test('la riconciliazione per workflow accetta il path REST del workflow', async 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const requestUrl = new URL(String(url));
-    assert.equal(requestUrl.pathname, '/repos/owner/repo/actions/runs');
+    assert.equal(requestUrl.pathname, '/repos/owner/repo/actions/workflows/tests.yml/runs');
     assert.equal(requestUrl.searchParams.get('branch'), 'main');
+    assert.match(requestUrl.searchParams.get('created') || '', /^>=\d{4}-\d{2}-\d{2}$/);
     return fakeResponse(200, JSON.stringify({
       workflow_runs: [{
         id: 9002,
@@ -2321,6 +2322,138 @@ test('la riconciliazione per workflow accetta il path REST del workflow', async 
 
   try {
     const result = await coordinator.reconcileEvents(subscription.id);
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).state, 'success');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('la riconciliazione follow-latest sceglie la run più recente anche se GitHub mette prima una run vecchia', async () => {
+  // 28-09: `actions/runs?branch=main` restituiva run di giugno in testa e un
+  // osservatore `--wait-for success` riceveva il verde del 24-09 con main rosso.
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-latest-run-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(String(url));
+    requests.push(requestUrl);
+    return fakeResponse(200, JSON.stringify({
+      workflow_runs: [
+        {
+          id: 36004944554,
+          path: '.github/workflows/tests.yml',
+          status: 'completed',
+          conclusion: 'success',
+          head_branch: 'main',
+          head_sha: 'aaaaaaa',
+          created_at: '2026-09-24T13:20:09Z',
+          updated_at: '2026-09-24T13:24:08Z',
+        },
+        {
+          id: 36430660532,
+          path: '.github/workflows/tests.yml',
+          status: 'completed',
+          conclusion: 'failure',
+          head_branch: 'main',
+          head_sha: 'bbbbbbb',
+          created_at: '2026-09-28T13:43:39Z',
+          updated_at: '2026-09-28T13:50:00Z',
+        },
+      ],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'latest-run-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    workflow: 'tests',
+    branch: 'main',
+    followLatest: true,
+    waitFor: ['success', 'failed'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    await coordinator.reconcileEvents(subscription.id);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].pathname, '/repos/owner/repo/actions/workflows/tests.yml/runs');
+    const created = requests[0].searchParams.get('created');
+    const expectedFloor = new Date(Date.parse(broker.getSubscriptionRecord(subscription.id).createdAt)
+      - 2 * 24 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+    assert.equal(created, `>=${expectedFloor}`);
+    const pending = broker.pendingEvent(subscription.id);
+    assert.equal(pending.state, 'failed');
+    assert.equal(String(pending.runId), '36430660532');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('la riconciliazione torna all elenco generico se il nome del workflow non è un file', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-workflow-fallback-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  const pathnames = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(String(url));
+    pathnames.push(requestUrl.pathname);
+    if (requestUrl.pathname.includes('/actions/workflows/')) {
+      return fakeResponse(404, JSON.stringify({ message: 'Not Found' }), { 'x-ratelimit-remaining': '100' });
+    }
+    assert.equal(requestUrl.searchParams.get('per_page'), '100');
+    assert.match(requestUrl.searchParams.get('created') || '', /^>=\d{4}-\d{2}-\d{2}$/);
+    return fakeResponse(200, JSON.stringify({
+      workflow_runs: [{
+        id: 77,
+        name: 'deploy',
+        path: '.github/workflows/deploy-pages.yml',
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'main',
+        head_sha: 'ccccccc',
+        created_at: '2026-09-28T10:00:00Z',
+        updated_at: '2026-09-28T10:05:00Z',
+      }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'workflow-fallback-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    workflow: 'deploy',
+    branch: 'main',
+    waitFor: ['success'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const result = await coordinator.reconcileEvents(subscription.id);
+    assert.deepEqual(pathnames, [
+      '/repos/owner/repo/actions/workflows/deploy.yml/runs',
+      '/repos/owner/repo/actions/runs',
+    ]);
     assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
     assert.equal(broker.pendingEvent(subscription.id).state, 'success');
   } finally {
