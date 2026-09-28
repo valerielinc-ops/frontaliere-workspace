@@ -60,6 +60,14 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 - Una variabile gia' presente non viene sovrascritta dal loader; `bin/rc-env.sh`
   aggiunge il controllo di successo che il loader, deliberatamente fail-open,
   non esegue.
+- Il launcher del coordinator conserva token e webhook secret caricati da Remote
+  Config nel portachiavi di macOS (servizio
+  `ch.frontaliere.github-coordinator.rc-cache`): per 24 ore un riavvio non
+  richiede rete ne' Remote Config, e se Remote Config non risponde usa anche
+  una voce piu' vecchia. Dopo una rotazione del token forza il refresh con
+  `FRONTALIERE_GH_RC_REFRESH=1` (o `--refresh-remote-config`); un valore gia'
+  presente nell'ambiente vince sempre e non viene salvato;
+  `FRONTALIERE_GH_RC_CACHE=0` spegne la cache.
 
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
