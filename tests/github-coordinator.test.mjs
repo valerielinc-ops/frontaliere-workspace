@@ -1280,6 +1280,9 @@ test('audita una delivery PR distinguendo target, stato logico e waitFor', () =>
     assert.equal(audit.events[1].state, 'merged');
     assert.deepEqual(audit.events[1].matchedSubscriptionIds, [subscription.id]);
 
+    // The unmatched delivery only touched the audit trail: its write is
+    // coalesced, and a shutdown flushes it.
+    assert.equal(broker.flush(), true);
     const restored = new GitHubEventBroker({ stateFile, webhookSecret: 'audit-secret' });
     assert.equal(restored.audit({ number: 8818 }).events.length, 2);
   } finally {

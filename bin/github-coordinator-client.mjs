@@ -547,6 +547,14 @@ export async function unsubscribeFromEvents(subscriptionId, { identity, agentId 
   }, { identity });
 }
 
+export async function reviveEventSubscription(subscriptionId, { identity, agentId = null } = {}) {
+  return sendRequest({
+    type: 'events-revive',
+    subscriptionId,
+    ...(agentId ? { agentId } : {}),
+  }, { identity });
+}
+
 export async function reconcileEvents(subscriptionId, { identity } = {}) {
   return sendRequest({ type: 'events-reconcile', subscriptionId }, { identity });
 }
@@ -581,7 +589,15 @@ export async function listenForEvent(subscriptionId, {
   if (typeof subscriptionId !== 'string' || subscriptionId.length === 0) {
     throw new TypeError('event_subscription_id_required');
   }
-  const details = await eventSubscription(subscriptionId, { identity: normalized });
+  let details;
+  try {
+    details = await eventSubscription(subscriptionId, { identity: normalized });
+  } catch (error) {
+    // The daemon archives subscriptions nobody listened to; listening is
+    // exactly the signal that brings one back, pending events included.
+    if (error?.nextAction !== 'listen_to_revive') throw error;
+    details = await reviveEventSubscription(subscriptionId, { identity: normalized, agentId });
+  }
   await ensureEventProtocol(normalized, { requireWebhookSecret: true });
   let pendingEventsPresent = Number(details.subscription?.pendingEvents || 0) > 0;
   let leaseDeadlineMs = Date.parse(details.subscription?.expiresAt || '');

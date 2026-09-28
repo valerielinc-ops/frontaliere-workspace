@@ -124,10 +124,21 @@ const EVENT_ROUTING_IDENTITIES = new Set(['default', 'nanako']);
 const EVENT_CLIENT_KEY = 'coordinator:events';
 export const EVENT_SWEEP_INTERVAL_MS = 2 * 60 * 1_000;
 export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
-// A sweep is a recovery hint, not a second event-delivery plane.  Keep one
-// reconciliation per turn so it cannot occupy the GitHub queue for an entire
-// burst of reconnects or status requests.
-export const EVENT_SWEEP_MAX_PER_RUN = 1;
+// A sweep is a recovery hint, not a second event-delivery plane. Its reads
+// run in the API lane with their own fairness key, so a few per turn cannot
+// occupy the queue; one per two minutes could not even revisit every live
+// observer once per interval.
+export const EVENT_SWEEP_MAX_PER_RUN = 3;
+// Observers without a listener are revisited less often than live ones.
+export const EVENT_SWEEP_ORPHAN_INTERVAL_FACTOR = 3;
+// Orphan lifecycle. A subscription whose listener is gone is archived (not
+// deleted): `events listen` on its id restores it, pending events included,
+// and reconciles it. Nothing is archived in the first minutes after a start,
+// while listeners of live sessions reconnect.
+export const ORPHAN_RETIRE_STARTUP_GRACE_MS = 10 * 60 * 1_000;
+export const ORPHAN_PENDING_RETIRE_MS = 60 * 60 * 1_000;
+export const ORPHAN_IDLE_RETIRE_MS = 6 * 60 * 60 * 1_000;
+export const ORPHAN_RETIRE_INTERVAL_MS = 60 * 1_000;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
 export const SCHEDULED_GC_BOOTSTRAP_DELAY_MS = 250;
 export const SCHEDULED_GC_BATCH_SIZE = 16;
@@ -1548,6 +1559,8 @@ export class GitHubCoordinator {
       cliTimeouts: 0,
     };
     this.sweepReconciledAt = new Map();
+    this.startedAtMs = Date.now();
+    this.listenerSeenAt = new Map();
     this.lastScheduledGc = null;
     this.scheduledGcBootstrapAttempted = false;
     this.scheduledGcBootstrapInProgress = false;
@@ -1826,9 +1839,19 @@ export class GitHubCoordinator {
       ? await this.resolveWorkflowFilename(spec?.repo, spec?.workflow)
       : spec?.workflow;
     const normalizedSpec = workflow === spec?.workflow ? spec : { ...spec, workflow };
-    const createdSubscription = this.eventBroker.subscribe(normalizedSpec);
+    // Only a known absence counts: without a listener inspector (library use)
+    // joins behave as before.
+    const unattended = (subscriptionId) => this.eventListenerInspector?.(subscriptionId) === false;
+    const createdSubscription = this.eventBroker.subscribe(normalizedSpec, {
+      // Pending events of an unattended record were meant for sessions that
+      // are gone; the joining agent gets its own observer and reconciliation.
+      canJoin: (existing) => existing.pending.length === 0 || !unattended(existing.id),
+    });
     let reconciliation = null;
-    if (!createdSubscription.sharedJoin && createdSubscription.remainingMs > 1_000) {
+    // A join onto an unattended record has nobody who saw its past webhooks:
+    // reconcile it like a new subscription.
+    const needsReconciliation = !createdSubscription.sharedJoin || unattended(createdSubscription.id);
+    if (needsReconciliation && createdSubscription.remainingMs > 1_000) {
       try {
         reconciliation = await this.reconcileEvents(createdSubscription.id);
         this.sweepReconciledAt.set(createdSubscription.id, Date.now());
@@ -1918,9 +1941,17 @@ export class GitHubCoordinator {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
     const subscription = this.eventBroker.getSubscriptionRecord(subscriptionId);
     if (!subscription) {
+      const retired = this.eventBroker.retiredSubscription?.(subscriptionId);
       return {
         ok: false,
-        error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+        error: retired
+          ? {
+            code: 'event_subscription_not_found',
+            message: `event subscription archived at ${retired.retiredAt} (${retired.retiredReason}); `
+              + '`events listen` on this id restores it with its pending events',
+            nextAction: 'listen_to_revive',
+          }
+          : { code: 'event_subscription_not_found', message: 'event subscription not found' },
       };
     }
     return {
@@ -2043,6 +2074,71 @@ export class GitHubCoordinator {
     };
   }
 
+  noteListenerActivity(subscriptionId, nowMs = Date.now()) {
+    this.listenerSeenAt.set(String(subscriptionId), nowMs);
+  }
+
+  // Why an unattended subscription should be archived now, or null.
+  orphanRetirementReason(subscription, nowMs) {
+    const createdAtMs = Date.parse(subscription.createdAt || '');
+    const renewedAtMs = Date.parse(subscription.lastRenewedAt || '');
+    const quietSinceMs = Math.max(
+      this.startedAtMs,
+      this.listenerSeenAt.get(subscription.id) || 0,
+      Number.isFinite(createdAtMs) ? createdAtMs : 0,
+      Number.isFinite(renewedAtMs) ? renewedAtMs : 0,
+    );
+    if (subscription.pending.length > 0) {
+      if (subscription.expiresAtMs <= nowMs && nowMs - quietSinceMs >= ORPHAN_RETIRE_STARTUP_GRACE_MS) {
+        return 'expired_without_listener';
+      }
+      const pendingAtMs = Date.parse(subscription.pending[0]?.receivedAt || '');
+      const since = Math.max(quietSinceMs, Number.isFinite(pendingAtMs) ? pendingAtMs : 0);
+      return nowMs - since >= ORPHAN_PENDING_RETIRE_MS ? 'pending_without_listener' : null;
+    }
+    // Waiting observers are archived only when a revival can reconcile what
+    // they missed; the others keep waiting until their own expiry.
+    if (!reconcilableSubscription(subscription)) return null;
+    return nowMs - quietSinceMs >= ORPHAN_IDLE_RETIRE_MS ? 'listener_absent' : null;
+  }
+
+  /**
+   * Archive subscriptions nobody listens to: the pending events of a dead
+   * session (130 of them, 8 days old, measured on 2026-09-28) and observers
+   * idle for hours. Lossless by construction: `events listen` revives them.
+   */
+  retireOrphanedSubscriptions({ nowMs = Date.now() } = {}) {
+    if (!this.eventBroker || !this.eventListenerInspector) return [];
+    if (nowMs - this.startedAtMs < ORPHAN_RETIRE_STARTUP_GRACE_MS) return [];
+    const retirements = [];
+    for (const subscription of this.eventBroker.state.subscriptions) {
+      if (this.eventListenerInspector(subscription.id) !== false) continue;
+      const reason = this.orphanRetirementReason(subscription, nowMs);
+      if (reason) retirements.push({ id: subscription.id, reason });
+    }
+    const retired = this.eventBroker.retireSubscriptions(retirements);
+    for (const id of retired) {
+      this.listenerSeenAt.delete(id);
+      this.sweepReconciledAt.delete(id);
+    }
+    return retired;
+  }
+
+  /** Restore an archived subscription for a listener that came back. */
+  async reviveRetiredSubscription(subscriptionId) {
+    if (!this.eventBroker?.reviveSubscription) return null;
+    const revived = this.eventBroker.reviveSubscription(subscriptionId);
+    if (!revived) return null;
+    this.noteListenerActivity(revived.id);
+    // With nothing pending the archive may have missed webhooks meanwhile.
+    if (revived.pending.length === 0 && reconcilableSubscription(revived)) {
+      this.sweepReconciledAt.set(revived.id, Date.now());
+      this.reconcileEvents(revived.id)
+        .catch((error) => logStructuredError('event_revival_reconcile_failed', error, { subscriptionId: revived.id }));
+    }
+    return revived;
+  }
+
   expireEventSubscriptions() {
     if (!this.eventBroker) return [];
     const expiredIds = this.eventBroker.expireSubscriptions();
@@ -2072,13 +2168,19 @@ export class GitHubCoordinator {
     for (const id of this.sweepReconciledAt.keys()) {
       if (!liveIds.has(id)) this.sweepReconciledAt.delete(id);
     }
+    // Live observers first: somebody is waiting on them. An observer without
+    // a listener is revisited EVENT_SWEEP_ORPHAN_INTERVAL_FACTOR times less
+    // often; without a listener inspector every observer counts as live.
+    const orphaned = (subscription) => this.eventListenerInspector?.(subscription.id) === false;
     const due = [...this.eventBroker.state.subscriptions]
       .filter((subscription) => subscription
         && subscription.pending.length === 0
         && reconcilableSubscription(subscription)
         && (!eventRoutingRequired(this.identity, subscription) || routeAllowsIdentity(subscription, this.identity))
-        && nowMs - (this.sweepReconciledAt.get(subscription.id) ?? 0) >= minIntervalMs)
-      .sort((left, right) => (this.sweepReconciledAt.get(left.id) ?? 0) - (this.sweepReconciledAt.get(right.id) ?? 0))
+        && nowMs - (this.sweepReconciledAt.get(subscription.id) ?? 0)
+          >= minIntervalMs * (orphaned(subscription) ? EVENT_SWEEP_ORPHAN_INTERVAL_FACTOR : 1))
+      .sort((left, right) => (Number(orphaned(left)) - Number(orphaned(right)))
+        || (this.sweepReconciledAt.get(left.id) ?? 0) - (this.sweepReconciledAt.get(right.id) ?? 0))
       .slice(0, maxPerSweep);
     const reconciled = [];
     for (const subscription of due) {
@@ -3662,6 +3764,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
   let terminate = () => {};
   let expirationTimer = null;
   let listenerHeartbeatTimer = null;
+  let orphanRetirementTimer = null;
   let eventSweepTimer = null;
   let firstSweepTimer = null;
   let scheduledGcTimer = null;
@@ -3729,6 +3832,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
   const detachEventListener = (listener) => {
     const listeners = eventListeners.get(listener.subscriptionId);
     if (!listeners) return;
+    coordinator.noteListenerActivity(listener.subscriptionId);
     listeners.delete(listener);
     if (listeners.size === 0) eventListeners.delete(listener.subscriptionId);
   };
@@ -3840,7 +3944,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
   };
   coordinator.setEventNotifier(notifyEvent);
 
-  const attachEventListener = (connection, request) => {
+  const attachEventListener = async (connection, request) => {
     const subscriptionId = String(request.subscriptionId || '');
     if (!eventBroker?.webhookSecret) {
       writeMessage(connection, {
@@ -3850,6 +3954,12 @@ function startWithOwnerLock(identity, socket, ownerLock) {
       endConnection(connection);
       return null;
     }
+    // A listener that comes back after its orphaned subscription was archived
+    // gets it back, pending events included.
+    if (!eventBroker.getSubscriptionRecord(subscriptionId)) {
+      await coordinator.reviveRetiredSubscription(subscriptionId);
+    }
+    if (connection.destroyed) return null;
     const details = coordinator.eventSubscriptionDetails(subscriptionId);
     if (!details.ok) {
       writeMessage(connection, details);
@@ -3891,6 +4001,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
     };
     if (!listeners) eventListeners.set(subscriptionId, new Set());
     eventListeners.get(subscriptionId).add(listener);
+    coordinator.noteListenerActivity(subscriptionId);
     writeMessage(connection, {
       ok: true,
       type: 'listening',
@@ -3915,6 +4026,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
       }
       listener.lastHeartbeatAt = new Date().toISOString();
       listener.heartbeatCount += 1;
+      coordinator.noteListenerActivity(listener.subscriptionId);
       coordinator.metrics.eventListenerHeartbeats += 1;
       writeMessage(listener.connection, {
         ok: true,
@@ -4056,8 +4168,8 @@ function startWithOwnerLock(identity, socket, ownerLock) {
         handled = true;
         connection.setTimeout(0);
         if (request.type === 'event-listen') {
-          eventBrokerReady.then(() => {
-            listener = attachEventListener(connection, request);
+          eventBrokerReady.then(() => attachEventListener(connection, request)).then((attached) => {
+            listener = attached;
             finishRequest();
           }, (error) => {
             closeConnectionAfterError(connection, error, listener);
@@ -4116,6 +4228,11 @@ function startWithOwnerLock(identity, socket, ownerLock) {
           result = eventBrokerReady.then(() => coordinator.renewEventSubscription(request.subscriptionId, request.options || {}));
         } else if (request.type === 'events-webhook') {
           result = eventBrokerReady.then(() => coordinator.ingestWebhook(request));
+        } else if (request.type === 'events-revive') {
+          result = eventBrokerReady.then(async () => {
+            await coordinator.reviveRetiredSubscription(request.subscriptionId);
+            return coordinator.eventSubscriptionDetails(request.subscriptionId);
+          });
         } else if (request.type === 'events-reconcile') {
           result = eventBrokerReady.then(() => coordinator.reconcileEvents(request.subscriptionId));
         } else if (request.type === 'api' || request.type === 'exec') {
@@ -4197,6 +4314,7 @@ function startWithOwnerLock(identity, socket, ownerLock) {
     terminating = true;
     if (expirationTimer) clearInterval(expirationTimer);
     if (listenerHeartbeatTimer) clearInterval(listenerHeartbeatTimer);
+    if (orphanRetirementTimer) clearInterval(orphanRetirementTimer);
     if (eventSweepTimer) clearInterval(eventSweepTimer);
     if (firstSweepTimer) clearTimeout(firstSweepTimer);
     if (scheduledGcTimer) clearInterval(scheduledGcTimer);
@@ -4215,6 +4333,11 @@ function startWithOwnerLock(identity, socket, ownerLock) {
     }
     eventListeners.clear();
     stopSourceWatcher();
+    try {
+      eventBroker?.flush?.();
+    } catch (error) {
+      logStructuredError('event_state_flush_failed', error, { identity });
+    }
     const finish = () => {
       cleanUp();
       process.exit(exitCode);
@@ -4300,6 +4423,15 @@ function startWithOwnerLock(identity, socket, ownerLock) {
 
   listenerHeartbeatTimer = setInterval(expireStaleListeners, 60_000);
   listenerHeartbeatTimer.unref?.();
+
+  orphanRetirementTimer = setInterval(() => {
+    try {
+      coordinator.retireOrphanedSubscriptions();
+    } catch (error) {
+      logStructuredError('event_orphan_retirement_failed', error, { identity });
+    }
+  }, ORPHAN_RETIRE_INTERVAL_MS);
+  orphanRetirementTimer.unref?.();
 
   let sweepRunning = false;
   const runEventSweep = () => {
