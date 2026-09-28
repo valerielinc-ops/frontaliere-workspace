@@ -23,6 +23,7 @@ import {
   createDebouncedReloadScheduler,
   GitHubCoordinator,
   isSafeRead,
+  MAX_IN_FLIGHT,
   parseGhApiArguments,
   renderGhApiResponse,
   RESPONSE_TRUNCATED_CODE,
@@ -2419,7 +2420,7 @@ test('adatta la concorrenza delle letture al margine del rate limit', () => {
     socket: '/tmp/frontaliere-github-coordinator-test.sock',
   });
 
-  assert.equal(coordinator.effectiveMaxInFlight(), 8);
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
   coordinator.buckets.set('core', { remaining: '1200', limit: '5000' });
   assert.equal(coordinator.effectiveMaxInFlight(), 6);
   coordinator.buckets.set('core', { remaining: '700', limit: '5000' });
@@ -2444,7 +2445,7 @@ test('ignora un remaining azzerato solo dopo la scadenza del reset', () => {
     limit: '5000',
     reset: String(nowSeconds - 60),
   });
-  assert.equal(coordinator.effectiveMaxInFlight(), 8);
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
 
   coordinator.buckets.set('core', {
     remaining: '0',
@@ -3295,6 +3296,8 @@ test('un body oltre il cap locale non esce piu 0 con JSON mutilato', async () =>
       anonymousRequests: 0,
     },
     observeBucket() {},
+    recordSecondaryUsage() {},
+    invalidationEpoch: 0,
     executeApi: GitHubCoordinator.prototype.executeApi,
   };
 

@@ -438,6 +438,14 @@ async function ensureEventProtocol(identity, { requireWebhookSecret = false, sta
   if (memo) memo.eventProtocolConfirmed = true;
 }
 
+// The daemon schedules jobs round-robin across clients so that one agent's
+// burst cannot hold every slot. A session identifier is the natural client;
+// without one the daemon falls back to the working directory (one worktree
+// per agent). Local socket only: it is never logged or forwarded to GitHub.
+function schedulingClientKey() {
+  return process.env.FRONTALIERE_AGENT_ID || process.env.CLAUDE_CODE_SESSION_ID || null;
+}
+
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
   const normalized = normalizeIdentity(identity);
   const coordinatorResponse = await ensureCoordinator(normalized);
@@ -452,8 +460,13 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
     });
   }
   const timeoutMs = requestTimeoutMilliseconds(request);
+  const client = request?.client || schedulingClientKey();
   const response = await connectWithTransientRetry(
-    { ...request, identity: normalized },
+    {
+      ...request,
+      identity: normalized,
+      ...((request?.type === 'exec' || request?.type === 'api') && client ? { client } : {}),
+    },
     {
       identity: normalized,
       timeoutMs,
