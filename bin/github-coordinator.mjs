@@ -49,18 +49,63 @@ import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const COORDINATOR_PROTOCOL_VERSION = 6;
 const DEFAULT_API_VERSION = process.env.FRONTALIERE_GITHUB_API_VERSION || '2022-11-28';
-const configuredMaxInFlight = Number(process.env.FRONTALIERE_GH_MAX_IN_FLIGHT || 8);
-const MAX_IN_FLIGHT = Number.isFinite(configuredMaxInFlight)
-  ? Math.max(1, Math.floor(configuredMaxInFlight))
-  : 8;
+function positiveIntegerFromEnvironment(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : fallback;
+}
+
+// Global ceiling of GitHub work in flight. The quota was never the constraint
+// (6% of 5,000/h used at peak): the old ceiling of 8 was shared by 50 ms REST
+// reads, multi-second `gh` spawns and 240 MB artifact downloads alike, so a
+// handful of slow commands queued every agent behind them. Each kind of work
+// now has its own lane below; this ceiling only bounds their sum and still
+// shrinks with the observed rate-limit headroom.
+export const MAX_IN_FLIGHT = positiveIntegerFromEnvironment('FRONTALIERE_GH_MAX_IN_FLIGHT', 16);
+export const LANE_LIMITS = Object.freeze({
+  // In-process fetch: REST GETs, GraphQL queries and the `gh api` subset
+  // parsed natively. Cheap locally; bounded by the global ceiling.
+  api: positiveIntegerFromEnvironment('FRONTALIERE_GH_API_LANE', 16),
+  // A spawn of the real `gh` binary per job: CPU and memory on this machine.
+  cli: positiveIntegerFromEnvironment('FRONTALIERE_GH_CLI_LANE', 6),
+  // Long transfers (downloads, clones, job logs, --paginate): they must not
+  // hold the slots of short reads for minutes.
+  bulk: positiveIntegerFromEnvironment('FRONTALIERE_GH_BULK_LANE', 2),
+  // GitHub asks for serialized mutations spaced by one second.
+  mutation: 1,
+});
+export const LANES = Object.freeze(['api', 'cli', 'bulk', 'mutation']);
 const HEADROOM_CONCURRENCY_STEPS = [
   { ratio: 0.30, max: 6 },
   { ratio: 0.15, max: 4 },
   { ratio: 0.05, max: 2 },
 ];
+// GitHub secondary limits: 900 points/min for REST (GET 1, mutation 5) and
+// 2,000 for GraphQL. With 16 slots a runaway loop could cross them in a
+// minute and pause every agent on a 403; stay at 80% of each window.
+export const SECONDARY_LIMIT_WINDOW_MS = 60 * 1_000;
+export const SECONDARY_LIMIT_BUDGETS = Object.freeze({ rest: 720, graphql: 1_600 });
 const MAX_API_ATTEMPTS = 3;
 const MUTATION_GAP_MS = 1_000;
 const CLI_CACHE_TTL_MS = 15_000;
+// A `gh` child that outlives these deadlines is hung (stdin is closed): it
+// would otherwise keep a lane slot until the daemon restarts.
+export const CLI_TIMEOUT_MS = Object.freeze({
+  cli: 5 * 60 * 1_000,
+  bulk: 30 * 60 * 1_000,
+  mutation: 15 * 60 * 1_000,
+});
+const CLI_KILL_GRACE_MS = 5_000;
+// Response caches are bounded LRUs; stale entries survive only to carry
+// ETag/Last-Modified for a conditional request (a 304 costs no quota).
+const MAX_CACHE_ENTRIES = 512;
+const MAX_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_REVALIDATION_BODY_BYTES = 512 * 1024;
+const STALE_CACHE_RETENTION_MS = 30 * 60 * 1_000;
+const MAX_CLI_CACHE_ENTRIES = 256;
+const CACHE_SWEEP_INTERVAL_MS = 60 * 1_000;
+const LATENCY_SAMPLE_LIMIT = 256;
+const MAX_REQUEST_KINDS = 64;
+const WORKING_DIRECTORY_REPO_TTL_MS = 10 * 60 * 1_000;
 const ANONYMOUS_BUDGET = 45;
 const ANONYMOUS_WINDOW_MS = 60 * 60 * 1_000;
 const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
@@ -75,6 +120,8 @@ const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxB
 // receiver/token route; they remain deliberately unbound here.
 const EVENT_ROUTING_IDENTITIES = new Set(['default', 'nanako']);
 
+// Fairness key of the coordinator's own reads (reconciliation, workflow names).
+const EVENT_CLIENT_KEY = 'coordinator:events';
 export const EVENT_SWEEP_INTERVAL_MS = 2 * 60 * 1_000;
 export const EVENT_SWEEP_MIN_INTERVAL_MS = 10 * 60 * 1_000;
 // A sweep is a recovery hint, not a second event-delivery plane.  Keep one
@@ -1057,8 +1104,21 @@ function workflowSelectorMatchesRun(run, selector) {
   return candidates.some((candidate) => expected.has(candidate));
 }
 
+// Headers select the representation (`Accept: …raw` vs JSON) and object bodies
+// must be serialized: `${body}` collapsed every GraphQL query onto
+// "[object Object]".
 function cacheKeyFor(request) {
-  return `${request.identity || 'default'}|${request.anonymous ? 'anonymous' : 'authenticated'}|${String(request.method || 'GET').toUpperCase()}|${request.path}|${request.body || ''}`;
+  const body = request.body === undefined || request.body === null
+    ? ''
+    : typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
+  const headers = request.headers && typeof request.headers === 'object'
+    ? Object.entries(request.headers)
+      .filter(([name]) => name.toLowerCase() !== 'authorization')
+      .map(([name, value]) => `${name.toLowerCase()}:${value}`)
+      .sort()
+      .join('\n')
+    : '';
+  return `${request.identity || 'default'}|${request.anonymous ? 'anonymous' : 'authenticated'}|${String(request.method || 'GET').toUpperCase()}|${request.path}|${body}|${headers}`;
 }
 
 function scopedCacheKeyFor(request) {
@@ -1109,7 +1169,7 @@ function cancellationApiDetails(pathname, method) {
 function repoFromCliArguments(args) {
   for (let index = 0; index < args.length; index += 1) {
     const value = String(args[index]);
-    if (value === '--repo' && args[index + 1]) return String(args[index + 1]);
+    if ((value === '--repo' || value === '-R') && args[index + 1]) return String(args[index + 1]);
     if (value.startsWith('--repo=')) return value.slice('--repo='.length);
   }
   return null;
@@ -1395,6 +1455,13 @@ export function renderGhApiResponse(pages, parsed) {
   return { ok: true, output: parsed.silent ? '' : output };
 }
 
+export function latencySummary(samples) {
+  if (!Array.isArray(samples) || samples.length === 0) return { samples: 0, p50: null, p95: null, max: null };
+  const sorted = [...samples].sort((left, right) => left - right);
+  const at = (percentile) => sorted[Math.min(sorted.length - 1, Math.floor(percentile * sorted.length))];
+  return { samples: sorted.length, p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] };
+}
+
 function isPastRateLimitReset(observed, now = Date.now()) {
   const reset = observed?.reset;
   if (reset === null || reset === undefined) return false;
@@ -1420,10 +1487,23 @@ export class GitHubCoordinator {
     this.active = 0;
     this.activeMutations = 0;
     this.lastMutationAt = 0;
+    this.lastMutationStartedAt = 0;
+    this.laneActive = Object.fromEntries(LANES.map((lane) => [lane, 0]));
+    this.activeByClient = new Map();
+    this.secondaryWindow = { rest: [], graphql: [] };
+    this.secondaryWindowPoints = { rest: 0, graphql: 0 };
+    this.latencySamples = Object.fromEntries(LANES.map((lane) => [lane, { queueWait: [], run: [] }]));
+    this.requestKinds = new Map();
+    this.wakeAt = 0;
     this.pendingGets = new Map();
     this.pendingCli = new Map();
     this.cache = new Map();
+    this.cacheBytes = 0;
     this.cliCache = new Map();
+    this.lastCacheSweepAt = Date.now();
+    this.invalidationEpoch = 0;
+    this.globalInvalidationEpoch = 0;
+    this.scopeInvalidationEpoch = new Map();
     this.workflowFilenameCache = new Map();
     this.bucketPausedUntil = new Map();
     this.buckets = new Map();
@@ -1459,6 +1539,13 @@ export class GitHubCoordinator {
       eventSweepDeliveries: 0,
       eventSweepErrors: 0,
       eventScheduledGcRuns: 0,
+      peakQueueLength: 0,
+      peakActive: 0,
+      cacheEvictions: 0,
+      cacheInvalidations: 0,
+      cacheScopedInvalidations: 0,
+      secondaryLimitDeferrals: 0,
+      cliTimeouts: 0,
     };
     this.sweepReconciledAt = new Map();
     this.lastScheduledGc = null;
@@ -1509,7 +1596,9 @@ export class GitHubCoordinator {
         buckets: Object.fromEntries(this.buckets.entries()),
         pausedUntil: Object.fromEntries(this.bucketPausedUntil.entries()),
         metrics: { ...this.metrics },
+        scheduler: this.schedulerStatus(),
         cacheEntries: this.cache.size,
+        cacheBytes: this.cacheBytes,
         cliCacheEntries: this.cliCache.size,
         // Compact status is deliberately liveness-only. Event counts and
         // subscription details belong to the explicit events-summary/status
@@ -1537,7 +1626,9 @@ export class GitHubCoordinator {
       buckets: Object.fromEntries(this.buckets.entries()),
       pausedUntil: Object.fromEntries(this.bucketPausedUntil.entries()),
       metrics: { ...this.metrics },
+      scheduler: this.schedulerStatus({ detailed: true }),
       cacheEntries: this.cache.size,
+      cacheBytes: this.cacheBytes,
       cliCacheEntries: this.cliCache.size,
       events: this.eventBroker
         ? {
@@ -1706,6 +1797,7 @@ export class GitHubCoordinator {
       cached = this.submit({
         type: 'api',
         identity: this.identity,
+        client: EVENT_CLIENT_KEY,
         method: 'GET',
         path: `/repos/${repo}/actions/workflows?per_page=100`,
         cacheTtlMs: 0,
@@ -2180,6 +2272,7 @@ export class GitHubCoordinator {
     const response = await this.submit({
       type: 'api',
       identity: this.identity,
+      client: EVENT_CLIENT_KEY,
       method: 'GET',
       path,
       cacheTtlMs: 0,
@@ -2232,6 +2325,7 @@ export class GitHubCoordinator {
       const runsResponse = await this.submit({
         type: 'api',
         identity: this.identity,
+        client: EVENT_CLIENT_KEY,
         method: 'GET',
         path: `/repos/${subscription.repo}/actions/runs?${query.toString()}`,
         cacheTtlMs: 0,
@@ -2418,15 +2512,20 @@ export class GitHubCoordinator {
     const queuedRequest = this.shouldRouteEmergencyAnonymous(request)
       ? { ...request, anonymous: true }
       : request;
-    const isGet = queuedRequest.type === 'api' && isSafeRead(queuedRequest.method);
-    const key = isGet ? scopedCacheKeyFor(queuedRequest) : null;
+    const meta = classifyJob(queuedRequest);
+    const now = Date.now();
+    this.sweepCachesIfDue(now);
+    const isRead = !meta.mutation;
+    const key = queuedRequest.type === 'api' && isRead ? scopedCacheKeyFor(queuedRequest) : null;
     const isReadCli = queuedRequest.type === 'exec'
-      && !cliCommandIsMutation(queuedRequest.args || [])
-      && !cliCommandWritesLocalOutput(queuedRequest.args || []);
+      && isRead
+      && !cliCommandWritesLocalOutput((queuedRequest.args || []).map(String));
     const cliKey = isReadCli ? cliCacheKeyFor(queuedRequest) : null;
     const cachedCli = cliKey ? this.cliCache.get(cliKey) : null;
-    if (cachedCli && cachedCli.expiresAt > Date.now()) {
+    if (cachedCli && cachedCli.expiresAt > now) {
       this.metrics.cliCacheHits += 1;
+      this.cliCache.delete(cliKey);
+      this.cliCache.set(cliKey, cachedCli);
       return Promise.resolve({ ...cachedCli.response, fromCache: true });
     }
     if (cachedCli) this.cliCache.delete(cliKey);
@@ -2436,7 +2535,17 @@ export class GitHubCoordinator {
     if (existing) return existing;
 
     const promise = new Promise((resolvePromise, rejectPromise) => {
-      this.queue.push({ request: queuedRequest, resolve: resolvePromise, reject: rejectPromise, attempts: 0, key, cliKey });
+      this.queue.push({
+        request: queuedRequest,
+        resolve: resolvePromise,
+        reject: rejectPromise,
+        attempts: 0,
+        key,
+        cliKey,
+        meta,
+        enqueuedAtMs: now,
+      });
+      this.metrics.peakQueueLength = Math.max(this.metrics.peakQueueLength, this.queue.length);
       this.pump();
     });
     if (key) {
@@ -2450,20 +2559,91 @@ export class GitHubCoordinator {
       promise.finally(() => {
         if (this.pendingCli.get(cliKey) === promise) this.pendingCli.delete(cliKey);
       }).catch(() => {});
+      const epochAtSubmit = this.invalidationEpoch;
       promise.then((response) => {
-        if (response?.ok && !response.stdoutFile) {
+        if (response?.ok && !response.stdoutFile && !this.invalidatedSince(meta.scope, epochAtSubmit)) {
+          this.cliCache.delete(cliKey);
           this.cliCache.set(cliKey, {
             response,
+            scope: meta.scope,
             expiresAt: Date.now() + CLI_CACHE_TTL_MS,
           });
+          while (this.cliCache.size > MAX_CLI_CACHE_ENTRIES) {
+            this.cliCache.delete(this.cliCache.keys().next().value);
+          }
         }
       }).catch(() => {});
     }
-    if (queuedRequest.type === 'api' && !isGet || queuedRequest.type === 'exec' && !isReadCli) {
-      this.cache.clear();
-      this.cliCache.clear();
-    }
+    if (meta.mutation) this.invalidateCaches(meta.scope);
     return promise;
+  }
+
+  /**
+   * Forget cached reads a mutation may have changed: the ones of the same
+   * repository plus every entry of unknown scope, or everything when the
+   * mutation's repository is unknown. It used to clear both caches whole on
+   * every write of any agent, which is why a day of traffic produced a single
+   * cache hit. Entries carrying a validator stay as stale: the next read sends
+   * a conditional request instead of refetching the body.
+   */
+  invalidateCaches(scope = null) {
+    this.metrics.cacheInvalidations += 1;
+    this.invalidationEpoch += 1;
+    if (scope) {
+      this.metrics.cacheScopedInvalidations += 1;
+      this.scopeInvalidationEpoch.set(scope, this.invalidationEpoch);
+    } else {
+      this.globalInvalidationEpoch = this.invalidationEpoch;
+    }
+    for (const [cacheKey, entry] of this.cache) {
+      if (scope && entry.scope && entry.scope !== scope) continue;
+      if (entry.headers?.etag || entry.headers?.['last-modified']) {
+        entry.expiresAt = 0;
+      } else {
+        this.cacheDelete(cacheKey);
+      }
+    }
+    for (const [cacheKey, entry] of this.cliCache) {
+      if (scope && entry.scope && entry.scope !== scope) continue;
+      this.cliCache.delete(cacheKey);
+    }
+  }
+
+  cacheDelete(cacheKey) {
+    const entry = this.cache.get(cacheKey);
+    if (!entry) return;
+    this.cache.delete(cacheKey);
+    this.cacheBytes = Math.max(0, this.cacheBytes - (entry.bytes || 0));
+  }
+
+  cacheStore(cacheKey, entry) {
+    this.cacheDelete(cacheKey);
+    this.cache.set(cacheKey, entry);
+    this.cacheBytes += entry.bytes || 0;
+    while (this.cache.size > MAX_CACHE_ENTRIES || (this.cacheBytes > MAX_CACHE_BYTES && this.cache.size > 1)) {
+      this.cacheDelete(this.cache.keys().next().value);
+      this.metrics.cacheEvictions += 1;
+    }
+  }
+
+  cacheTouch(cacheKey, entry) {
+    entry.lastUsedAt = Date.now();
+    this.cache.delete(cacheKey);
+    this.cache.set(cacheKey, entry);
+  }
+
+  sweepCachesIfDue(now = Date.now()) {
+    if (now - this.lastCacheSweepAt < CACHE_SWEEP_INTERVAL_MS) return;
+    this.lastCacheSweepAt = now;
+    for (const [cacheKey, entry] of this.cliCache) {
+      if (!(entry.expiresAt > now)) this.cliCache.delete(cacheKey);
+    }
+    for (const [cacheKey, entry] of this.cache) {
+      if (entry.expiresAt > now) continue;
+      const hasValidator = Boolean(entry.headers?.etag || entry.headers?.['last-modified']);
+      const idleMs = now - (entry.lastUsedAt || entry.storedAt || 0);
+      if (!hasValidator || idleMs > STALE_CACHE_RETENTION_MS) this.cacheDelete(cacheKey);
+    }
   }
 
   enqueueAgain(job, delayMs) {
@@ -2473,31 +2653,98 @@ export class GitHubCoordinator {
     }, Math.max(0, delayMs));
   }
 
+  jobMeta(job) {
+    if (!job.meta) job.meta = classifyJob(job.request);
+    return job.meta;
+  }
+
   jobBucket(job) {
-    const bucket = job.request.type === 'api'
-      ? (job.request.bucket || classifyBucket(job.request.path, job.request.method))
-      : classifyCliBucket(job.request.args || []);
-    return job.request.anonymous ? `${bucket}-anonymous` : bucket;
+    return this.jobMeta(job).bucket;
   }
 
   jobIsMutation(job) {
-    if (job.request.type === 'api') return !isSafeRead(job.request.method);
-    return cliCommandIsMutation(job.request.args || []);
+    return this.jobMeta(job).mutation;
   }
 
+  laneLimit(lane) {
+    return LANE_LIMITS[lane] ?? 1;
+  }
+
+  pruneSecondaryWindow(now = Date.now()) {
+    for (const family of Object.keys(this.secondaryWindow)) {
+      const window = this.secondaryWindow[family];
+      let expired = 0;
+      while (expired < window.length && window[expired].atMs <= now - SECONDARY_LIMIT_WINDOW_MS) {
+        this.secondaryWindowPoints[family] -= window[expired].points;
+        expired += 1;
+      }
+      if (expired > 0) window.splice(0, expired);
+    }
+  }
+
+  recordSecondaryUsage(family, points, now = Date.now()) {
+    const key = family === 'graphql' ? 'graphql' : 'rest';
+    this.secondaryWindow[key].push({ atMs: now, points });
+    this.secondaryWindowPoints[key] += points;
+  }
+
+  // 0 when the job may start now, Infinity when only a completing job can
+  // unblock it (lane full, mutation in flight), otherwise the instant at
+  // which it becomes runnable.
+  jobBlockedUntil(job, now) {
+    const meta = this.jobMeta(job);
+    const pausedUntil = this.bucketPausedUntil.get(meta.bucket) || 0;
+    if (pausedUntil > now) return pausedUntil;
+    if (this.laneActive[meta.lane] >= this.laneLimit(meta.lane)) return Infinity;
+    if (meta.mutation) {
+      if (this.activeMutations > 0) return Infinity;
+      // Serialized and at least one second apart start to start: GitHub's
+      // guidance for writes. Counting the gap from the previous completion
+      // added a second to every write of every agent.
+      const gapAt = this.lastMutationStartedAt + MUTATION_GAP_MS;
+      if (now < gapAt) return gapAt;
+    }
+    const family = meta.family === 'graphql' ? 'graphql' : 'rest';
+    if (this.secondaryWindowPoints[family] >= SECONDARY_LIMIT_BUDGETS[family]) {
+      const oldest = this.secondaryWindow[family][0];
+      return oldest ? oldest.atMs + SECONDARY_LIMIT_WINDOW_MS + 1 : now + 1_000;
+    }
+    return 0;
+  }
+
+  /**
+   * The runnable job whose client has the fewest jobs in flight, first in
+   * queue order among equals. Plain FIFO let one agent that queued fifty
+   * reads hold every slot while the others waited behind it.
+   */
   nextRunnableJob() {
     const now = Date.now();
+    this.pruneSecondaryWindow(now);
+    let bestIndex = -1;
+    let bestLoad = Infinity;
+    let deferredBySecondaryLimit = false;
     for (let index = 0; index < this.queue.length; index += 1) {
       const job = this.queue[index];
-      const bucket = this.jobBucket(job);
-      if ((this.bucketPausedUntil.get(bucket) || 0) > now) continue;
-      const mutation = this.jobIsMutation(job);
-      if (mutation && this.activeMutations > 0) continue;
-      if (mutation && now < this.lastMutationAt + MUTATION_GAP_MS) continue;
-      this.queue.splice(index, 1);
-      return job;
+      const blockedUntil = this.jobBlockedUntil(job, now);
+      if (blockedUntil !== 0) {
+        if (Number.isFinite(blockedUntil) && !deferredBySecondaryLimit) {
+          const family = job.meta.family === 'graphql' ? 'graphql' : 'rest';
+          deferredBySecondaryLimit = this.secondaryWindowPoints[family] >= SECONDARY_LIMIT_BUDGETS[family];
+        }
+        continue;
+      }
+      const load = this.activeByClient.get(job.meta.client) || 0;
+      if (load < bestLoad) {
+        bestIndex = index;
+        bestLoad = load;
+        if (load === 0) break;
+      }
     }
-    return null;
+    if (bestIndex < 0) {
+      if (deferredBySecondaryLimit) this.metrics.secondaryLimitDeferrals += 1;
+      return null;
+    }
+    return this.queue.splice(bestIndex, 1)[0];
   }
 
   pump() {
@@ -2507,54 +2754,138 @@ export class GitHubCoordinator {
         this.scheduleNextWake();
         break;
       }
-      this.active += 1;
-      if (this.jobIsMutation(job)) this.activeMutations += 1;
-      // Do not invoke several first-use fetch/CLI jobs synchronously from the
-      // same pump call. Node may lazily initialize Promise/undici/child-process
-      // internals on that path; with a burst of queued reads the initialization
-      // can recursively monopolize the event loop and starve the Unix socket.
-      // Reserving the slot now preserves the concurrency limit, while the
-      // actual job starts on the next turn and lets RPC traffic be serviced.
-      setImmediate(() => {
-        this.run(job).catch((error) => job.reject(error)).finally(() => {
-          this.active -= 1;
-          if (this.jobIsMutation(job)) {
-            this.activeMutations -= 1;
-            this.lastMutationAt = Date.now();
-            this.cache.clear();
-            this.cliCache.clear();
-          }
-          this.pump();
-        });
-      });
+      this.startJob(job);
     }
   }
 
+  startJob(job) {
+    const meta = this.jobMeta(job);
+    const startedAt = Date.now();
+    this.active += 1;
+    this.laneActive[meta.lane] += 1;
+    this.activeByClient.set(meta.client, (this.activeByClient.get(meta.client) || 0) + 1);
+    if (meta.mutation) {
+      this.activeMutations += 1;
+      this.lastMutationStartedAt = startedAt;
+    }
+    this.metrics.peakActive = Math.max(this.metrics.peakActive, this.active);
+    this.recordLatencySample(meta.lane, 'queueWait', startedAt - (job.enqueuedAtMs || startedAt));
+    // Do not invoke several first-use fetch/CLI jobs synchronously from the
+    // same pump call. Node may lazily initialize Promise/undici/child-process
+    // internals on that path; with a burst of queued reads the initialization
+    // can recursively monopolize the event loop and starve the Unix socket.
+    // Reserving the slot now preserves the concurrency limit, while the
+    // actual job starts on the next turn and lets RPC traffic be serviced.
+    setImmediate(() => {
+      this.run(job).catch((error) => job.reject(error)).finally(() => {
+        const finishedAt = Date.now();
+        this.active -= 1;
+        this.laneActive[meta.lane] -= 1;
+        const clientLoad = (this.activeByClient.get(meta.client) || 1) - 1;
+        if (clientLoad > 0) this.activeByClient.set(meta.client, clientLoad);
+        else this.activeByClient.delete(meta.client);
+        if (meta.mutation) {
+          this.activeMutations -= 1;
+          this.lastMutationAt = finishedAt;
+          this.invalidateCaches(meta.scope);
+        }
+        this.recordLatencySample(meta.lane, 'run', finishedAt - startedAt);
+        this.recordRequestKind(meta.kind, finishedAt - startedAt, job.failed === true);
+        this.pump();
+      });
+    });
+  }
+
   scheduleNextWake() {
-    if (this.wakeTimer || this.queue.length === 0) return;
+    if (this.queue.length === 0) return;
     const now = Date.now();
     let nextAt = Infinity;
     for (const job of this.queue) {
-      const bucketAt = this.bucketPausedUntil.get(this.jobBucket(job)) || 0;
-      let availableAt = Math.max(now, bucketAt);
-      if (this.jobIsMutation(job)) {
-        if (this.activeMutations > 0) continue;
-        availableAt = Math.max(availableAt, this.lastMutationAt + MUTATION_GAP_MS);
-      }
-      nextAt = Math.min(nextAt, availableAt);
+      const blockedUntil = this.jobBlockedUntil(job, now);
+      if (blockedUntil === 0) return;
+      nextAt = Math.min(nextAt, blockedUntil);
     }
     if (!Number.isFinite(nextAt) || nextAt <= now) return;
+    // A job that becomes runnable sooner than the pending wake (a write after
+    // its one-second gap while another bucket is paused for a minute) must
+    // not wait for the later timer.
+    if (this.wakeTimer && this.wakeAt <= nextAt) return;
+    if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    this.wakeAt = nextAt;
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = null;
+      this.wakeAt = 0;
       this.pump();
     }, nextAt - now);
+    this.wakeTimer.unref?.();
+  }
+
+  recordLatencySample(lane, kind, milliseconds) {
+    const samples = this.latencySamples[lane]?.[kind];
+    if (!samples) return;
+    samples.push(Math.max(0, Math.round(milliseconds)));
+    if (samples.length > LATENCY_SAMPLE_LIMIT) samples.splice(0, samples.length - LATENCY_SAMPLE_LIMIT);
+  }
+
+  recordRequestKind(kind, milliseconds, failed) {
+    let name = kind || 'other';
+    if (!this.requestKinds.has(name) && this.requestKinds.size >= MAX_REQUEST_KINDS) name = 'other';
+    const entry = this.requestKinds.get(name) || { count: 0, failed: 0, totalMs: 0, maxMs: 0 };
+    entry.count += 1;
+    if (failed) entry.failed += 1;
+    entry.totalMs += Math.max(0, milliseconds);
+    entry.maxMs = Math.max(entry.maxMs, milliseconds);
+    this.requestKinds.set(name, entry);
+  }
+
+  schedulerStatus({ detailed = false } = {}) {
+    const queuedByLane = Object.fromEntries(LANES.map((lane) => [lane, 0]));
+    const queuedClients = new Set();
+    for (const job of this.queue) {
+      const meta = this.jobMeta(job);
+      queuedByLane[meta.lane] = (queuedByLane[meta.lane] || 0) + 1;
+      queuedClients.add(meta.client);
+    }
+    this.pruneSecondaryWindow();
+    const allWaits = LANES.flatMap((lane) => this.latencySamples[lane].queueWait);
+    const status = {
+      lanes: Object.fromEntries(LANES.map((lane) => [lane, {
+        limit: this.laneLimit(lane),
+        active: this.laneActive[lane],
+        queued: queuedByLane[lane],
+      }])),
+      activeClients: this.activeByClient.size,
+      queuedClients: queuedClients.size,
+      queueWaitMs: latencySummary(allWaits),
+      secondaryLimit: {
+        windowMs: SECONDARY_LIMIT_WINDOW_MS,
+        rest: { used: this.secondaryWindowPoints.rest, budget: SECONDARY_LIMIT_BUDGETS.rest },
+        graphql: { used: this.secondaryWindowPoints.graphql, budget: SECONDARY_LIMIT_BUDGETS.graphql },
+      },
+    };
+    if (!detailed) return status;
+    status.latency = Object.fromEntries(LANES.map((lane) => [lane, {
+      queueWaitMs: latencySummary(this.latencySamples[lane].queueWait),
+      runMs: latencySummary(this.latencySamples[lane].run),
+    }]));
+    status.requestKinds = [...this.requestKinds.entries()]
+      .sort((left, right) => right[1].count - left[1].count)
+      .slice(0, 20)
+      .map(([kind, entry]) => ({
+        kind,
+        count: entry.count,
+        failed: entry.failed,
+        avgMs: Math.round(entry.totalMs / Math.max(1, entry.count)),
+        maxMs: Math.round(entry.maxMs),
+      }));
+    return status;
   }
 
   async run(job) {
     try {
       let response = job.request.type === 'api'
         ? await this.executeApi(job.request)
-        : await this.executeCli(job.request);
+        : await this.executeCli(job.request, this.jobMeta(job));
       let usedAnonymousFallback = false;
       if (response.rateLimited) {
         let delayMs = this.recordRateLimit(job.request, response);
@@ -2573,12 +2904,15 @@ export class GitHubCoordinator {
           && isSafeRead(job.request.method)
           && job.attempts + 1 < MAX_API_ATTEMPTS) {
           job.attempts += 1;
+          job.enqueuedAtMs = Date.now();
           this.enqueueAgain(job, delayMs);
           return;
         }
       }
+      job.failed = response?.ok === false;
       job.resolve(response);
     } catch (error) {
+      job.failed = true;
       job.reject(error);
     }
   }
@@ -2622,10 +2956,13 @@ export class GitHubCoordinator {
     const bucket = request.anonymous ? `${baseBucket}-anonymous` : baseBucket;
     const key = scopedCacheKeyFor({ ...request, method });
     const ttl = Math.max(0, Math.min(MAX_CACHE_TTL_MS, Number(request.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS)));
-    const cacheable = isSafeRead(method) && ttl > 0;
-    const cached = cacheable ? this.cache.get(key) : null;
-    if (cached && cached.expiresAt > Date.now()) {
+    const read = apiRequestIsRead({ ...request, method });
+    // A read with ttl 0 is never answered from memory, but it still sends the
+    // stored validator: a 304 is current by definition and costs no quota.
+    const cached = read ? this.cache.get(key) : null;
+    if (cached && ttl > 0 && cached.expiresAt > Date.now()) {
       this.metrics.cacheHits += 1;
+      this.cacheTouch(key, cached);
       return cacheResponse(cached, 'hit');
     }
 
@@ -2665,8 +3002,11 @@ export class GitHubCoordinator {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1_000, Number(request.timeoutMs || 30_000)));
     let response;
+    let redirected = false;
+    const epochAtStart = this.invalidationEpoch;
     this.metrics.networkRequests += 1;
     if (request.anonymous) this.metrics.anonymousRequests += 1;
+    this.recordSecondaryUsage(isGraphqlPath(request.path) ? 'graphql' : 'rest', read ? 1 : 5);
     const sourceUrl = apiUrl(request.path);
     try {
       response = await fetch(sourceUrl, {
@@ -2680,6 +3020,7 @@ export class GitHubCoordinator {
       });
       const redirectTarget = externalRedirectTarget(response, sourceUrl);
       if (redirectTarget) {
+        redirected = true;
         response = await fetch(redirectTarget, {
           method: 'GET',
           headers: {
@@ -2707,8 +3048,10 @@ export class GitHubCoordinator {
     } = await readResponseBody(response);
     if (response.status === 304 && cached) {
       this.metrics.cacheRevalidations += 1;
-      cached.expiresAt = Date.now() + ttl;
+      cached.expiresAt = this.invalidatedSince(cached.scope, epochAtStart) ? 0 : Date.now() + ttl;
       cached.headers = { ...cached.headers, ...responseHeaders };
+      if (this.cache.get(key) === cached) this.cacheTouch(key, cached);
+      else this.cacheStore(key, cached);
       return cacheResponse(cached, 'revalidated');
     }
 
@@ -2760,18 +3103,37 @@ export class GitHubCoordinator {
       headers: renderedHeaders,
       body,
     };
-    if (cacheable && response.ok) {
-      this.cache.set(key, {
-        status: response.status,
-        headers: renderedHeaders,
-        body,
-        expiresAt: Date.now() + ttl,
-      });
+    if (read && response.ok && !redirected) {
+      const bytes = Buffer.byteLength(body || '', 'utf8');
+      const hasValidator = Boolean(renderedHeaders.etag || renderedHeaders['last-modified']);
+      if (ttl > 0 || (hasValidator && bytes <= MAX_REVALIDATION_BODY_BYTES)) {
+        const storedAt = Date.now();
+        this.cacheStore(key, {
+          status: response.status,
+          headers: renderedHeaders,
+          body,
+          bytes,
+          scope: repoScopeFromPath(request.path),
+          storedAt,
+          lastUsedAt: storedAt,
+          // A mutation of this scope that completed while the read was in
+          // flight may postdate the body: keep only its validator.
+          expiresAt: ttl > 0 && !this.invalidatedSince(repoScopeFromPath(request.path), epochAtStart)
+            ? storedAt + ttl
+            : 0,
+        });
+      }
     }
     return result;
   }
 
-  async executeCli(request) {
+  invalidatedSince(scope, epoch) {
+    if (this.globalInvalidationEpoch > epoch) return true;
+    if (!scope) return this.invalidationEpoch > epoch;
+    return (this.scopeInvalidationEpoch.get(scope) || 0) > epoch;
+  }
+
+  async executeCli(request, meta = classifyJob(request)) {
     this.metrics.cliCommands += 1;
     const requestedArgs = Array.isArray(request.args) ? request.args.map(String) : [];
     let args;
@@ -2799,7 +3161,11 @@ export class GitHubCoordinator {
     const parsedApi = parseGhApiArguments(args);
     if (parsedApi) return this.executeParsedApi(parsedApi, { anonymous: Boolean(request.anonymous) });
 
+    this.recordSecondaryUsage(meta.family, meta.points);
+    const timeoutMs = meta.timeoutMs ?? CLI_TIMEOUT_MS[meta.lane] ?? CLI_TIMEOUT_MS.cli;
     return new Promise((resolvePromise) => {
+      let timedOut = false;
+      let killTimer = null;
       const child = spawn(this.realGh, args, {
         cwd: safeCwd(request.cwd),
         env: {
@@ -2815,20 +3181,38 @@ export class GitHubCoordinator {
         stdio: [stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
       if (stdin !== null) child.stdin.end(stdin);
+      const deadline = setTimeout(() => {
+        timedOut = true;
+        this.metrics.cliTimeouts += 1;
+        child.kill('SIGTERM');
+        killTimer = setTimeout(() => child.kill('SIGKILL'), CLI_KILL_GRACE_MS);
+        killTimer.unref?.();
+      }, timeoutMs);
+      deadline.unref?.();
       const stdout = [];
       const stderr = [];
       child.stdout.on('data', (chunk) => stdout.push(chunk));
       child.stderr.on('data', (chunk) => stderr.push(chunk));
-      child.on('error', (error) => resolvePromise({
-        ok: false,
-        exitCode: 1,
-        stdout: '',
-        stderr: `${error.message}\n`,
-      }));
-      child.on('close', (exitCode, signal) => {
+      child.on('error', (error) => {
+        clearTimeout(deadline);
+        if (killTimer) clearTimeout(killTimer);
+        resolvePromise({
+          ok: false,
+          exitCode: 1,
+          stdout: '',
+          stderr: `${error.message}\n`,
+        });
+      });
+      child.on('close', (closeCode, signal) => {
+        clearTimeout(deadline);
+        if (killTimer) clearTimeout(killTimer);
+        // 124 like timeout(1): the command did not complete, whatever it printed.
+        const exitCode = timedOut ? 124 : closeCode;
         const outBuffer = Buffer.concat(stdout);
         const out = outBuffer.toString('utf8');
-        const err = Buffer.concat(stderr).toString('utf8');
+        const err = `${Buffer.concat(stderr).toString('utf8')}${timedOut
+          ? `github-coordinator: gh interrotto dal daemon dopo ${Math.round(timeoutMs / 1_000)} s senza terminare (corsia ${meta.lane}).\n`
+          : ''}`;
         const combined = `${out}\n${err}`;
         const looksLimited = exitCode !== 0 && bodyLooksRateLimited(combined);
         // Output oltre il cap del protocollo (log di job da centinaia di MB):
@@ -2860,7 +3244,7 @@ export class GitHubCoordinator {
         headers: parsed.headers,
         body: parsed.body,
         anonymous,
-        cacheTtlMs: isSafeRead(parsed.method) ? DEFAULT_CACHE_TTL_MS : 0,
+        cacheTtlMs: apiRequestIsRead({ method: parsed.method, path, body: parsed.body }) ? DEFAULT_CACHE_TTL_MS : 0,
       });
       if (response.rateLimited) {
         return {
@@ -2909,21 +3293,117 @@ export class GitHubCoordinator {
 function classifyCliBucket(args) {
   if (args[0] === 'graphql') return 'graphql';
   if (args[0] === 'api') {
-    const parsed = parseGhApiArguments(args);
-    return parsed ? classifyBucket(parsed.path, parsed.method) : 'core';
+    const invocation = cliApiInvocation(args);
+    return invocation.parsed
+      ? classifyBucket(invocation.parsed.path, invocation.parsed.method)
+      : invocation.graphql ? 'graphql' : classifyBucket(invocation.path, invocation.method);
   }
   return 'core';
 }
 
+/**
+ * True unless the GraphQL document is certainly a read. `gh api graphql` is a
+ * POST, and treating every query as a mutation serialized it behind the write
+ * lane with a one-second gap and flushed every cache. Comments and string
+ * literals are stripped first; any `mutation`/`subscription` keyword left (or
+ * an unreadable document) keeps the conservative answer.
+ */
+export function graphqlOperationIsMutation(query) {
+  if (typeof query !== 'string' || query.trim() === '') return true;
+  const text = query
+    .replace(/"""[\s\S]*?"""/g, '""')
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
+    .replace(/#[^\n\r]*/g, ' ');
+  return /\b(?:mutation|subscription)\b/.test(text);
+}
+
+function graphqlQueryFromBody(body) {
+  if (body && typeof body === 'object') return body.query;
+  if (typeof body !== 'string') return null;
+  try { return JSON.parse(body)?.query ?? null; } catch { return null; }
+}
+
+function isGraphqlPath(path) {
+  const pathname = String(path || '').split('?')[0];
+  return pathname === '/graphql' || pathname === 'graphql';
+}
+
+/** Whether an API request only reads: safe REST methods or a GraphQL query. */
+export function apiRequestIsRead(request) {
+  const method = String(request?.method || 'GET').toUpperCase();
+  if (isSafeRead(method)) return true;
+  return method === 'POST'
+    && isGraphqlPath(request?.path)
+    && !graphqlOperationIsMutation(graphqlQueryFromBody(request?.body));
+}
+
+// The method and, for GraphQL, the document of a `gh api` invocation the
+// native parser rejects (templates, --input, …). With fields and no explicit
+// --method the real gh sends a POST: calling that a read cached and deduped
+// writes.
+function cliApiInvocation(args) {
+  const parsed = parseGhApiArguments(args);
+  if (parsed) {
+    const graphql = parsed.path === '/graphql';
+    return { parsed, graphql, method: parsed.method, path: parsed.path, query: graphql ? parsed.body?.query : null };
+  }
+  let method = null;
+  let endpoint = null;
+  let query = null;
+  let sendsBody = false;
+  const optionsWithValue = new Set([
+    '--cache', '--header', '--hostname', '--jq', '--preview', '--repo', '--template', '-H', '-t', '-q', '-p',
+  ]);
+  for (let index = 1; index < args.length; index += 1) {
+    const value = String(args[index]);
+    if (value === '--method' || value === '-X') {
+      method = String(args[index + 1] || '');
+      index += 1;
+    } else if (value.startsWith('--method=')) {
+      method = value.slice('--method='.length);
+    } else if (['-f', '-F', '--field', '--raw-field'].includes(value)) {
+      const field = String(args[index + 1] || '');
+      if (field.startsWith('query=')) query = field.slice('query='.length);
+      sendsBody = true;
+      index += 1;
+    } else if (/^--(?:raw-)?field=/.test(value)) {
+      const field = value.slice(value.indexOf('=') + 1);
+      if (field.startsWith('query=')) query = field.slice('query='.length);
+      sendsBody = true;
+    } else if (value === '--input') {
+      sendsBody = true;
+      index += 1;
+    } else if (value.startsWith('--input=')) {
+      sendsBody = true;
+    } else if (optionsWithValue.has(value)) {
+      index += 1;
+    } else if (!value.startsWith('-') && endpoint === null) {
+      endpoint = value;
+    }
+  }
+  const path = endpoint === null ? '' : endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const graphql = endpoint === 'graphql' || path === '/graphql';
+  const normalizedMethod = String(method || (sendsBody || graphql ? 'POST' : 'GET')).toUpperCase();
+  // A document read from a file (`query=@file.graphql`) cannot be inspected.
+  const inspectableQuery = typeof query === 'string' && !query.startsWith('@') ? query : null;
+  return { parsed: null, graphql, method: normalizedMethod, path, query: inspectableQuery };
+}
+
+// Verbs of `gh <noun> <verb>` that only read from GitHub, and top-level
+// commands without a verb that do the same.
+const CLI_READ_VERBS = new Set(['list', 'view', 'status', 'diff', 'checks', 'log', 'get']);
+const CLI_READ_COMMANDS = new Set(['search', 'status', 'version', '--version', 'help', '--help']);
+
 function cliCommandIsMutation(args) {
   if (cancellationRequestDetails({ type: 'exec', args })) return true;
   if (args[0] === 'api') {
-    const parsed = parseGhApiArguments(args);
-    return parsed ? !isSafeRead(parsed.method) : args.some((value) => value === '--method' || value === '-X' || value.startsWith('--method='));
+    const invocation = cliApiInvocation(args);
+    if (invocation.graphql) return invocation.method !== 'POST' || graphqlOperationIsMutation(invocation.query);
+    return !isSafeRead(invocation.method);
   }
   if (args[0] === 'graphql') return args.includes('--field') || args.includes('-f') || args.includes('--raw-field');
-  const readOnly = new Set(['list', 'view', 'status', 'diff', 'checks', 'log']);
-  return !readOnly.has(args[1]) && !cliCommandWritesLocalOutput(args);
+  if (CLI_READ_COMMANDS.has(args[0])) return false;
+  return !CLI_READ_VERBS.has(args[1]) && !cliCommandWritesLocalOutput(args);
 }
 
 // `gh run download` / `gh release download` only READ from GitHub, but their
@@ -2931,9 +3411,175 @@ function cliCommandIsMutation(args) {
 // mutation parked every write of the workspace behind a 240 MB artifact for
 // ~19.5 minutes (nextRunnableJob skips mutations while one is active). They
 // are not cacheable either: a cached `ok` would report a download that wrote
-// nothing, so they bypass the CLI cache and the in-flight dedup.
+// nothing, so they bypass the CLI cache and the in-flight dedup. Clones and
+// `pr checkout` are the same kind of work: local effects, remote reads.
 function cliCommandWritesLocalOutput(args) {
-  return args[1] === 'download' && (args[0] === 'run' || args[0] === 'release');
+  if (args[1] === 'download') return args[0] === 'run' || args[0] === 'release';
+  if (args[1] === 'clone') return args[0] === 'repo' || args[0] === 'gist';
+  return args[0] === 'pr' && args[1] === 'checkout';
+}
+
+function cliCommandIsBulk(args) {
+  if (cliCommandWritesLocalOutput(args)) return true;
+  if (args[0] === 'run' && args[1] === 'view') {
+    return args.some((value) => value === '--log' || value === '--log-failed');
+  }
+  return args[0] === 'api' && args.includes('--paginate');
+}
+
+function apiPathIsBulk(path) {
+  const pathname = String(path || '').split('?')[0];
+  return /\/logs$/.test(pathname)
+    || /\/artifacts\/\d+\/zip$/.test(pathname)
+    || /\/(?:tarball|zipball)(?:\/|$)/.test(pathname);
+}
+
+/** `owner/repo` (lowercase) of a REST path, or null when not repo-scoped. */
+export function repoScopeFromPath(path) {
+  const match = String(path || '').match(/^\/?repos\/([^/?#{}]+)\/([^/?#{}]+)/);
+  return match ? `${match[1]}/${match[2]}`.toLowerCase() : null;
+}
+
+function repoScopeFromCliRepo(value) {
+  const segments = String(value || '').split('/').filter(Boolean);
+  return segments.length >= 2 ? segments.slice(-2).join('/').toLowerCase() : null;
+}
+
+const workingDirectoryRepoCache = new Map();
+
+function githubRepoFromRemoteUrl(url) {
+  const match = String(url || '').trim()
+    .match(/^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+  return match ? `${match[1]}/${match[2]}`.toLowerCase() : null;
+}
+
+/**
+ * The repository `gh` resolves from a working directory, but only when that
+ * resolution is unambiguous: exactly one GitHub remote and no `gh-resolved`
+ * default. Anything else stays unknown (null) and a mutation from there
+ * invalidates every cached read, as before. Only used to scope cache
+ * invalidation, never as a cache key: `gh pr view` without a number also
+ * depends on the checked-out branch.
+ */
+export function repoFromWorkingDirectory(cwd, { nowMs = Date.now() } = {}) {
+  if (typeof cwd !== 'string' || cwd === '') return null;
+  const cached = workingDirectoryRepoCache.get(cwd);
+  if (cached && cached.expiresAtMs > nowMs) return cached.repo;
+  let repo = null;
+  try {
+    let directory = resolve(cwd);
+    for (let depth = 0; depth < 64; depth += 1) {
+      const dotGit = join(directory, '.git');
+      let stats = null;
+      try { stats = statSync(dotGit); } catch { /* not here */ }
+      if (stats) {
+        let gitDirectory = dotGit;
+        if (stats.isFile()) {
+          const pointer = readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+)$/m);
+          gitDirectory = pointer ? resolve(directory, pointer[1].trim()) : null;
+        }
+        if (gitDirectory) {
+          let commonDirectory = gitDirectory;
+          try {
+            commonDirectory = resolve(gitDirectory, readFileSync(join(gitDirectory, 'commondir'), 'utf8').trim());
+          } catch { /* not a linked worktree */ }
+          const config = readFileSync(join(commonDirectory, 'config'), 'utf8');
+          if (!/^\s*gh-resolved\s*=/m.test(config)) {
+            const remotes = new Set();
+            for (const [, url] of config.matchAll(/^\s*url\s*=\s*(.+)$/gm)) {
+              const remote = githubRepoFromRemoteUrl(url);
+              if (remote) remotes.add(remote);
+            }
+            if (remotes.size === 1) [repo] = remotes;
+          }
+        }
+        break;
+      }
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  } catch {
+    repo = null;
+  }
+  if (workingDirectoryRepoCache.size >= 256) {
+    workingDirectoryRepoCache.delete(workingDirectoryRepoCache.keys().next().value);
+  }
+  workingDirectoryRepoCache.set(cwd, { repo, expiresAtMs: nowMs + WORKING_DIRECTORY_REPO_TTL_MS });
+  return repo;
+}
+
+function clientKeyFor(request) {
+  const value = request?.client || request?.agentId || request?.cwd || 'anonymous';
+  return String(value).slice(0, 256);
+}
+
+function requestKindFor(request, lane) {
+  if (request.type === 'api') {
+    if (isGraphqlPath(request.path)) return `api graphql ${lane === 'mutation' ? 'mutation' : 'query'}`;
+    return `api ${String(request.method || 'GET').toUpperCase()}`;
+  }
+  const args = Array.isArray(request.args) ? request.args.map(String) : [];
+  if (args[0] === 'api') {
+    const invocation = cliApiInvocation(args);
+    return invocation.graphql
+      ? `gh api graphql ${lane === 'mutation' ? 'mutation' : 'query'}`
+      : `gh api ${invocation.method}`;
+  }
+  const words = args.filter((value) => !value.startsWith('-')).slice(0, 2)
+    .filter((value) => /^[a-z][a-z-]{0,30}$/.test(value));
+  return `gh ${words.join(' ') || '?'}`;
+}
+
+/**
+ * Everything the scheduler needs about a job, computed once at submission.
+ * The queue used to re-parse `gh` arguments for every queued job on every
+ * pump turn and on every wake-up computation.
+ */
+export function classifyJob(request) {
+  const args = Array.isArray(request?.args) ? request.args.map(String) : [];
+  let mutation;
+  let lane;
+  let bucket;
+  let scope;
+  let family;
+  if (request?.type === 'api') {
+    const read = apiRequestIsRead(request);
+    mutation = !read;
+    bucket = request.bucket || classifyBucket(request.path, request.method);
+    lane = mutation ? 'mutation' : apiPathIsBulk(request.path) ? 'bulk' : 'api';
+    scope = repoScopeFromPath(request.path);
+    family = isGraphqlPath(request.path) ? 'graphql' : 'rest';
+  } else {
+    mutation = cliCommandIsMutation(args);
+    bucket = classifyCliBucket(args);
+    const invocation = args[0] === 'api' ? cliApiInvocation(args) : null;
+    if (mutation) lane = 'mutation';
+    else if (cliCommandIsBulk(args)) lane = 'bulk';
+    else lane = invocation?.parsed ? 'api' : 'cli';
+    const explicitRepo = repoScopeFromCliRepo(repoFromCliArguments(args));
+    if (explicitRepo) {
+      scope = explicitRepo;
+    } else if (invocation) {
+      // `gh api` reaches the working-directory repo only via placeholders.
+      scope = repoScopeFromPath(invocation.path)
+        || (/\{(?:owner|repo)\}/.test(invocation.path) ? repoFromWorkingDirectory(request?.cwd) : null);
+    } else {
+      scope = repoFromWorkingDirectory(request?.cwd);
+    }
+    family = bucket === 'graphql' ? 'graphql' : 'rest';
+  }
+  if (request?.anonymous) bucket = `${bucket}-anonymous`;
+  return {
+    lane,
+    mutation,
+    bucket,
+    scope: scope || null,
+    family,
+    points: mutation ? 5 : 1,
+    client: clientKeyFor(request),
+    kind: requestKindFor(request || {}, lane),
+  };
 }
 
 function readTokenAndStart(identity) {

@@ -143,11 +143,15 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 - Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
   una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
   permesso per l'agent di riprendere il polling.
-- `gh` resta il comando compatibile da usare normalmente: la coda, il limite di
-  concorrenza (8 letture di default, ridotte automaticamente con poco margine
-  di rate limit), la deduplicazione GET, la cache breve e il backoff sono
-  applicati prima del binario reale. Non invocare direttamente
-  `/opt/homebrew/bin/gh` o `curl https://api.github.com`.
+- `gh` resta il comando compatibile da usare normalmente: la coda, le corsie
+  di concorrenza (16 letture API, 6 processi `gh`, 2 trasferimenti lunghi,
+  mutation serializzate a 1 s; tetto globale 16 ridotto automaticamente con
+  poco margine di rate limit), lo scheduling equo fra agenti, la
+  deduplicazione delle letture, la cache breve invalidata per repo e il
+  backoff sono applicati prima del binario reale. Non invocare direttamente
+  `/opt/homebrew/bin/gh` o `curl https://api.github.com`. `status` espone
+  corsie, attese in coda e budget dei limiti secondari; `status --full` anche
+  i tipi di comando più frequenti.
 - `gh pr checks --watch` e `gh run watch` sono vietati: un solo osservatore
   condiviso deve seguire una PR o una run. Controlla il daemon con
   `bin/gh-frontaliere status` (oppure
