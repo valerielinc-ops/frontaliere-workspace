@@ -131,6 +131,13 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   `events gc --apply` rimuove duplicati vecchi senza listener e senza eventi
   pending; gli orfani unici restano protetti, salvo l'opzione esplicita
   `--include-unique`.
+- Il daemon archivia da solo le subscription senza listener (10 minuti dopo
+  l'avvio): scadute con pending subito, con pending da oltre 1 ora, in attesa
+  da oltre 6 ore se riconciliabili. L'archivio è senza perdita: `events listen`
+  sullo stesso id la ripristina con i suoi pending (e la riconcilia se non ne
+  ha); `events show` risponde `nextAction: listen_to_revive`. Un `subscribe`
+  non si aggancia più a un observer condiviso con eventi pending e nessun
+  listener: ne crea uno nuovo e lo riconcilia.
 - L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
   un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
   `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook

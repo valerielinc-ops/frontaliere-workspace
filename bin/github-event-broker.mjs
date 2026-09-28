@@ -34,6 +34,18 @@ export const DEFAULT_STALLED_AFTER_MS = 4 * 60 * 60 * 1_000;
 // events, measured on 2026-09-27).
 export const ABANDONED_PENDING_GRACE_MS = 24 * 60 * 60 * 1_000;
 
+// Orphans (no listener) are archived rather than deleted: `events listen`
+// on an archived id restores it with its pending events, so retiring a dead
+// session's subscription early loses nothing a late listener could want.
+export const MAX_RETIRED_SUBSCRIPTIONS = 256;
+export const RETIRED_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+export const REVIVED_SUBSCRIPTION_TTL_MS = 60 * 60 * 1_000;
+const MAX_RETIRED_PENDING_EVENTS = 8;
+// Bookkeeping writes (delivery dedup, audit, activity timestamps) are
+// coalesced: 98% of webhooks match no subscription, and each one rewrote and
+// fsynced the whole ~750 KB state, sometimes twice.
+export const DEFERRED_PERSIST_DELAY_MS = 1_000;
+
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
 const MAX_EVENT_AUDIT = 256;
@@ -612,6 +624,19 @@ function storedSubscription(value) {
   };
 }
 
+function storedRetiredSubscription(value) {
+  const subscription = storedSubscription(value);
+  if (!subscription) return null;
+  const retiredAtMs = Number(value.retiredAtMs ?? Date.parse(String(value.retiredAt || '')));
+  if (!Number.isFinite(retiredAtMs)) return null;
+  return {
+    ...subscription,
+    retiredAtMs,
+    retiredAt: new Date(retiredAtMs).toISOString(),
+    retiredReason: normalizedString(value.retiredReason) || 'retired',
+  };
+}
+
 function eventAuditRecord({
   event,
   eventName,
@@ -1161,12 +1186,26 @@ export class GitHubEventBroker {
       subscriptionsGarbageCollected: 0,
       subscriptionsAbandoned: 0,
       pendingEventsAbandoned: 0,
+      subscriptionsRetired: 0,
+      pendingEventsRetired: 0,
+      subscriptionsRevived: 0,
+      pendingSuperseded: 0,
+      statePersists: 0,
+      deferredPersists: 0,
+      deferredPersistFailures: 0,
     };
+    this.persistTimer = null;
+    this.lastDeferredPersistError = null;
+    this.nextPruneAtMs = 0;
+    this.subscriptionIndex = null;
+    this.seenDeliveryIndex = null;
+    this.duplicateCountsCache = null;
     // A coordinator may load the durable state in a worker so that a large
     // persisted backlog cannot block its Unix socket during startup. The
     // worker has already validated/normalized this snapshot; the ordinary
     // synchronous path remains the default for library callers and tests.
     this.state = initialState || this.loadState();
+    if (!Array.isArray(this.state.retiredSubscriptions)) this.state.retiredSubscriptions = [];
     if (this.state.migratedLegacyFiles?.length > 0 && !deferMigrationPersist) this.persist();
   }
 
@@ -1200,6 +1239,10 @@ export class GitHubEventBroker {
           migratedLegacyFiles: Array.isArray(parsed.migratedLegacyFiles)
             ? parsed.migratedLegacyFiles.map(String)
             : [],
+          retiredSubscriptions: Array.isArray(parsed.retiredSubscriptions)
+            ? parsed.retiredSubscriptions.map(storedRetiredSubscription).filter(Boolean)
+              .slice(-MAX_RETIRED_SUBSCRIPTIONS)
+            : [],
         };
       } catch (error) {
         if (error.code === 'ENOENT') return null;
@@ -1213,6 +1256,7 @@ export class GitHubEventBroker {
       latencySamples: [],
       eventAudit: [],
       migratedLegacyFiles: [],
+      retiredSubscriptions: [],
     };
     if (!this.legacyStateFile || current.migratedLegacyFiles.includes(this.legacyStateFile)) return current;
     const legacy = readState(this.legacyStateFile);
@@ -1263,7 +1307,46 @@ export class GitHubEventBroker {
     return current;
   }
 
-  persist() {
+  /**
+   * Write the snapshot now (the default: subscriptions, pending events and
+   * acknowledgements must survive a crash) or, with `deferred`, within
+   * DEFERRED_PERSIST_DELAY_MS together with whatever else changes meanwhile.
+   * A durable write also carries every deferred change.
+   */
+  persist({ deferred = false } = {}) {
+    if (deferred) {
+      this.metrics.deferredPersists += 1;
+      if (this.persistTimer) return;
+      this.persistTimer = setTimeout(() => {
+        this.persistTimer = null;
+        try {
+          this.writeSnapshot();
+          this.lastDeferredPersistError = null;
+        } catch (error) {
+          this.metrics.deferredPersistFailures += 1;
+          this.lastDeferredPersistError = { code: error?.code || null, message: error?.message || String(error) };
+        }
+      }, DEFERRED_PERSIST_DELAY_MS);
+      this.persistTimer.unref?.();
+      return;
+    }
+    this.writeSnapshot();
+  }
+
+  /** Write any deferred change now (shutdown, tests). */
+  flush() {
+    if (!this.persistTimer) return false;
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    this.writeSnapshot();
+    return true;
+  }
+
+  writeSnapshot() {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
     if (this.canPersist && this.canPersist() !== true) {
       throw brokerError(
         'event_state_owner_lost',
@@ -1285,6 +1368,7 @@ export class GitHubEventBroker {
       renameSync(temporary, this.stateFile);
       chmodSync(this.stateFile, 0o600);
       syncDirectory(dirname(this.stateFile));
+      this.metrics.statePersists += 1;
     } catch (error) {
       if (fd !== null) {
         try { closeSync(fd); } catch { /* already closed */ }
@@ -1294,9 +1378,59 @@ export class GitHubEventBroker {
     }
   }
 
+  // Lookup by id without a linear scan. Every code path that changes the list
+  // either replaces the array (filter) or grows it (push), so identity plus
+  // length is a sufficient freshness check.
+  subscriptionRecordById(subscriptionId) {
+    const list = this.state.subscriptions;
+    if (!this.subscriptionIndex
+      || this.subscriptionIndex.list !== list
+      || this.subscriptionIndex.length !== list.length) {
+      this.subscriptionIndex = {
+        list,
+        length: list.length,
+        byId: new Map(list.map((subscription) => [subscription.id, subscription])),
+      };
+    }
+    return this.subscriptionIndex.byId.get(String(subscriptionId || '')) || null;
+  }
+
+  seenDeliveryIds() {
+    const list = this.state.seenDeliveries;
+    if (!this.seenDeliveryIndex
+      || this.seenDeliveryIndex.list !== list
+      || this.seenDeliveryIndex.length !== list.length) {
+      this.seenDeliveryIndex = { list, length: list.length, ids: new Set(list.map(({ id }) => id)) };
+    }
+    return this.seenDeliveryIndex.ids;
+  }
+
+  // Forces the next prune to scan: any change that can make a record
+  // removable sooner than the computed instant (new subscription, emptied
+  // pending, revival) calls this.
+  invalidatePruneSchedule() {
+    this.nextPruneAtMs = 0;
+  }
+
+  computeNextPruneAt(nowMs) {
+    let next = Infinity;
+    for (const subscription of this.state.subscriptions) {
+      const at = subscription.expiresAtMs > nowMs || subscription.pending.length === 0
+        ? subscription.expiresAtMs
+        : subscription.expiresAtMs + ABANDONED_PENDING_GRACE_MS;
+      if (at < next) next = at;
+    }
+    const oldestSeen = this.state.seenDeliveries[0];
+    if (oldestSeen) next = Math.min(next, Number(oldestSeen.seenAtMs) + SEEN_DELIVERY_TTL_MS + 1);
+    const oldestRetired = this.state.retiredSubscriptions[0];
+    if (oldestRetired) next = Math.min(next, oldestRetired.retiredAtMs + RETIRED_SUBSCRIPTION_TTL_MS + 1);
+    this.nextPruneAtMs = next;
+  }
+
   pruneExpiredSubscriptions(nowMs = this.now()) {
     const expiredIds = [];
     const kept = [];
+    const abandoned = [];
     for (const subscription of this.state.subscriptions) {
       if (subscription.expiresAtMs > nowMs) {
         kept.push(subscription);
@@ -1305,49 +1439,152 @@ export class GitHubEventBroker {
         this.metrics.subscriptionsExpired += 1;
       } else if (nowMs - subscription.expiresAtMs >= ABANDONED_PENDING_GRACE_MS) {
         expiredIds.push(subscription.id);
+        abandoned.push(subscription);
         this.metrics.subscriptionsAbandoned += 1;
         this.metrics.pendingEventsAbandoned += subscription.pending.length;
       } else {
         kept.push(subscription);
       }
     }
-    this.state.subscriptions = kept;
+    if (expiredIds.length > 0) this.state.subscriptions = kept;
+    for (const subscription of abandoned) this.archiveSubscription(subscription, 'abandoned_after_expiry', nowMs);
     return expiredIds;
   }
 
   pruneSeenDeliveries(nowMs = this.now()) {
-    const seenBefore = this.state.seenDeliveries.length;
-    this.state.seenDeliveries = this.state.seenDeliveries
-      .filter((delivery) => nowMs - Number(delivery.seenAtMs) <= SEEN_DELIVERY_TTL_MS)
-      .slice(-MAX_SEEN_DELIVERIES);
-    return seenBefore !== this.state.seenDeliveries.length;
+    const seen = this.state.seenDeliveries;
+    let expired = 0;
+    while (expired < seen.length && nowMs - Number(seen[expired].seenAtMs) > SEEN_DELIVERY_TTL_MS) expired += 1;
+    const overflow = Math.max(0, seen.length - expired - MAX_SEEN_DELIVERIES);
+    if (expired + overflow === 0) return false;
+    this.state.seenDeliveries = seen.slice(expired + overflow);
+    return true;
+  }
+
+  pruneRetiredSubscriptions(nowMs = this.now()) {
+    const retired = this.state.retiredSubscriptions;
+    const kept = retired
+      .filter((subscription) => nowMs - subscription.retiredAtMs <= RETIRED_SUBSCRIPTION_TTL_MS)
+      .slice(-MAX_RETIRED_SUBSCRIPTIONS);
+    if (kept.length === retired.length) return false;
+    this.state.retiredSubscriptions = kept;
+    return true;
+  }
+
+  pruneDue(nowMs) {
+    return nowMs >= this.nextPruneAtMs || this.state.seenDeliveries.length > MAX_SEEN_DELIVERIES;
+  }
+
+  // Details of one prune pass: which kind of state changed decides whether
+  // the snapshot must be written now or may be coalesced.
+  prunePass(nowMs = this.now()) {
+    if (!this.pruneDue(nowMs)) return { expiredIds: [], subscriptionsChanged: false, bookkeepingChanged: false };
+    const subscriptionsBefore = this.state.subscriptions;
+    const expiredIds = this.pruneExpiredSubscriptions(nowMs);
+    const seenChanged = this.pruneSeenDeliveries(nowMs);
+    const retiredChanged = this.pruneRetiredSubscriptions(nowMs);
+    this.computeNextPruneAt(nowMs);
+    return {
+      expiredIds,
+      subscriptionsChanged: expiredIds.length > 0 || subscriptionsBefore !== this.state.subscriptions,
+      bookkeepingChanged: seenChanged || retiredChanged,
+    };
   }
 
   prune() {
-    const nowMs = this.now();
-    const subscriptionsBefore = this.state.subscriptions.length;
-    const expiredIds = this.pruneExpiredSubscriptions(nowMs);
-    const seenChanged = this.pruneSeenDeliveries(nowMs);
-    return expiredIds.length > 0
-      || subscriptionsBefore !== this.state.subscriptions.length
-      || seenChanged;
+    const { subscriptionsChanged, bookkeepingChanged } = this.prunePass();
+    return subscriptionsChanged || bookkeepingChanged;
+  }
+
+  pruneAndPersist() {
+    const pass = this.prunePass();
+    if (pass.subscriptionsChanged) this.persist();
+    else if (pass.bookkeepingChanged) this.persist({ deferred: true });
+    return pass;
   }
 
   expireSubscriptions() {
-    const nowMs = this.now();
-    const expiredIds = this.pruneExpiredSubscriptions(nowMs);
-    const seenChanged = this.pruneSeenDeliveries(nowMs);
-    if (expiredIds.length > 0 || seenChanged) this.persist();
-    return expiredIds;
+    return this.pruneAndPersist().expiredIds;
   }
 
   duplicateSubscriptionCounts() {
+    const list = this.state.subscriptions;
+    if (this.duplicateCountsCache?.list === list && this.duplicateCountsCache.length === list.length) {
+      return this.duplicateCountsCache.counts;
+    }
     const counts = new Map();
-    for (const subscription of this.state.subscriptions) {
+    for (const subscription of list) {
       const key = subscriptionDedupKey(subscription);
       counts.set(key, (counts.get(key) || 0) + 1);
     }
+    this.duplicateCountsCache = { list, length: list.length, counts };
     return counts;
+  }
+
+  archiveSubscription(subscription, reason, nowMs = this.now()) {
+    const pending = subscription.pending || [];
+    this.metrics.subscriptionsRetired += 1;
+    this.metrics.pendingEventsRetired += pending.length;
+    this.state.retiredSubscriptions = [
+      ...this.state.retiredSubscriptions.filter(({ id }) => id !== subscription.id),
+      {
+        ...subscription,
+        // The first events are the ones a listener would receive first; a
+        // once subscription never gets past its first terminal event.
+        pending: pending.slice(0, MAX_RETIRED_PENDING_EVENTS),
+        retiredAtMs: nowMs,
+        retiredAt: new Date(nowMs).toISOString(),
+        retiredReason: reason,
+      },
+    ].slice(-MAX_RETIRED_SUBSCRIPTIONS);
+  }
+
+  /**
+   * Move live subscriptions to the archive. The caller (the coordinator,
+   * which knows the listeners) decides which ones are orphaned.
+   */
+  retireSubscriptions(retirements) {
+    const nowMs = this.now();
+    const byId = new Map(retirements.map(({ id, reason }) => [String(id), reason || 'retired']));
+    if (byId.size === 0) return [];
+    const retired = [];
+    const kept = [];
+    for (const subscription of this.state.subscriptions) {
+      if (byId.has(subscription.id)) retired.push(subscription);
+      else kept.push(subscription);
+    }
+    if (retired.length === 0) return [];
+    this.state.subscriptions = kept;
+    for (const subscription of retired) this.archiveSubscription(subscription, byId.get(subscription.id), nowMs);
+    this.invalidatePruneSchedule();
+    this.persist();
+    return retired.map(({ id }) => id);
+  }
+
+  retiredSubscription(subscriptionId) {
+    const id = String(subscriptionId || '');
+    return this.state.retiredSubscriptions.find((subscription) => subscription.id === id) || null;
+  }
+
+  /** Restore an archived subscription with its pending events. */
+  reviveSubscription(subscriptionId, { ttlMs = REVIVED_SUBSCRIPTION_TTL_MS } = {}) {
+    const archived = this.retiredSubscription(subscriptionId);
+    if (!archived) return null;
+    if (this.subscriptionRecordById(archived.id)) return this.subscriptionRecordById(archived.id);
+    const nowMs = this.now();
+    const { retiredAtMs, retiredAt, retiredReason, ...subscription } = archived;
+    subscription.expiresAtMs = Math.min(
+      nowMs + MAX_SUBSCRIPTION_TTL_MS,
+      Math.max(subscription.expiresAtMs, nowMs + Math.max(60_000, Number(ttlMs) || REVIVED_SUBSCRIPTION_TTL_MS)),
+    );
+    subscription.expiresAt = new Date(subscription.expiresAtMs).toISOString();
+    subscription.lastRenewedAt = new Date(nowMs).toISOString();
+    this.state.retiredSubscriptions = this.state.retiredSubscriptions.filter(({ id }) => id !== archived.id);
+    this.state.subscriptions.push(subscription);
+    this.metrics.subscriptionsRevived += 1;
+    this.invalidatePruneSchedule();
+    this.persist();
+    return subscription;
   }
 
   duplicateGroups() {
@@ -1470,6 +1707,7 @@ export class GitHubEventBroker {
       stateFile: this.stateFile,
       subscriptionCount: subscriptions.length,
       totalSubscriptionCount: allSubscriptions.length,
+      retiredSubscriptionCount: this.state.retiredSubscriptions.length,
       agentCount: unique(subscriptions.flatMap((subscription) => subscription.shared
         ? subscription.sharedAgentIds
         : [subscription.agentId])).length,
@@ -1541,7 +1779,12 @@ export class GitHubEventBroker {
     };
   }
 
-  subscribe(spec) {
+  /**
+   * `canJoin(existing)` lets the coordinator refuse a join onto a record whose
+   * pending events were meant for sessions that are gone: a new agent joining
+   * a week-old shared deploy observer used to receive a week-old success.
+   */
+  subscribe(spec, { canJoin = null } = {}) {
     this.prune();
     const nowMs = this.now();
     const normalized = normalizeSubscriptionSpec(spec, nowMs);
@@ -1550,6 +1793,7 @@ export class GitHubEventBroker {
     delete normalized.allowDuplicate;
     const duplicate = this.state.subscriptions
       .filter((subscription) => subscriptionDedupKey(subscription) === subscriptionDedupKey(normalized))
+      .filter((subscription) => typeof canJoin !== 'function' || canJoin(subscription) === true)
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
     if (duplicate && !allowDuplicate) {
       duplicate.shared = true;
@@ -1572,19 +1816,20 @@ export class GitHubEventBroker {
     normalized.id = `sub-${randomUUID()}`;
     this.state.subscriptions.push(normalized);
     this.metrics.subscriptionsCreated += 1;
+    this.invalidatePruneSchedule();
     this.persist();
     return this.publicSubscription(normalized, { nowMs });
   }
 
   getSubscription(subscriptionId) {
-    if (this.prune()) this.persist();
-    const subscription = this.state.subscriptions.find(({ id }) => id === String(subscriptionId || ''));
+    this.pruneAndPersist();
+    const subscription = this.subscriptionRecordById(subscriptionId);
     return subscription ? this.publicSubscription(subscription, { nowMs: this.now() }) : null;
   }
 
   getSubscriptionRecord(subscriptionId) {
-    if (this.prune()) this.persist();
-    return this.state.subscriptions.find(({ id }) => id === String(subscriptionId || '')) || null;
+    this.pruneAndPersist();
+    return this.subscriptionRecordById(subscriptionId);
   }
 
   renew(subscriptionId, { ttlMs, ttlSeconds, agentId } = {}) {
@@ -1615,6 +1860,7 @@ export class GitHubEventBroker {
     subscription.expiresAt = new Date(subscription.expiresAtMs).toISOString();
     subscription.lastRenewedAt = new Date(nowMs).toISOString();
     this.metrics.subscriptionsRenewed += 1;
+    this.invalidatePruneSchedule();
     this.persist();
     return {
       ok: true,
@@ -1647,9 +1893,12 @@ export class GitHubEventBroker {
       }
     }
     const before = this.state.subscriptions.length;
+    const retiredBefore = this.state.retiredSubscriptions.length;
     this.state.subscriptions = this.state.subscriptions.filter((candidate) => candidate.id !== id);
-    if (before !== this.state.subscriptions.length) this.persist();
-    return { ok: true, subscriptionId: id, removed: before !== this.state.subscriptions.length };
+    this.state.retiredSubscriptions = this.state.retiredSubscriptions.filter((candidate) => candidate.id !== id);
+    const removed = before !== this.state.subscriptions.length;
+    if (removed || retiredBefore !== this.state.retiredSubscriptions.length) this.persist();
+    return { ok: true, subscriptionId: id, removed };
   }
 
   garbageCollect({ listenerAttached = null, olderThanMs = DEFAULT_ORPHAN_GRACE_MS, apply = false, includeUnique = false } = {}) {
@@ -1758,6 +2007,7 @@ export class GitHubEventBroker {
       this.metrics.latencySamplesRecorded += 1;
     }
     this.metrics.subscriptionsAcknowledged += 1;
+    this.invalidatePruneSchedule();
     const subscriptionRemoved = subscription.once
       && !deferOnceRemoval
       && eventIsTerminal(event);
@@ -1781,7 +2031,7 @@ export class GitHubEventBroker {
   }
 
   audit({ limit = 20, ...filters } = {}) {
-    if (this.prune()) this.persist();
+    this.pruneAndPersist();
     const numericLimit = Number(limit);
     const boundedLimit = Number.isFinite(numericLimit) && numericLimit >= 0
       ? Math.floor(numericLimit)
@@ -1816,11 +2066,11 @@ export class GitHubEventBroker {
     if (!event || !event.id || !event.repo || !event.state) {
       return { ok: true, ignored: true, matchedSubscriptionIds: [] };
     }
-    if (this.prune()) this.persist();
+    this.pruneAndPersist();
     const recordedAtMs = this.now();
     const matchedSubscriptionIds = [];
     const targetMatchedSubscriptionIds = [];
-    let changed = false;
+    let pendingChanged = false;
     for (const subscription of this.state.subscriptions) {
       // Only an expired record that still holds pending events survives the
       // prune above: it waits for a late listener, not for new events.
@@ -1842,19 +2092,24 @@ export class GitHubEventBroker {
           subscription.lastActivityState = event.state;
           subscription.lastActivityAction = event.action;
           subscription.lastActivityRunId = event.runId;
-          changed = true;
         }
       }
       if (!eventMatchesSubscription(event, subscription)) continue;
       matchedSubscriptionIds.push(subscription.id);
       if (subscription.pending.some(({ id }) => id === event.id)) continue;
+      // A one-shot private subscription ends with the ack of its first
+      // terminal event: anything queued behind it would never be delivered.
+      if (subscription.once && !subscription.shared && subscription.pending.some(eventIsTerminal)) {
+        this.metrics.pendingSuperseded += 1;
+        continue;
+      }
       if (subscription.pending.length >= MAX_PENDING_EVENTS) {
         this.metrics.pendingOverflow += 1;
         continue;
       }
       subscription.pending.push(event);
       this.metrics.matchedEvents += 1;
-      changed = true;
+      pendingChanged = true;
     }
     this.appendEventAudit({
       event,
@@ -1863,8 +2118,9 @@ export class GitHubEventBroker {
       targetMatchedSubscriptionIds,
       matchedSubscriptionIds,
     });
-    changed = true;
-    if (changed) this.persist();
+    // Only a new pending event must be on disk before the delivery is
+    // acknowledged; activity timestamps and the audit trail can be coalesced.
+    this.persist({ deferred: !pendingChanged });
     return {
       ok: true,
       event,
@@ -1904,13 +2160,20 @@ export class GitHubEventBroker {
       if (typeof beforePersist !== 'function') throw brokerError('event_webhook_preflight_invalid', 'webhook preflight must be a function');
       beforePersist(webhookPayload);
     }
-    if (this.prune()) this.persist();
-    const seen = this.state.seenDeliveries.some(({ id }) => id === normalizedDeliveryId);
-    if (seen) {
+    this.pruneAndPersist();
+    const seenIds = this.seenDeliveryIds();
+    if (seenIds.has(normalizedDeliveryId)) {
       this.metrics.webhookDuplicates += 1;
       return { ok: true, duplicate: true, matchedSubscriptionIds: [] };
     }
     this.state.seenDeliveries.push({ id: normalizedDeliveryId, seenAtMs: this.now() });
+    seenIds.add(normalizedDeliveryId);
+    this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
+    if (this.state.seenDeliveries.length > MAX_SEEN_DELIVERIES) {
+      const [dropped] = this.state.seenDeliveries.splice(0, 1);
+      if (dropped) seenIds.delete(dropped.id);
+      this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
+    }
     this.metrics.webhookEvents += 1;
     const event = normalizeWebhookEvent({
       eventName,
@@ -1925,11 +2188,10 @@ export class GitHubEventBroker {
         deliveryId: normalizedDeliveryId,
         ignoredReason: 'unsupported_event',
       });
-      this.persist();
+      this.persist({ deferred: true });
       return { ok: true, ignored: true, matchedSubscriptionIds: [] };
     }
     const result = this.recordEvent(event);
-    if (!result.matchedSubscriptionIds.length) this.persist();
     return { ...result, duplicate: false };
   }
 }
