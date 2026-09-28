@@ -17,6 +17,8 @@ import {
   chmodSync,
   closeSync,
   constants as fsConstants,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -323,11 +325,68 @@ function readOwnerRecord(lockPath) {
   }
 }
 
+const OWNER_LOCK_RECORD_PENDING = Symbol('owner_lock_record_pending');
+
+function readOwnerRecordForClaim(lockPath) {
+  try {
+    return readOwnerRecord(lockPath);
+  } catch (error) {
+    if (error.code !== 'coordinator_owner_lock_invalid') throw error;
+    // A legacy contender may still be between O_EXCL and its write. Never
+    // unlink a fresh partial record: let that owner finish or launchd retry.
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs < 5_000) return OWNER_LOCK_RECORD_PENDING;
+    } catch (statError) {
+      if (statError.code === 'ENOENT') return null;
+      throw statError;
+    }
+    try { unlinkSync(lockPath); } catch (unlinkError) {
+      if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    }
+    return null;
+  }
+}
+
+function removePendingOwnerLockWithoutSocket(lockPath, socket) {
+  try {
+    if (statSync(socket).isSocket()) return false;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  try { unlinkSync(lockPath); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return true;
+}
+
+function createAtomicOwnerLock(lockPath, record) {
+  const temporary = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+  let fd = null;
+  try {
+    fd = openSync(temporary, 'wx', 0o600);
+    const bytes = Buffer.from(record, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
+    fsyncSync(fd);
+    // A hard link to a fully written inode is an atomic create-if-absent for
+    // the owner path; readers can never observe partial JSON.
+    linkSync(temporary, lockPath);
+    unlinkSync(temporary);
+    return fd;
+  } catch (error) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    try { unlinkSync(temporary); } catch { /* no temporary */ }
+    throw error;
+  }
+}
+
 function claimCoordinatorOwner(identity, socket) {
   const lockPath = coordinatorOwnerLockPath(identity);
   let existing;
   try {
-    existing = readOwnerRecord(lockPath);
+    existing = readOwnerRecordForClaim(lockPath);
   } catch (error) {
     if (error.code !== 'coordinator_owner_lock_invalid') throw error;
     // A killed process can leave a truncated owner record behind. It cannot
@@ -337,13 +396,16 @@ function claimCoordinatorOwner(identity, socket) {
     }
     existing = null;
   }
+  if (existing === OWNER_LOCK_RECORD_PENDING) {
+    if (!removePendingOwnerLockWithoutSocket(lockPath, socket)) return null;
+    existing = null;
+  }
   if (existing
     && existing.identity === identity
     && existing.socket === socket
     && processIsAlive(existing.pid)) return null;
   if (existing) unlinkSync(lockPath);
   try {
-    const fd = openSync(lockPath, 'wx', 0o600);
     const ownerId = randomUUID();
     const record = `${JSON.stringify({
       pid: process.pid,
@@ -352,18 +414,22 @@ function claimCoordinatorOwner(identity, socket) {
       ownerId,
       startedAt: new Date().toISOString(),
     })}\n`;
-    writeSync(fd, record);
+    const fd = createAtomicOwnerLock(lockPath, record);
     return { fd, lockPath, socket, ownerId };
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
     let competing;
     try {
-      competing = readOwnerRecord(lockPath);
+      competing = readOwnerRecordForClaim(lockPath);
     } catch (readError) {
       if (readError.code !== 'coordinator_owner_lock_invalid') throw readError;
       try { unlinkSync(lockPath); } catch (unlinkError) {
         if (unlinkError.code !== 'ENOENT') throw unlinkError;
       }
+      return claimCoordinatorOwner(identity, socket);
+    }
+    if (competing === OWNER_LOCK_RECORD_PENDING) {
+      if (!removePendingOwnerLockWithoutSocket(lockPath, socket)) return null;
       return claimCoordinatorOwner(identity, socket);
     }
     if (competing
