@@ -27,11 +27,18 @@ import {
 
 const HOUR = 60 * 60 * 1_000;
 
+const TEST_DEFERRED_DELAY_MS = 100;
+
 function tempBroker({ nowMs = null, secret = 'lifecycle-secret' } = {}) {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-event-lifecycle-'));
   const stateFile = join(stateDirectory, 'events.json');
   const clock = { nowMs: nowMs ?? Date.now() };
-  const broker = new GitHubEventBroker({ stateFile, webhookSecret: secret, now: () => clock.nowMs });
+  const broker = new GitHubEventBroker({
+    stateFile,
+    webhookSecret: secret,
+    now: () => clock.nowMs,
+    deferredPersistDelayMs: TEST_DEFERRED_DELAY_MS,
+  });
   return { stateDirectory, stateFile, clock, broker, cleanup: () => rmSync(stateDirectory, { recursive: true, force: true }) };
 }
 
@@ -66,15 +73,20 @@ test('una delivery non abbinata non riscrive subito lo stato, un evento pending 
     // The duplicate is still recognized from memory before the flush.
     const duplicate = broker.ingestWebhook({ eventName: 'pull_request', deliveryId: 'd-unrelated', signature: signed(unrelated, 'lifecycle-secret'), rawBody: unrelated });
     assert.equal(duplicate.duplicate, true);
+    broker.ingestWebhook({ eventName: 'pull_request', deliveryId: 'd-unrelated-2', signature: signed(unrelated, 'lifecycle-secret'), rawBody: unrelated });
 
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, DEFERRED_PERSIST_DELAY_MS + 200));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, TEST_DEFERRED_DELAY_MS + 200));
     assert.equal(broker.metrics.statePersists, afterSubscribe + 1, 'scrittura accorpata');
-    assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).seenDeliveries.length, 1);
+    assert.equal(broker.metrics.deferredWrites, 1);
+    assert.equal(broker.metrics.deferredPersists, 2, 'due delivery, una sola scrittura');
+    assert.ok(DEFERRED_PERSIST_DELAY_MS >= 10_000, 'in produzione al massimo sei scritture differite al minuto');
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).seenDeliveries.length, 2);
 
     const merged = JSON.stringify({ action: 'closed', repository: { full_name: 'owner/repo' }, pull_request: { number: 1, merged: true } });
     const result = broker.ingestWebhook({ eventName: 'pull_request', deliveryId: 'd-merged', signature: signed(merged, 'lifecycle-secret'), rawBody: merged });
     assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
     assert.equal(broker.metrics.statePersists, afterSubscribe + 2, 'il pending va su disco prima della risposta');
+    assert.equal(broker.metrics.durablePersists, afterSubscribe + 1);
     const persisted = JSON.parse(readFileSync(stateFile, 'utf8'));
     assert.equal(persisted.subscriptions[0].pending.length, 1);
   } finally {

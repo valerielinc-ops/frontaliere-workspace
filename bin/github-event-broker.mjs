@@ -43,8 +43,11 @@ export const REVIVED_SUBSCRIPTION_TTL_MS = 60 * 60 * 1_000;
 const MAX_RETIRED_PENDING_EVENTS = 8;
 // Bookkeeping writes (delivery dedup, audit, activity timestamps) are
 // coalesced: 98% of webhooks match no subscription, and each one rewrote and
-// fsynced the whole ~750 KB state, sometimes twice.
-export const DEFERRED_PERSIST_DELAY_MS = 1_000;
+// fsynced the whole ~750 KB state, sometimes twice. With one webhook every
+// few seconds a 1 s window coalesced almost nothing (0.8 writes per webhook,
+// measured on 2026-09-28); 10 s caps them at six a minute. What a crash can
+// lose is only that bookkeeping: pending events are written synchronously.
+export const DEFERRED_PERSIST_DELAY_MS = 10_000;
 
 const MAX_PENDING_EVENTS = 32;
 const MAX_SEEN_DELIVERIES = 5_000;
@@ -1163,6 +1166,7 @@ export class GitHubEventBroker {
     initialState = null,
     canPersist = null,
     deferMigrationPersist = false,
+    deferredPersistDelayMs = DEFERRED_PERSIST_DELAY_MS,
   }) {
     if (!stateFile) throw new TypeError('event_state_file_required');
     this.stateFile = stateFile;
@@ -1170,6 +1174,7 @@ export class GitHubEventBroker {
     this.webhookSecret = normalizedString(webhookSecret);
     this.now = now;
     this.canPersist = typeof canPersist === 'function' ? canPersist : null;
+    this.deferredPersistDelayMs = Math.max(0, Number(deferredPersistDelayMs) || 0);
     this.metrics = {
       subscriptionsCreated: 0,
       subscriptionsExpired: 0,
@@ -1190,8 +1195,12 @@ export class GitHubEventBroker {
       pendingEventsRetired: 0,
       subscriptionsRevived: 0,
       pendingSuperseded: 0,
+      // Snapshot writes of any kind, the synchronous ones among them, the
+      // coalesced requests and the timer writes that served them.
       statePersists: 0,
+      durablePersists: 0,
       deferredPersists: 0,
+      deferredWrites: 0,
       deferredPersistFailures: 0,
     };
     this.persistTimer = null;
@@ -1310,7 +1319,7 @@ export class GitHubEventBroker {
   /**
    * Write the snapshot now (the default: subscriptions, pending events and
    * acknowledgements must survive a crash) or, with `deferred`, within
-   * DEFERRED_PERSIST_DELAY_MS together with whatever else changes meanwhile.
+   * `deferredPersistDelayMs` together with whatever else changes meanwhile.
    * A durable write also carries every deferred change.
    */
   persist({ deferred = false } = {}) {
@@ -1321,16 +1330,18 @@ export class GitHubEventBroker {
         this.persistTimer = null;
         try {
           this.writeSnapshot();
+          this.metrics.deferredWrites += 1;
           this.lastDeferredPersistError = null;
         } catch (error) {
           this.metrics.deferredPersistFailures += 1;
           this.lastDeferredPersistError = { code: error?.code || null, message: error?.message || String(error) };
         }
-      }, DEFERRED_PERSIST_DELAY_MS);
+      }, this.deferredPersistDelayMs);
       this.persistTimer.unref?.();
       return;
     }
     this.writeSnapshot();
+    this.metrics.durablePersists += 1;
   }
 
   /** Write any deferred change now (shutdown, tests). */
