@@ -11,25 +11,102 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # shell limits. Keep this bounded and best-effort for non-macOS test runners.
 ulimit -n 4096 2>/dev/null || true
 
-# Client auto-starts must load the same Remote Config secret as the persistent
-# launch agent.  Keep an explicit test/workflow override when one is present.
-# The webhook secret alone is not an authenticated GitHub API credential.  A
-# launchd environment can retain the former while losing the Remote Config
-# token, so hydrate RC whenever no GitHub token is present.
-if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ] || {
-  [ -z "${FRONTALIERE_GH_TOKEN:-}" ] &&
-  [ -z "${GH_TOKEN:-}" ] &&
-  [ -z "${GITHUB_TOKEN:-}" ] &&
-  [ -z "${GITHUB_PAT:-}" ];
-}; then
-  . "$script_dir/rc-env.sh" >/dev/null 2>&1
-fi
+# `--refresh-remote-config` (or FRONTALIERE_GH_RC_REFRESH=1) skips the cached
+# credentials for this start; the flag is not passed on to the coordinator.
+coordinator_identity="default"
+refresh_remote_config=0
+next_is_identity=0
+coordinator_args=()
+for launcher_arg in "$@"; do
+  if [ "$launcher_arg" = "--refresh-remote-config" ]; then
+    refresh_remote_config=1
+    continue
+  fi
+  coordinator_args+=("$launcher_arg")
+  if [ "$next_is_identity" -eq 1 ]; then
+    coordinator_identity="$launcher_arg"
+    next_is_identity=0
+  elif [ "$launcher_arg" = "--identity" ]; then
+    next_is_identity=1
+  fi
+done
+case "${FRONTALIERE_GH_RC_REFRESH:-}" in
+  1|true|TRUE|yes|YES) refresh_remote_config=1 ;;
+esac
+unset FRONTALIERE_GH_RC_REFRESH
 
-# Remote Config names the default owner's credential GITHUB_PAT.  Keep the
-# coordinator's process contract explicit without persisting or printing the
-# secret.
-if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -n "${GITHUB_PAT:-}" ]; then
-  export FRONTALIERE_GH_TOKEN="$GITHUB_PAT"
-fi
+# Remote Config names the owners' credentials GITHUB_PAT / GITHUB_PAT_NANAKO.
+# Keep the coordinator's process contract explicit without printing them.
+export_token_aliases() {
+  if [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -n "${GITHUB_PAT:-}" ]; then
+    export FRONTALIERE_GH_TOKEN="$GITHUB_PAT"
+  fi
+  if [ -z "${FRONTALIERE_GH_TOKEN_NANAKO:-}" ] && [ -n "${GITHUB_PAT_NANAKO:-}" ]; then
+    export FRONTALIERE_GH_TOKEN_NANAKO="$GITHUB_PAT_NANAKO"
+  fi
+}
 
-exec /usr/bin/env node "$script_dir/github-coordinator.mjs" "$@"
+# Names (as the coordinator reads them) still missing for this identity. The
+# webhook secret alone is not an authenticated GitHub API credential: a
+# launchd environment can retain it while losing the token.
+missing_credentials() {
+  missing=""
+  if [ -z "${FRONTALIERE_GH_WEBHOOK_SECRET:-}" ]; then
+    missing="FRONTALIERE_GH_WEBHOOK_SECRET"
+  fi
+  if [ "$coordinator_identity" = "nanako" ]; then
+    if [ -z "${FRONTALIERE_GH_TOKEN_NANAKO:-}" ] && [ -z "${GITHUB_PAT_NANAKO:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+      missing="${missing:+$missing,}FRONTALIERE_GH_TOKEN_NANAKO"
+    fi
+  elif [ -z "${FRONTALIERE_GH_TOKEN:-}" ] && [ -z "${GITHUB_PAT:-}" ] \
+    && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    missing="${missing:+$missing,}FRONTALIERE_GH_TOKEN"
+  fi
+  printf '%s' "$missing"
+}
+
+rc_cache="$script_dir/github-coordinator-rc-cache.mjs"
+hydrate_from_cache() {
+  cached_exports="$(node "$rc_cache" hydrate --identity "$coordinator_identity" "$@" 2>/dev/null || true)"
+  if [ -n "$cached_exports" ]; then
+    eval "$cached_exports"
+  fi
+  unset cached_exports
+}
+
+# Explicit values (tests, workflows, a manual override) win and are neither
+# read from nor written to the cache. Otherwise: a fresh cache entry avoids
+# Remote Config entirely; Remote Config refreshes a missing or day-old entry;
+# a stale entry is the fallback when Remote Config cannot be loaded (network,
+# service account, corpus loader), which used to keep the coordinator down.
+needed="$(missing_credentials)"
+if [ -n "$needed" ]; then
+  if [ "$refresh_remote_config" -eq 0 ]; then
+    hydrate_from_cache
+  fi
+  needed="$(missing_credentials)"
+  if [ -n "$needed" ]; then
+    . "${FRONTALIERE_GH_RC_ENV_SCRIPT:-$script_dir/rc-env.sh}" >/dev/null 2>&1 || true
+    export_token_aliases
+    still_missing="$(missing_credentials)"
+    loaded=""
+    old_ifs="$IFS"
+    IFS=","
+    for name in $needed; do
+      case ",$still_missing," in
+        *",$name,"*) ;;
+        *) loaded="${loaded:+$loaded,}$name" ;;
+      esac
+    done
+    IFS="$old_ifs"
+    if [ -n "$loaded" ]; then
+      node "$rc_cache" persist --identity "$coordinator_identity" --only "$loaded" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$still_missing" ]; then
+      hydrate_from_cache --any
+    fi
+  fi
+fi
+export_token_aliases
+
+exec /usr/bin/env node "${FRONTALIERE_GH_COORDINATOR_ENTRY:-$script_dir/github-coordinator.mjs}" ${coordinator_args[@]+"${coordinator_args[@]}"}
