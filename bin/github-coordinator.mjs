@@ -4426,7 +4426,9 @@ function startWithOwnerLock(identity, socket, ownerLock) {
 
   orphanRetirementTimer = setInterval(() => {
     try {
-      coordinator.retireOrphanedSubscriptions();
+      // The orphan report behind the health alert is otherwise an hour old:
+      // refresh it as soon as the archive changed what it would count.
+      if (coordinator.retireOrphanedSubscriptions().length > 0) runScheduledGc();
     } catch (error) {
       logStructuredError('event_orphan_retirement_failed', error, { identity });
     }
