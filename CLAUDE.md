@@ -138,6 +138,11 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   ha); `events show` risponde `nextAction: listen_to_revive`. Un `subscribe`
   non si aggancia più a un observer condiviso con eventi pending e nessun
   listener: ne crea uno nuovo e lo riconcilia.
+- Ogni subscription `pull_request` su un numero riceve anche `conflict`,
+  qualunque sia `--wait-for`. Quando la base avanza (PR mergiata o run avviata
+  da un push) il daemon rilegge le PR seguite con listener sulla stessa base
+  (ritentando se `mergeable` è ancora `null`) ed emette `conflict` una volta
+  per head: un conflitto arriva senza che nessuno debba fare polling.
 - L'ingress GitHub si avvia con `bin/github-webhook` e deve stare dietro TLS e
   un tunnel/reverse proxy pubblico; il coordinatore verifica sempre
   `X-Hub-Signature-256` con `FRONTALIERE_GH_WEBHOOK_SECRET`. Gli eventi webhook

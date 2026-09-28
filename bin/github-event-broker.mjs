@@ -132,7 +132,7 @@ function normalizedMergeable(value) {
   return null;
 }
 
-function pullRequestMergeability(pullRequest) {
+export function pullRequestMergeability(pullRequest) {
   const mergeableState = normalizedMergeableState(
     pullRequest?.mergeable_state ?? pullRequest?.mergeableState,
   );
@@ -969,6 +969,20 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
   return null;
 }
 
+// States every observer of one pull request receives whatever its waitFor: a
+// merge conflict blocks auto-merge forever, so an agent waiting for `merged`
+// must hear about it. The subscribe command suggested by the PR hooks omits
+// `conflict`, and #10233 went CONFLICTING unnoticed on 2026-09-28.
+export const IMPLICIT_PULL_REQUEST_STATES = Object.freeze(['conflict']);
+
+export function effectiveWaitFor(subscription) {
+  const waitFor = Array.isArray(subscription?.waitFor) ? subscription.waitFor : [];
+  if (subscription?.resource !== 'pull_request'
+    || subscription.number === null
+    || subscription.number === undefined) return waitFor;
+  return unique([...waitFor, ...IMPLICIT_PULL_REQUEST_STATES]);
+}
+
 export function eventMatchesSubscription(event, subscription) {
   if (!eventMatchesSubscriptionTarget(event, subscription)) return false;
   if (subscription.followLatest
@@ -976,10 +990,13 @@ export function eventMatchesSubscription(event, subscription) {
     && event.state === 'cancelled'
     && subscription.waitFor.includes('completed')) return false;
   const states = event.states || [event.state];
-  return subscription.waitFor.some((state) => states.includes(state));
+  return effectiveWaitFor(subscription).some((state) => states.includes(state));
 }
 
-const PULL_REQUEST_LIFECYCLE_STATES = new Set(['merged', 'closed']);
+// Pull-request states that belong to the PR, not to one head commit: a
+// merge, a close or a conflict still concerns an observer pinned to an older
+// head SHA.
+const PULL_REQUEST_LIFECYCLE_STATES = new Set(['merged', 'closed', 'conflict']);
 
 // Agents often pass an abbreviated SHA (`git rev-parse --short`); GitHub always
 // reports the full one. Accept an unambiguous prefix of at least 7 hex chars.
@@ -1055,7 +1072,7 @@ export function eventMatchesSubscriptionTarget(event, subscription) {
   // on PRs merged hours earlier.
   const pullRequestLifecycle = subscription.resource === 'pull_request'
     && event.resource === 'pull_request'
-    && (event.states || [event.state]).some((state) => PULL_REQUEST_LIFECYCLE_STATES.has(state));
+    && [event.state, ...(event.states || [])].some((state) => PULL_REQUEST_LIFECYCLE_STATES.has(state));
   if (subscription.sha && !followsLatestWorkflow && !pullRequestLifecycle
     && !shaMatches(event.sha, subscription.sha)) return false;
   if (subscription.branch && event.branch !== subscription.branch) return false;

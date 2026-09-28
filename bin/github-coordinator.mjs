@@ -42,6 +42,7 @@ import {
 import {
   GitHubEventBroker,
   normalizeReconciliationEvent,
+  pullRequestMergeability,
   shaMatches,
 } from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
@@ -139,6 +140,13 @@ export const ORPHAN_RETIRE_STARTUP_GRACE_MS = 10 * 60 * 1_000;
 export const ORPHAN_PENDING_RETIRE_MS = 60 * 60 * 1_000;
 export const ORPHAN_IDLE_RETIRE_MS = 6 * 60 * 60 * 1_000;
 export const ORPHAN_RETIRE_INTERVAL_MS = 60 * 1_000;
+// GitHub sends no webhook to a PR that becomes CONFLICTING because its base
+// moved, and computes `mergeable` lazily: a GET starts the computation and
+// may answer null. When a base branch moves (merged PR, push-triggered run)
+// the followed open PRs on it are re-read, with retries on null.
+export const MERGEABILITY_RECHECK_DELAY_MS = 10 * 1_000;
+export const MERGEABILITY_RETRY_DELAYS_MS = Object.freeze([5_000, 15_000, 45_000]);
+export const MERGEABILITY_RECHECK_MAX_PULL_REQUESTS = 25;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
 export const SCHEDULED_GC_BOOTSTRAP_DELAY_MS = 250;
 export const SCHEDULED_GC_BATCH_SIZE = 16;
@@ -147,6 +155,30 @@ export const SCHEDULED_GC_BATCH_SIZE = 16;
 export const SCHEDULED_GC_SYNC_SUBSCRIPTION_LIMIT = 32;
 export const SOCKET_IDLE_TIMEOUT_MS = 10 * 1_000;
 export const SCHEDULED_GC_INTERVAL_MS = 60 * 60 * 1_000;
+
+/**
+ * The branch whose head moved, from a verified webhook payload, or null.
+ * GitHub delivers no `push` to this receiver today (none among 256 audited
+ * deliveries), so a merged PR and a push-triggered workflow run are the
+ * signals that actually arrive; `push` is handled for when it is enabled.
+ */
+export function baseBranchMovement(eventName, payload) {
+  const repo = payload?.repository?.full_name;
+  if (!repo || !payload) return null;
+  const event = String(eventName || '').toLowerCase();
+  if (event === 'pull_request' && payload.action === 'closed' && payload.pull_request?.merged === true) {
+    const branch = payload.pull_request?.base?.ref;
+    return branch ? { repo, branch, excludeNumber: payload.pull_request?.number ?? null } : null;
+  }
+  if (event === 'workflow_run' && payload.action === 'requested' && payload.workflow_run?.event === 'push') {
+    const branch = payload.workflow_run?.head_branch;
+    return branch ? { repo, branch } : null;
+  }
+  if (event === 'push' && typeof payload.ref === 'string' && payload.ref.startsWith('refs/heads/') && payload.deleted !== true) {
+    return { repo, branch: payload.ref.slice('refs/heads/'.length) };
+  }
+  return null;
+}
 
 function reconcilableSubscription(subscription) {
   if (subscription.resource === 'pull_request') return Boolean(subscription.number);
@@ -1583,6 +1615,10 @@ export class GitHubCoordinator {
       eventSweepDeliveries: 0,
       eventSweepErrors: 0,
       eventScheduledGcRuns: 0,
+      baseMovements: 0,
+      mergeabilityChecks: 0,
+      mergeabilityRetries: 0,
+      mergeabilityConflicts: 0,
       peakQueueLength: 0,
       peakActive: 0,
       cacheEvictions: 0,
@@ -1594,6 +1630,11 @@ export class GitHubCoordinator {
     this.sweepReconciledAt = new Map();
     this.startedAtMs = Date.now();
     this.listenerSeenAt = new Map();
+    this.mergeabilityRecheckDelayMs = MERGEABILITY_RECHECK_DELAY_MS;
+    this.mergeabilityRetryDelaysMs = MERGEABILITY_RETRY_DELAYS_MS;
+    this.mergeabilityRecheckTimers = new Map();
+    this.mergeabilityWork = new Set();
+    this.reportedConflicts = new Map();
     this.lastScheduledGc = null;
     this.scheduledGcBootstrapAttempted = false;
     this.scheduledGcBootstrapInProgress = false;
@@ -2031,18 +2072,136 @@ export class GitHubCoordinator {
 
   ingestWebhook(request) {
     if (!this.eventBroker) throw new Error('event_broker_unavailable');
+    let verifiedPayload = null;
     const result = this.eventBroker.ingestWebhook(request, {
       beforePersist: (payload) => {
         const spec = { repo: payload?.repository?.full_name };
         if (eventRoutingRequired(this.identity, spec)) {
           assertEventIdentity({ spec, actualIdentity: this.identity, operation: 'webhook' });
         }
+        verifiedPayload = payload;
       },
     });
     for (const subscriptionId of result.matchedSubscriptionIds || []) {
       this.eventNotifier?.(subscriptionId);
     }
+    if (!result.duplicate) {
+      const movement = baseBranchMovement(request.eventName, verifiedPayload);
+      if (movement) this.scheduleMergeabilityRecheck(movement);
+    }
     return result;
+  }
+
+  // Debounced per repo and branch: a merge produces a pull_request webhook
+  // and several workflow runs within seconds, and GitHub needs a moment to
+  // start recomputing mergeability anyway.
+  scheduleMergeabilityRecheck({ repo, branch, excludeNumber = null }) {
+    this.metrics.baseMovements += 1;
+    const key = `${repo}|${branch}`;
+    const previous = this.mergeabilityRecheckTimers.get(key);
+    if (previous) clearTimeout(previous.timer);
+    const excluded = new Set([...(previous?.excluded || []), ...(excludeNumber ? [Number(excludeNumber)] : [])]);
+    const timer = setTimeout(() => {
+      this.mergeabilityRecheckTimers.delete(key);
+      this.trackMergeabilityWork(this.recheckMergeability({ repo, branch, excluded })
+        .catch((error) => logStructuredError('event_mergeability_recheck_failed', error, { repo, branch })));
+    }, this.mergeabilityRecheckDelayMs);
+    timer.unref?.();
+    this.mergeabilityRecheckTimers.set(key, { timer, excluded });
+  }
+
+  trackMergeabilityWork(promise) {
+    this.mergeabilityWork.add(promise);
+    promise.finally(() => this.mergeabilityWork.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  /** Resolves once no recheck is scheduled, running or waiting to retry. */
+  async mergeabilityRecheckIdle() {
+    while (this.mergeabilityRecheckTimers.size > 0 || this.mergeabilityWork.size > 0) {
+      await Promise.allSettled([...this.mergeabilityWork]);
+      if (this.mergeabilityWork.size === 0 && this.mergeabilityRecheckTimers.size > 0) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      }
+    }
+  }
+
+  /**
+   * Re-read every followed open PR of `repo` (one GET per PR number, however
+   * many observers) and record a `conflict` for those whose base moved under
+   * them. Observers known to be orphaned are skipped.
+   */
+  async recheckMergeability({ repo, branch, excluded = new Set() }) {
+    if (!this.eventBroker) return [];
+    const nowMs = Date.now();
+    const numbers = new Set();
+    for (const subscription of this.eventBroker.state.subscriptions) {
+      if (subscription.repo !== repo || subscription.resource !== 'pull_request') continue;
+      if (subscription.number === null || subscription.number === undefined) continue;
+      if (excluded.has(Number(subscription.number)) || subscription.expiresAtMs <= nowMs) continue;
+      if (this.eventListenerInspector?.(subscription.id) === false) continue;
+      if (eventRoutingRequired(this.identity, subscription) && !routeAllowsIdentity(subscription, this.identity)) continue;
+      numbers.add(Number(subscription.number));
+      if (numbers.size >= MERGEABILITY_RECHECK_MAX_PULL_REQUESTS) break;
+    }
+    return Promise.all([...numbers].map((number) => this.checkPullRequestMergeability({ repo, number, branch })));
+  }
+
+  async checkPullRequestMergeability({ repo, number, branch = null, attempt = 0 }) {
+    this.metrics.mergeabilityChecks += 1;
+    const response = await this.submit({
+      type: 'api',
+      identity: this.identity,
+      client: EVENT_CLIENT_KEY,
+      method: 'GET',
+      path: `/repos/${repo}/pulls/${number}`,
+      cacheTtlMs: 0,
+    });
+    if (!response.ok) return { number, ok: false, status: response.status };
+    let data;
+    try { data = JSON.parse(response.body || 'null'); } catch { return { number, ok: false }; }
+    if (!data || data.state !== 'open') return { number, ok: true, open: false };
+    if (branch && data.base?.ref && data.base.ref !== branch) return { number, ok: true, otherBase: true };
+    const { conflict, mergeable } = pullRequestMergeability(data);
+    if (!conflict && mergeable === null && attempt < this.mergeabilityRetryDelaysMs.length) {
+      this.metrics.mergeabilityRetries += 1;
+      const retry = new Promise((resolvePromise) => {
+        const timer = setTimeout(resolvePromise, this.mergeabilityRetryDelaysMs[attempt]);
+        timer.unref?.();
+      }).then(() => this.checkPullRequestMergeability({ repo, number, branch, attempt: attempt + 1 }));
+      this.trackMergeabilityWork(retry.catch(() => {}));
+      return { number, ok: true, retrying: true };
+    }
+    const prKey = `${repo}#${number}`;
+    if (!conflict) {
+      this.reportedConflicts.delete(prKey);
+      return { number, ok: true, conflict: false };
+    }
+    const headSha = data.head?.sha || 'head';
+    if (this.reportedConflicts.get(prKey) === headSha) return { number, ok: true, conflict: true, alreadyReported: true };
+    const recorded = [];
+    for (const subscription of this.eventBroker.state.subscriptions) {
+      if (subscription.repo !== repo || subscription.resource !== 'pull_request') continue;
+      if (Number(subscription.number) !== Number(number)) continue;
+      const event = normalizeReconciliationEvent({ subscription, data });
+      if (!event) continue;
+      // One conflict per head: a later base move re-reports it only after the
+      // agent pushed a new head that still conflicts.
+      event.id = `conflict:${prKey}:${headSha}`;
+      event.deliveryId = event.id;
+      const result = this.eventBroker.recordEvent(event);
+      for (const matchedSubscriptionId of result.matchedSubscriptionIds || []) {
+        this.eventNotifier?.(matchedSubscriptionId);
+      }
+      recorded.push(...(result.matchedSubscriptionIds || []));
+      // recordEvent fans the event out to every observer of the PR.
+      break;
+    }
+    if (recorded.length > 0) this.metrics.mergeabilityConflicts += 1;
+    this.reportedConflicts.delete(prKey);
+    this.reportedConflicts.set(prKey, headSha);
+    if (this.reportedConflicts.size > 1_000) this.reportedConflicts.delete(this.reportedConflicts.keys().next().value);
+    return { number, ok: true, conflict: true, matchedSubscriptionIds: recorded };
   }
 
   eventPending(subscriptionId) {
@@ -4383,6 +4542,8 @@ function startWithOwnerLock(identity, socket, ownerLock) {
     if (firstGcTimer) clearTimeout(firstGcTimer);
     if (socketEndpointTimer) clearInterval(socketEndpointTimer);
     if (coordinator.scheduledGcBootstrapTimer) clearImmediate(coordinator.scheduledGcBootstrapTimer);
+    for (const { timer } of coordinator.mergeabilityRecheckTimers.values()) clearTimeout(timer);
+    coordinator.mergeabilityRecheckTimers.clear();
     eventBrokerLoader.worker.terminate().catch(() => {});
     for (const listeners of eventListeners.values()) {
       for (const listener of listeners) {
