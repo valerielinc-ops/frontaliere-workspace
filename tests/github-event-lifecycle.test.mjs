@@ -219,6 +219,15 @@ test('archivia solo gli orfani certi, dopo la grace di avvio', () => {
     // Recent listener activity postpones the archive.
     coordinator.noteListenerActivity(pendingRecent, nowMs);
     assert.deepEqual(coordinator.retireOrphanedSubscriptions({ nowMs: nowMs + ORPHAN_PENDING_RETIRE_MS - 1_000 }), []);
+
+    // A restart does not restart the clock: past the start-up grace an old
+    // orphan is archived at once (measured: two deploys in an hour kept 64
+    // pending orphans alive on 2026-09-28).
+    const restartedPending = subscribe({ resource: 'pull_request', number: 15, waitFor: ['merged'] });
+    clock.nowMs = nowMs + 3 * HOUR;
+    broker.recordEvent(mergedEvent(15, 'merge-15', new Date(nowMs + HOUR).toISOString()));
+    coordinator.startedAtMs = clock.nowMs - ORPHAN_RETIRE_STARTUP_GRACE_MS - 1_000;
+    assert.ok(coordinator.retireOrphanedSubscriptions({ nowMs: clock.nowMs }).includes(restartedPending));
   } finally {
     cleanup();
   }

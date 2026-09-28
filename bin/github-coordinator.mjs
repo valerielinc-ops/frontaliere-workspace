@@ -2271,11 +2271,15 @@ export class GitHubCoordinator {
   }
 
   // Why an unattended subscription should be archived now, or null.
+  // The quiet period is measured on durable timestamps and on listener
+  // activity seen by this process, not on the process start: the start-up
+  // grace already lets live listeners reconnect, and counting from the start
+  // meant every deploy (several a day) postponed the archive by another hour.
+  // A late listener loses nothing: `events listen` revives the archive.
   orphanRetirementReason(subscription, nowMs) {
     const createdAtMs = Date.parse(subscription.createdAt || '');
     const renewedAtMs = Date.parse(subscription.lastRenewedAt || '');
     const quietSinceMs = Math.max(
-      this.startedAtMs,
       this.listenerSeenAt.get(subscription.id) || 0,
       Number.isFinite(createdAtMs) ? createdAtMs : 0,
       Number.isFinite(renewedAtMs) ? renewedAtMs : 0,
