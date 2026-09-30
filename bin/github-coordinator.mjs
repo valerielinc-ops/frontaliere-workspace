@@ -112,6 +112,9 @@ const ANONYMOUS_WINDOW_MS = 60 * 60 * 1_000;
 const CANCELLATION_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_CACHE_TTL_MS = 5_000;
 const MAX_CACHE_TTL_MS = 60_000;
+export const WORKFLOW_CATALOG_CACHE_TTL_MS = 60 * 60 * 1_000;
+export const WORKFLOW_CATALOG_REFRESH_COOLDOWN_MS = 5 * 60 * 1_000;
+const MAX_PAGINATED_API_PAGES = 1_000;
 const configuredMaxBodyBytes = Number(process.env.FRONTALIERE_GH_MAX_BODY_BYTES || 0);
 const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxBodyBytes >= 1024
   ? Math.floor(configuredMaxBodyBytes)
@@ -1105,22 +1108,24 @@ function workflowFilename(value) {
 function workflowCatalog(data) {
   const namesByFilename = new Map();
   const idsByName = new Map();
+  const names = new Set();
   for (const workflow of Array.isArray(data?.workflows) ? data.workflows : []) {
     const name = typeof workflow?.name === 'string' ? workflow.name.trim() : '';
     if (!name) continue;
+    const key = name.toLowerCase();
+    names.add(key);
     for (const candidate of [workflow.path, workflow.file_name, workflow.filename]) {
       const filename = workflowFilename(candidate);
       if (filename) namesByFilename.set(filename, name);
     }
     if (workflow.id !== null && workflow.id !== undefined && String(workflow.id).trim() !== '') {
-      const key = name.toLowerCase();
       idsByName.set(key, [...(idsByName.get(key) || []), String(workflow.id)]);
     }
   }
-  return { namesByFilename, idsByName };
+  return { namesByFilename, idsByName, names };
 }
 
-const EMPTY_WORKFLOW_CATALOG = Object.freeze({ namesByFilename: new Map(), idsByName: new Map() });
+const EMPTY_WORKFLOW_CATALOG = Object.freeze({ namesByFilename: new Map(), idsByName: new Map(), names: new Set() });
 
 function workflowSelectorForms(value) {
   if (value === null || value === undefined) return [];
@@ -1588,6 +1593,7 @@ export class GitHubCoordinator {
     this.globalInvalidationEpoch = 0;
     this.scopeInvalidationEpoch = new Map();
     this.workflowFilenameCache = new Map();
+    this.workflowCatalogRefreshAt = new Map();
     this.bucketPausedUntil = new Map();
     this.buckets = new Map();
     this.pendingCancellations = new Map();
@@ -1883,23 +1889,50 @@ export class GitHubCoordinator {
     this.eventListenerInfoInspector = typeof inspector === 'function' ? inspector : null;
   }
 
-  workflowCatalog(repo) {
-    let cached = this.workflowFilenameCache.get(repo);
-    if (!cached) {
-      cached = this.submit({
+  async fetchWorkflowCatalog(repo) {
+    const workflows = [];
+    let path = `/repos/${repo}/actions/workflows?per_page=100`;
+    for (let page = 0; page < MAX_PAGINATED_API_PAGES; page += 1) {
+      const response = await this.submit({
         type: 'api',
         identity: this.identity,
         client: EVENT_CLIENT_KEY,
         method: 'GET',
-        path: `/repos/${repo}/actions/workflows?per_page=100`,
+        path,
         cacheTtlMs: 0,
-      }).then((response) => {
-        if (!response.ok) return EMPTY_WORKFLOW_CATALOG;
-        try { return workflowCatalog(JSON.parse(response.body || 'null')); } catch { return EMPTY_WORKFLOW_CATALOG; }
-      }).catch(() => EMPTY_WORKFLOW_CATALOG);
-      this.workflowFilenameCache.set(repo, cached);
+      });
+      if (!response.ok) throw new Error('workflow_catalog_request_failed');
+      const data = JSON.parse(response.body || 'null');
+      if (!Array.isArray(data?.workflows)) throw new Error('workflow_catalog_invalid');
+      workflows.push(...data.workflows);
+      const next = nextPagePath(response.headers?.link);
+      if (!next) return workflowCatalog({ workflows });
+      path = next;
     }
-    return cached;
+    throw new Error('workflow_catalog_pagination_limit');
+  }
+
+  workflowCatalog(repo, { force = false } = {}) {
+    const cached = this.workflowFilenameCache.get(repo);
+    if (!force && cached && cached.expiresAt > Date.now()) return cached.promise;
+    if (cached) this.workflowFilenameCache.delete(repo);
+
+    const entry = { promise: null, expiresAt: Number.POSITIVE_INFINITY };
+    const promise = this.fetchWorkflowCatalog(repo).then(
+      (catalog) => {
+        if (this.workflowFilenameCache.get(repo) === entry) {
+          entry.expiresAt = Date.now() + WORKFLOW_CATALOG_CACHE_TTL_MS;
+        }
+        return catalog;
+      },
+      () => {
+        if (this.workflowFilenameCache.get(repo) === entry) this.workflowFilenameCache.delete(repo);
+        return EMPTY_WORKFLOW_CATALOG;
+      },
+    );
+    entry.promise = promise;
+    this.workflowFilenameCache.set(repo, entry);
+    return promise;
   }
 
   async resolveWorkflowFilename(repo, workflow) {
@@ -1915,7 +1948,17 @@ export class GitHubCoordinator {
   async resolveWorkflowNameId(repo, workflow) {
     const name = typeof workflow === 'string' ? workflow.trim().toLowerCase() : '';
     if (!name || workflowFilename(name) || typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return null;
-    const ids = (await this.workflowCatalog(repo)).idsByName.get(name) || [];
+    let catalog = await this.workflowCatalog(repo);
+    let ids = catalog.idsByName.get(name) || [];
+    if (ids.length === 0 && !catalog.names.has(name)) {
+      const now = Date.now();
+      const refreshedAt = this.workflowCatalogRefreshAt.get(repo);
+      if (refreshedAt === undefined || now >= refreshedAt + WORKFLOW_CATALOG_REFRESH_COOLDOWN_MS) {
+        this.workflowCatalogRefreshAt.set(repo, now);
+        catalog = await this.workflowCatalog(repo, { force: true });
+        ids = catalog.idsByName.get(name) || [];
+      }
+    }
     return ids.length === 1 ? ids[0] : null;
   }
 
@@ -3593,7 +3636,7 @@ export class GitHubCoordinator {
   async executeParsedApi(parsed, { anonymous = false } = {}) {
     const pages = [];
     let path = parsed.path;
-    for (let page = 0; page < (parsed.paginate ? 1_000 : 1); page += 1) {
+    for (let page = 0; page < (parsed.paginate ? MAX_PAGINATED_API_PAGES : 1); page += 1) {
       const response = await this.executeApi({
         type: 'api',
         identity: this.identity,
