@@ -2462,6 +2462,118 @@ test('la riconciliazione torna all elenco generico se il nome del workflow non Ã
   }
 });
 
+test('un observer per nome riceve la fine di una run con run-name: il nome viene da payload.workflow', () => {
+  // 29-09: tre observer di `Orchestrate Job Crawlers` restavano su `requested`
+  // per tre ondate; da `in_progress` il webhook porta il titolo della run.
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-run-name-webhook-'));
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'run-name-webhook-secret',
+  });
+  const webhook = (action, name) => normalizeWebhookEvent({
+    eventName: 'workflow_run',
+    deliveryId: `run-name-${action}`,
+    receivedAt: '2026-09-29T21:25:41Z',
+    payload: {
+      action,
+      repository: { full_name: 'owner/repo' },
+      workflow: { id: 101, name: 'Orchestrate Job Crawlers', path: '.github/workflows/orchestrate-crawlers.yml' },
+      workflow_run: {
+        id: 36630300633,
+        name,
+        workflow_id: 101,
+        path: '.github/workflows/orchestrate-crawlers.yml',
+        head_branch: 'main',
+        status: action === 'completed' ? 'completed' : 'queued',
+        conclusion: action === 'completed' ? 'success' : null,
+      },
+    },
+  });
+
+  try {
+    const subscription = broker.subscribe({
+      repo: 'owner/repo',
+      resource: 'workflow_run',
+      workflow: 'Orchestrate Job Crawlers',
+      branch: 'main',
+      followLatest: true,
+      waitFor: ['completed'],
+      ttlSeconds: 300,
+    });
+    broker.recordEvent(webhook('requested', 'Orchestrate Job Crawlers'));
+    const completed = webhook('completed', 'Orchestrate Job Crawlers [cloud-scheduler 2026-09-29T21:00:00.000Z]');
+    assert.equal(completed.workflow, 'Orchestrate Job Crawlers');
+    assert.deepEqual(broker.recordEvent(completed).matchedSubscriptionIds, [subscription.id]);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('la riconciliazione di un observer per nome trova la run anche se REST porta il titolo di run-name', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-run-name-reconcile-'));
+  const originalFetch = globalThis.fetch;
+  const pathnames = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(String(url));
+    pathnames.push(requestUrl.pathname);
+    if (requestUrl.pathname === '/repos/owner/repo/actions/workflows') {
+      return fakeResponse(200, JSON.stringify({
+        workflows: [
+          { id: 101, name: 'Orchestrate Job Crawlers', path: '.github/workflows/orchestrate-crawlers.yml' },
+          { id: 102, name: 'tests', path: '.github/workflows/tests.yml' },
+        ],
+      }), { 'x-ratelimit-remaining': '100' });
+    }
+    return fakeResponse(200, JSON.stringify({
+      workflow_runs: [{
+        id: 36630300633,
+        name: 'Orchestrate Job Crawlers [cloud-scheduler 2026-09-29T21:00:00.000Z]',
+        workflow_id: 101,
+        path: '.github/workflows/orchestrate-crawlers.yml',
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'main',
+        head_sha: 'ddddddd',
+        created_at: '2026-09-29T21:00:13Z',
+        updated_at: '2026-09-29T21:25:41Z',
+      }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'run-name-reconcile-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    workflow: 'Orchestrate Job Crawlers',
+    branch: 'main',
+    followLatest: true,
+    waitFor: ['completed'],
+    ttlSeconds: 60,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+
+  try {
+    const result = await coordinator.reconcileEvents(subscription.id);
+    assert.deepEqual(pathnames, [
+      '/repos/owner/repo/actions/workflows',
+      '/repos/owner/repo/actions/workflows/101/runs',
+    ]);
+    assert.deepEqual(result.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(String(broker.pendingEvent(subscription.id).runId), '36630300633');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', () => {
   const parsed = parseGhApiArguments([
     'api', 'repos/octocat/Hello-World', '--jq', '.full_name', '--paginate',

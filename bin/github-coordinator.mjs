@@ -1102,18 +1102,25 @@ function workflowFilename(value) {
   return /\.ya?ml$/i.test(filename) ? filename.toLowerCase() : null;
 }
 
-function workflowFilenameMap(data) {
-  const result = new Map();
+function workflowCatalog(data) {
+  const namesByFilename = new Map();
+  const idsByName = new Map();
   for (const workflow of Array.isArray(data?.workflows) ? data.workflows : []) {
     const name = typeof workflow?.name === 'string' ? workflow.name.trim() : '';
     if (!name) continue;
     for (const candidate of [workflow.path, workflow.file_name, workflow.filename]) {
       const filename = workflowFilename(candidate);
-      if (filename) result.set(filename, name);
+      if (filename) namesByFilename.set(filename, name);
+    }
+    if (workflow.id !== null && workflow.id !== undefined && String(workflow.id).trim() !== '') {
+      const key = name.toLowerCase();
+      idsByName.set(key, [...(idsByName.get(key) || []), String(workflow.id)]);
     }
   }
-  return result;
+  return { namesByFilename, idsByName };
 }
+
+const EMPTY_WORKFLOW_CATALOG = Object.freeze({ namesByFilename: new Map(), idsByName: new Map() });
 
 function workflowSelectorForms(value) {
   if (value === null || value === undefined) return [];
@@ -1876,9 +1883,7 @@ export class GitHubCoordinator {
     this.eventListenerInfoInspector = typeof inspector === 'function' ? inspector : null;
   }
 
-  async resolveWorkflowFilename(repo, workflow) {
-    const filename = workflowFilename(workflow);
-    if (!filename || typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return workflow;
+  workflowCatalog(repo) {
     let cached = this.workflowFilenameCache.get(repo);
     if (!cached) {
       cached = this.submit({
@@ -1889,13 +1894,29 @@ export class GitHubCoordinator {
         path: `/repos/${repo}/actions/workflows?per_page=100`,
         cacheTtlMs: 0,
       }).then((response) => {
-        if (!response.ok) return new Map();
-        try { return workflowFilenameMap(JSON.parse(response.body || 'null')); } catch { return new Map(); }
-      }).catch(() => new Map());
+        if (!response.ok) return EMPTY_WORKFLOW_CATALOG;
+        try { return workflowCatalog(JSON.parse(response.body || 'null')); } catch { return EMPTY_WORKFLOW_CATALOG; }
+      }).catch(() => EMPTY_WORKFLOW_CATALOG);
       this.workflowFilenameCache.set(repo, cached);
     }
-    const names = await cached;
-    return names.get(filename) || workflow;
+    return cached;
+  }
+
+  async resolveWorkflowFilename(repo, workflow) {
+    const filename = workflowFilename(workflow);
+    if (!filename || typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return workflow;
+    const { namesByFilename } = await this.workflowCatalog(repo);
+    return namesByFilename.get(filename) || workflow;
+  }
+
+  // The id behind a workflow name. REST runs carry the run title in `name`,
+  // so a reconciliation for a name selector has to find the runs through the
+  // workflow itself; only an unambiguous name qualifies.
+  async resolveWorkflowNameId(repo, workflow) {
+    const name = typeof workflow === 'string' ? workflow.trim().toLowerCase() : '';
+    if (!name || workflowFilename(name) || typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return null;
+    const ids = (await this.workflowCatalog(repo)).idsByName.get(name) || [];
+    return ids.length === 1 ? ids[0] : null;
   }
 
   async eventSubscription(spec) {
@@ -2546,6 +2567,7 @@ export class GitHubCoordinator {
     let path;
     let listWorkflowRuns = false;
     let workflowRunsFallbackPath = null;
+    let workflowNameId = null;
     if (subscription.resource === 'pull_request' && subscription.number) {
       path = `/repos/${subscription.repo}/pulls/${subscription.number}`;
     } else if (subscription.resource === 'workflow_run' && subscription.runId) {
@@ -2558,12 +2580,14 @@ export class GitHubCoordinator {
       // client-side prefix match below.
       if (/^[0-9a-f]{40}$/i.test(String(subscription.sha || ''))) query.set('head_sha', subscription.sha);
       const workflowFile = reconcileWorkflowFile(subscription.workflow);
+      if (!workflowFile) workflowNameId = await this.resolveWorkflowNameId(subscription.repo, subscription.workflow);
+      const workflowRef = workflowFile || workflowNameId;
       const listQuery = new URLSearchParams(query);
       listQuery.set('per_page', '100');
       const listPath = `/repos/${subscription.repo}/actions/runs?${listQuery.toString()}`;
-      if (workflowFile) {
+      if (workflowRef) {
         query.set('per_page', '30');
-        path = `/repos/${subscription.repo}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?${query.toString()}`;
+        path = `/repos/${subscription.repo}/actions/workflows/${encodeURIComponent(workflowRef)}/runs?${query.toString()}`;
         workflowRunsFallbackPath = listPath;
       } else {
         path = listPath;
@@ -2615,11 +2639,18 @@ export class GitHubCoordinator {
       const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
       data = runs
         .filter((run) => (
-          workflowSelectorMatchesRun(run, subscription.workflow)
+          (workflowSelectorMatchesRun(run, subscription.workflow)
+            || (workflowNameId !== null && String(run.workflow_id) === workflowNameId))
           && (!subscription.sha || shaMatches(run.head_sha, subscription.sha))
           && (!subscription.branch || run.head_branch === subscription.branch)
         ))
         .sort(latestRunFirst)[0] || null;
+      // With `run-name` the REST `name` is the run title: a run found through
+      // the workflow its name selector resolved to gets the workflow name
+      // back, as the webhook reports it, so the event matches the observer.
+      if (data && workflowNameId !== null && !workflowSelectorMatchesRun(data, subscription.workflow)) {
+        data = { ...data, workflow_name: subscription.workflow };
+      }
     }
     if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
     const events = [];

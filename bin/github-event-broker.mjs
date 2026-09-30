@@ -916,9 +916,14 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: run.id,
-      workflow: run.workflow_name || run.name || run.path || null,
-      workflowId: run.workflow_id,
-      workflowPath: run.path || run.workflow_path || null,
+      // `workflow_run.name` is the run title. With `run-name` it holds the
+      // workflow name only on `requested` (28-09: `tests` became `Code checks
+      // and review · PR #10436 · synchronize`), so a name selector matched the
+      // start of every run and never its end. `payload.workflow` is the
+      // workflow itself and keeps the name selectors resolve to.
+      workflow: payload.workflow?.name || run.workflow_name || run.name || run.path || null,
+      workflowId: run.workflow_id ?? payload.workflow?.id,
+      workflowPath: run.path || run.workflow_path || payload.workflow?.path || null,
       branch: run.head_branch || null,
       sha: run.head_sha || null,
       conclusion: run.conclusion || null,
