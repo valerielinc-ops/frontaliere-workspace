@@ -1,5 +1,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +15,7 @@ import {
   isPiiBlocklistCommand,
   policyResult,
   resolvedBlocklistPath,
+  workspaceFallbackBlocklistPath,
 } from './pii-blocklist-policy.mjs';
 
 const ROOT = dirname(new URL(import.meta.url).pathname);
@@ -82,6 +90,33 @@ test('rejects a canonical-looking scan when the per-clone file is absent', () =>
     );
     assert.equal(result.status, 2);
     assert.match(result.stderr, /blocklist assente/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('links the workspace fallback when a repo under the workspace has no local file', () => {
+  const root = mkdtempSync(join(ROOT, '..', '.pii-blocklist-policy-fallback-'));
+  try {
+    git(root, ['init', '--quiet']);
+    const expected = resolvedBlocklistPath(root);
+    const fallback = workspaceFallbackBlocklistPath();
+    assert.ok(expected);
+    assert.ok(fallback);
+    assert.notEqual(expected, fallback);
+
+    const result = policyResult({
+      cwd: root,
+      command: 'BL="$(git rev-parse --git-path info/pii-blocklist.txt)"; test -f "$BL"',
+    });
+
+    assert.equal(result.allowed, true);
+    assert.equal(result.blocklistSource, 'workspace-fallback');
+    assert.equal(readlinkSync(expected), fallback);
+    assert.equal(runPolicy(
+      'BL="$(git rev-parse --git-path info/pii-blocklist.txt)"; test -f "$BL"',
+      root,
+    ).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
