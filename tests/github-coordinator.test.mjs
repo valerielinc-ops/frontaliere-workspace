@@ -1699,6 +1699,168 @@ test('normalizza il filename del workflow nel nome visualizzato e mette in cache
   }
 });
 
+test('non mette in cache i cataloghi falliti', async (t) => {
+  const failures = [
+    ['risposta HTTP non ok', () => fakeResponse(503, 'temporarily unavailable', { 'x-ratelimit-remaining': '100' })],
+    ['JSON invalido', () => fakeResponse(200, '{catalogo incompleto', { 'x-ratelimit-remaining': '100' })],
+    ['eccezione di rete', () => { throw new Error('network failure'); }],
+  ];
+
+  for (const [label, firstResponse] of failures) {
+    await t.test(label, async () => {
+      const originalFetch = globalThis.fetch;
+      const calls = [];
+      let attempt = 0;
+      globalThis.fetch = async (url) => {
+        calls.push(String(url));
+        attempt += 1;
+        if (attempt === 1) return firstResponse();
+        return fakeResponse(200, JSON.stringify({
+          workflows: [{ name: 'Deploy production', path: '.github/workflows/deploy.yml' }],
+        }), { 'x-ratelimit-remaining': '100' });
+      };
+      const coordinator = new GitHubCoordinator({
+        identity: 'test',
+        token: 'secret-for-test',
+        realGh: '/bin/echo',
+        socket: '/tmp/frontaliere-workflow-catalog-failure.sock',
+      });
+
+      try {
+        assert.equal(await coordinator.resolveWorkflowFilename('owner/repo', 'deploy.yml'), 'deploy.yml');
+        assert.equal(await coordinator.resolveWorkflowFilename('owner/repo', 'deploy.yml'), 'Deploy production');
+        assert.equal(calls.length, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
+
+test('scade il catalogo dei workflow dopo un ora', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let nowMs = Date.parse('2026-09-15T12:00:00Z');
+  const calls = [];
+  let version = 0;
+  Date.now = () => nowMs;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    version += 1;
+    const name = version === 1 ? 'Deploy old' : 'Deploy new';
+    return fakeResponse(200, JSON.stringify({
+      workflows: [{ name, path: '.github/workflows/deploy.yml' }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-workflow-catalog-expiry.sock',
+  });
+
+  try {
+    assert.equal(await coordinator.resolveWorkflowFilename('owner/repo', 'deploy.yml'), 'Deploy old');
+    nowMs += 60 * 60 * 1_000 + 1;
+    assert.equal(await coordinator.resolveWorkflowFilename('owner/repo', 'deploy.yml'), 'Deploy new');
+    assert.equal(calls.length, 2);
+  } finally {
+    Date.now = originalNow;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('completa la paginazione del catalogo dei workflow', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(String(url));
+    calls.push(requestUrl);
+    if (!requestUrl.searchParams.has('page')) {
+      return fakeResponse(200, JSON.stringify({
+        workflows: [{ name: 'Existing', path: '.github/workflows/existing.yml' }],
+      }), {
+        link: '<https://api.github.com/repos/owner/repo/actions/workflows?per_page=100&page=2>; rel="next"',
+        'x-ratelimit-remaining': '100',
+      });
+    }
+    assert.equal(requestUrl.searchParams.get('page'), '2');
+    return fakeResponse(200, JSON.stringify({
+      workflows: [{ name: 'Deploy production', path: '.github/workflows/deploy.yml' }],
+    }), { 'x-ratelimit-remaining': '100' });
+  };
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-workflow-catalog-pagination.sock',
+  });
+
+  try {
+    assert.equal(await coordinator.resolveWorkflowFilename('owner/repo', 'deploy.yml'), 'Deploy production');
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('il nome mancante forza un refresh e il refresh è limitato a cinque minuti', async (t) => {
+  await t.test('riprova il catalogo per un nome appena aggiunto', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      const workflows = calls.length === 1
+        ? [{ id: 1, name: 'Existing', path: '.github/workflows/existing.yml' }]
+        : [{ id: 2, name: 'New workflow', path: '.github/workflows/new.yml' }];
+      return fakeResponse(200, JSON.stringify({ workflows }), { 'x-ratelimit-remaining': '100' });
+    };
+    const coordinator = new GitHubCoordinator({
+      identity: 'test',
+      token: 'secret-for-test',
+      realGh: '/bin/echo',
+      socket: '/tmp/frontaliere-workflow-catalog-refresh.sock',
+    });
+
+    try {
+      assert.equal(await coordinator.resolveWorkflowNameId('owner/repo', 'New workflow'), '2');
+      assert.equal(calls.length, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test('non martella il catalogo durante il cooldown', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    let nowMs = Date.parse('2026-09-15T12:00:00Z');
+    const calls = [];
+    Date.now = () => nowMs;
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return fakeResponse(200, JSON.stringify({ workflows: [] }), { 'x-ratelimit-remaining': '100' });
+    };
+    const coordinator = new GitHubCoordinator({
+      identity: 'test',
+      token: 'secret-for-test',
+      realGh: '/bin/echo',
+      socket: '/tmp/frontaliere-workflow-catalog-refresh-limit.sock',
+    });
+
+    try {
+      assert.equal(await coordinator.resolveWorkflowNameId('owner/repo', 'New workflow'), null);
+      assert.equal(await coordinator.resolveWorkflowNameId('owner/repo', 'New workflow'), null);
+      assert.equal(calls.length, 2);
+      nowMs += 5 * 60 * 1_000 + 1;
+      assert.equal(await coordinator.resolveWorkflowNameId('owner/repo', 'New workflow'), null);
+      assert.equal(calls.length, 3);
+    } finally {
+      Date.now = originalNow;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 test('i comandi help delle subscription non avviano il coordinatore', () => {
   const listenHelp = spawnSync(process.execPath, [join(ROOT, 'bin', 'gh-frontaliere'), 'events', 'listen', '--help'], {
     cwd: ROOT,
