@@ -733,6 +733,48 @@ d=$(mktemp -d); for i in 1 2 3 4 5; do printf '#!/bin/sh\n' >"$d/s$i"; chmod +x 
 time (for i in 1 2 3 4 5; do "$d/s$i"; done); time (for i in 1 2 3 4 5; do "$d/s$i"; done)
 ```
 
+**Git del sito su questo Mac: clone parziale, pack e manutenzione.** Qui il
+sito e' un clone `blob:none` (partial), non completo come sul laptop
+principale. `git show origin/main:<file>` funziona senza rete (al tip di
+`main` mancavano 11 blob in tutto l'albero), ma ogni `git fetch` crea un pack
+promisor: il 2026-10-02 erano 2.753 pack nati in meno di 20 ore, con 1-2,5
+GB/h di crescita nelle ore di lavoro. Il prefetch orario di `git maintenance`
+scarica tutti i branch degli agenti, tiene il lock ~15 minuti e impediva il
+consolidamento giornaliero: e' spento sul sito con
+`git config maintenance.prefetch.enabled false` (si riattiva con `--unset`).
+Un `git maintenance run --task=incremental-repack` manuale (30 minuti, 2,3 GB
+di picco, a nice 10) ha portato i pack a 1.887 e il multi-pack-index a
+giorno: `cat-file` di un tree da 163 a 38 ms, `log -1 -- <path>` da 438 a
+128 ms, `merge-base` da 229 a 160 ms.
+
+**Esenzione Strumenti per sviluppatori: Claude e Codex.** L'esenzione su
+`/usr/libexec/sshd-keygen-wrapper` copre solo i processi attribuiti alla
+sessione SSH (Claude). L'app-server di Codex e' responsabile di se stesso e
+lancia ogni comando rinunciando alla responsabilita' (`zsh`, `git`, `node`
+risultano responsabili di se stessi), quindi servono anche `/bin/zsh`,
+`/bin/bash`, `/bin/sh`, `~/.local/node/bin/node` e
+`~/.local/git-2.56.0/bin/git` nello stesso pannello (fatto il 2026-10-02).
+Misurato sulla prima esecuzione di uno script nuovo: Claude da 3.324 a 12 ms,
+Codex da 6.819 a 15 ms; `XprotectService` da ~29 s di CPU al minuto a ~2,4.
+Per vedere a chi macOS attribuisce un processo, senza root:
+
+```bash
+python3 -c 'import ctypes,sys; f=ctypes.CDLL(None).responsibility_get_pid_responsible_for_pid; print(f(int(sys.argv[1])))' <pid>
+```
+
+Per riprodurre un comando "come Codex" (figlio con responsabilita'
+rinunciata) si usa `posix_spawn` con `responsibility_spawnattrs_setdisclaim`.
+XProtect per intero non si spegne da remoto: richiede di disattivare SIP dalla
+Recovery, con accesso fisico.
+
+**Concorrenza.** I comandi pesanti passano uno alla volta dal lease del guard
+(con coda FIFO e liveness dal 2026-10-02), quindi il default di vitest (thread
+logici meno uno, 3 qui) va bene. `npm run build` chiede 18 GB di heap e su 16
+GB non e' praticabile: le build passano dalla CI. Nella copia locale di
+`.codex/config.toml` `max_concurrent_threads_per_session` e' 15 (4 nel repo),
+per scelta del proprietario: se il carico resta alto e' il primo parametro da
+abbassare.
+
 **Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
 coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso
 senza monitor esterno il Mac dorme comunque), display spento, base rialzata.
