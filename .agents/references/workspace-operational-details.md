@@ -444,11 +444,40 @@ Il gate del PR body vale per **entrambi** i repo, non solo per il sito: i due
 vogliono gli stessi header (vedi «Il body della PR»), quindi averlo attivo dalla
 root e' un guadagno anche sul corpus.
 
-**Se modifichi gli hook nel repo del sito, aggiornali anche nelle due configurazioni
-della root**: sono copie, e nessuno le confronta. E' il prezzo di poter aprire la
-sessione dalla root; il `cloud-session-secrets.sh` invece resta solo nel repo,
-perche' serve alle sessioni
-cloud che partono da li' e in locale e' comunque un no-op.
+**Se modifichi gli hook nel repo del sito, aggiornali anche nella root**: sono
+copie, e nessuno le confronta. E' il prezzo di poter aprire la sessione dalla
+root; il `cloud-session-secrets.sh` invece resta solo nel repo, perche' serve
+alle sessioni cloud che partono da li' e in locale e' comunque un no-op.
+
+**Dispatcher degli hook Bash (dal 2026-10-02).** Gli 8 hook PreToolUse e i 2
+PostToolUse su Bash erano ciascuno un processo node con il suo `sh -c` (e,
+per gli script del sito, `bin/site-hook` + `bin/site-hooks-refresh`): circa 30
+processi per ogni comando di ogni agente, ~16.500 comandi al giorno sul Mac
+host agenti. Ora entrambe le configurazioni chiamano `bin/hook-dispatch.mjs
+pre-bash|post-bash`, che risolve gli script come facevano i comandi di prima
+(il `MANIFEST` li elenca) e li esegue invariati in worker thread dello stesso
+processo. Misurato: CPU per comando da 0,85 s a 0,41 s a carico basso, da
+~2,6 s a ~0,45 s con la macchina satura.
+
+Gli hook non sanno di girare in un worker, e tre dettagli lo rendono vero:
+`readFileSync(0)`/`'/dev/stdin'` restituiscono il payload (con
+`syncBuiltinESMExports`, anche per gli import nominati), `process.stdin` e'
+uno stream col payload, e `process.argv[1]` e' lo script. Senza quest'ultimo
+le guardie "se eseguito direttamente" di `github-api-policy` e
+`pii-blocklist-policy` uscivano 0 in silenzio: un gate spento non da' segnali,
+per questo `tests/hook-dispatch.test.mjs` confronta per ogni hook codice e
+stderr in worker e in processo separato, sia con fixture sia con gli hook
+reali (curl all'API, path letterale della blocklist, `gh run cancel`, `git log
+--all -S`, `gh pr create` senza header). Un exit 2 di un hook non advisory
+blocca con lo stderr di chi ha bloccato; gli stdout JSON si uniscono;
+`pr-collision-precheck` resta advisory (`|| true`). Se il dispatcher stesso
+fallisce, gli stessi hook girano come processi separati. Lo stamp di
+`hooks-main` si legge una volta per comando e il refresh parte solo se e'
+vecchio.
+
+Nota: con la risoluzione storica `pr-collision-precheck` cerca lo script nel
+checkout del sito, che sul Mac host e' sparse e non lo contiene, quindi li'
+l'avviso non gira; il dispatcher riproduce la stessa risoluzione.
 
 ## Stato del mirror (aggiornato il 2026-08-05)
 

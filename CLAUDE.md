@@ -313,9 +313,12 @@ La guardia GitHub risale dalla directory corrente alla root: si applica anche
 dai checkout figli e dai worktree. Fuori dal workspace, se non trova lo script,
 resta fail-open per non bloccare sessioni legittime.
 
-Se modifichi gli hook nel sito, aggiorna anche entrambe le configurazioni della
-root. Per il contratto completo leggi la sezione `Hook: sollevati nella root`
-del riferimento.
+Gli hook Bash Pre/PostToolUse non sono piu' elencati nelle due configurazioni:
+entrambe chiamano `bin/hook-dispatch.mjs`, che li esegue in worker thread di un
+solo processo node. Per aggiungere, togliere o spostare un hook Bash modifica il
+suo `MANIFEST` e i test di parita' in `tests/hook-dispatch.test.mjs`; per gli
+altri eventi aggiorna entrambe le configurazioni della root. Per il contratto
+completo leggi la sezione `Hook: sollevati nella root` del riferimento.
 
 Per vedere cosa occupa la context window usa `unclog` (installato con `uv tool
 install unclog`): elenca agenti, skill, comandi e server MCP col loro costo in

@@ -23,37 +23,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'find_policy() { d=\"$1\"; [ -n \"$d\" ] || return 1; d=\"$(CDPATH= cd -- \"$d\" 2>/dev/null && pwd -P)\" || return 1; while :; do [ -f \"$d/bin/github-api-policy.mjs\" ] && { printf \"%s/bin/github-api-policy.mjs\\n\" \"$d\"; return 0; }; parent=\"$(dirname \"$d\")\"; [ \"$parent\" = \"$d\" ] && return 1; d=\"$parent\"; done; }; p=\"$(find_policy \"$PWD\" || find_policy \"${WORKSPACE:-}\" || find_policy \"${CODEX_PROJECT_DIR:-}\" || find_policy \"${CLAUDE_PROJECT_DIR:-}\")\" || exit 0; node \"$p\"'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/pii-blocklist-policy.mjs\" ] || d=\"$(cd \"$d/..\" && pwd)\"; [ -f \"$d/bin/pii-blocklist-policy.mjs\" ] || exit 0; node \"$d/bin/pii-blocklist-policy.mjs\"'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --pre'",
-            "timeout": 360
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/run-mutation-gate.mjs'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-body-write-gate.mjs'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/bin/pr-gate-cache.mjs\" ] || exit 0; node \"$d/bin/pr-gate-cache.mjs\"'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-body-check-gate.mjs'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/ci/pr-collision-precheck.mjs\" ] || exit 0; node \"$d/scripts/ci/pr-collision-precheck.mjs\" || true'",
-            "timeout": 25
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/hook-dispatch.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/hook-dispatch.mjs\" ] || exit 0; exec node \"$d/bin/hook-dispatch.mjs\" pre-bash'",
+            "timeout": 380
           }
         ]
       },
@@ -108,11 +79,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --post'"
-          },
-          {
-            "type": "command",
-            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; exec sh \"$w/bin/site-hook\" scripts/ci/pr-watch-register.mjs'"
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/hook-dispatch.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/hook-dispatch.mjs\" ] || exit 0; exec node \"$d/bin/hook-dispatch.mjs\" post-bash'",
+            "timeout": 120
           }
         ]
       }
