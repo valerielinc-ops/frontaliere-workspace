@@ -695,19 +695,35 @@ pieno ma ricicla poco a riposo: alzarlo costerebbe memoria wired su una
 macchina che gia' va in swap, quindi non e' toccato. `kern.maxproc*` e
 `kern.maxfiles` hanno margine ampio (~370 processi su 2.784 per utente).
 
-**FileVault e riavvii.** FileVault e' attivo e deve restarlo: su questo disco
-c'e' la chiave del service account con poteri da owner. Dopo un riavvio
-normale il Mac si ferma alla schermata di sblocco e Tailscale/SSH non
-rispondono finche' qualcuno non digita la password davanti allo schermo. Per
-un riavvio da remoto usa `sudo fdesetup authrestart` (sblocco una tantum); e'
-anche il modo di rendere definitivi i servizi disattivati. Per lo stesso
-motivo `apply-system` spegne l'installazione automatica di macOS.
+**FileVault e riavvii.** Con FileVault su un Mac Intel, dopo qualunque
+riavvio non pianificato (crash, batteria esaurita) il disco resta cifrato alla
+schermata di sblocco senza rete: da remoto non si sblocca. Il 2026-10-02 il
+proprietario ha scelto di spegnere FileVault e attivare il login automatico,
+accettando il rischio: chi ha accesso fisico al Mac legge il disco, compresa
+la chiave del service account con poteri da owner. Procedura (password del
+proprietario): `sudo fdesetup disable`, attesa di `FileVault is Off` in
+`fdesetup status` (decifratura in background, ore), poi
+`sudo sysadminctl -autologin set -userName <utente>` oppure Impostazioni di
+Sistema → Utenti e gruppi → Login automatico. Finche' FileVault e' attivo,
+per un riavvio da remoto si usa `sudo fdesetup authrestart`.
+`apply-system` spegne comunque l'installazione automatica di macOS, e la
+batteria fa da gruppo di continuita' (`pmset` qui non offre `autorestart`).
 `tailscaled` (`com.tailscale.tailscaled`) e `sshd` sono demoni di sistema e
 tornano senza login; i launch agent utente (coordinatore GitHub, webhook,
-`remote-awake`) partono invece solo con la sessione grafica. Dopo il riavvio
-controlla `stat -f %Su /dev/console`: se non e' l'utente, il Mac e' alla
-finestra di login ed entri con Condivisione schermo (porta 5900, gia' attiva)
-attraverso Tailscale.
+`remote-awake`, `workspace-autoupdate`) partono con la sessione grafica, che
+col login automatico si apre da sola. Dopo un riavvio controlla
+`stat -f %Su /dev/console`: se non e' l'utente, entri con Condivisione schermo
+(porta 5900, gia' attiva) attraverso Tailscale.
+
+**Aggiornamento automatico.** `bin/workspace-autoupdate install` carica il
+launch agent `ch.frontaliere.workspace-autoupdate` (ogni 15 minuti, a priorita'
+background): `fetch` di `main`, fast-forward del checkout root solo su `main` e
+solo se git non deve toccare modifiche locali, e `github-coordinator-release
+deploy` solo se sono cambiati `bin/` o `config/` rispetto alla release attiva.
+Un deploy rifiutato (coordinator occupato oltre 180 s) si ritenta al giro dopo.
+Log in `~/Library/Logs/frontaliere/workspace-autoupdate.log`; `status` mostra
+le ultime righe. Il plist si genera alla `install` con HOME e workspace della
+macchina, per questo non sta in `config/launchd/`.
 
 **Prima esecuzione di un eseguibile nuovo.** macOS (Gatekeeper/XProtect)
 analizza ogni eseguibile alla prima esecuzione. I test degli agenti creano
@@ -778,7 +794,8 @@ abbassare.
 **Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
 coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso
 senza monitor esterno il Mac dorme comunque), display spento, base rialzata.
-Batteria a 586 cicli, condizione Normal.
+Con il Mac sollevato e aperto (2026-10-02) `CPU_Speed_Limit` e' tornato a 100
+(prima 80-91). Batteria a 586 cicli, condizione Normal.
 
 ## Aggiungere un terzo repo qui dentro
 

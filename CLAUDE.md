@@ -188,7 +188,10 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   non riavvia più coordinator e receiver. Dopo il merge di una modifica agli
   script esegui `bin/github-coordinator-release deploy` (release di
   `origin/main`, symlink atomico, riavvio uno alla volta con verifica di owner
-  e ping); `status` mostra release e PID. Non avviare copie del coordinator
+  e ping); `status` mostra release e PID. Dove e' installato
+  `bin/workspace-autoupdate install` (Mac host agenti) lo fa un launch agent
+  ogni 15 minuti, insieme al fast-forward del checkout root; il log e' in
+  `~/Library/Logs/frontaliere/workspace-autoupdate.log`. Non avviare copie del coordinator
   fuori da launchd: il processo supervisionato resta in standby finché l'owner
   estraneo non esce.
 - Per una diagnosi sintetica senza auto-avvio usa
