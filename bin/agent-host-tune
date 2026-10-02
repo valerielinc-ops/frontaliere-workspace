@@ -1,0 +1,610 @@
+#!/bin/sh
+
+# Tuning del Mac usato solo come host remoto degli agenti (Claude Code e Codex
+# lanciati via Tailscale + SSH). Su un portatile vecchio (2 core fisici) tutto
+# cio' che non e' un agente, un suo comando o il coordinatore GitHub ruba CPU,
+# RAM e calore agli agenti: qui si spengono i servizi Apple inutili su un host
+# senza utente davanti e si abbassa la priorita' della manutenzione git.
+#
+#   agent-host-tune status            stato di ogni voce (sola lettura)
+#   agent-host-tune apply             voci utente, senza sudo (rieseguibile:
+#                                     ferma i servizi rilanciati su richiesta)
+#   agent-host-tune revert            ripristina le voci utente
+#   sudo agent-host-tune apply-system voci di sistema (pmset, Spotlight, ...)
+#   sudo agent-host-tune revert-system
+#
+# `--dry-run` stampa i comandi che cambierebbero lo stato senza eseguirli.
+# Ogni apply registra il valore precedente di cio' che cambia (solo la prima
+# volta: un secondo apply non sovrascrive l'originale con il valore tunato) e
+# il revert ripristina esattamente quello. I servizi gia' disattivati prima
+# dell'apply non vengono riattivati dal revert.
+#
+# Le voci utente vanno eseguite come l'utente della sessione grafica, non con
+# sudo: `launchctl disable gui/<uid>` agisce sul dominio di chi lo esegue.
+
+set -u
+
+usage() {
+  printf 'uso: %s [--dry-run] status|apply|revert|apply-system|revert-system\n' "agent-host-tune"
+}
+
+dry_run=0
+cmd=''
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry_run=1 ;;
+    -h|--help) usage; exit 0 ;;
+    status|apply|revert|apply-system|revert-system)
+      if [ -n "$cmd" ]; then usage >&2; exit 64; fi
+      cmd=$arg
+      ;;
+    *) usage >&2; exit 64 ;;
+  esac
+done
+[ -n "$cmd" ] || { usage >&2; exit 64; }
+
+launchctl_bin=${AHT_LAUNCHCTL_BIN:-/bin/launchctl}
+defaults_bin=${AHT_DEFAULTS_BIN:-/usr/bin/defaults}
+plutil_bin=${AHT_PLUTIL_BIN:-/usr/bin/plutil}
+pmset_bin=${AHT_PMSET_BIN:-/usr/bin/pmset}
+mdutil_bin=${AHT_MDUTIL_BIN:-/usr/bin/mdutil}
+pkill_bin=${AHT_PKILL_BIN:-/usr/bin/pkill}
+fdesetup_bin=${AHT_FDESETUP_BIN:-/usr/bin/fdesetup}
+sysctl_bin=${AHT_SYSCTL_BIN:-/usr/sbin/sysctl}
+kill_bin=${AHT_KILL_BIN:-/bin/kill}
+kill_grace_s=${AHT_KILL_GRACE_S:-3}
+
+uid=${AHT_UID:-$(/usr/bin/id -u)}
+home_dir=${HOME:-~}
+launch_agents_dir=${AHT_LAUNCH_AGENTS_DIR:-$home_dir/Library/LaunchAgents}
+user_state_dir=${AHT_STATE_DIR:-$home_dir/Library/Application Support/frontaliere/agent-host-tune}
+system_state_dir=${AHT_SYSTEM_STATE_DIR:-/var/db/frontaliere-agent-host-tune}
+
+# Servizi del dominio gui/<uid> che su un host senza utente davanti lavorano a
+# vuoto: analisi di Foto e media, Siri e suggerimenti, pubblicita', Screen Time,
+# app non usate (Musica, News, Meteo, Giochi, Mail, Casa, ...), App Store e
+# sincronizzazioni di Safari. Restano accesi di proposito: iCloud/CloudKit
+# (cloudd, bird, accountsd, identityservicesd: portachiavi e account), Dov'e'
+# (fmfd, findmydeviced: un portatile remoto va ritrovato), corespotlightd e
+# contactsd (chiamati dai framework di sistema), ReportCrash e la diagnostica.
+user_services='
+com.apple.photoanalysisd
+com.apple.mediaanalysisd
+com.apple.photolibraryd
+com.apple.cloudphotod
+com.apple.mediastream.mstreamd
+com.apple.Siri.agent
+com.apple.assistantd
+com.apple.assistant_service
+com.apple.siriactionsd
+com.apple.siriknowledged
+com.apple.sirittsd
+com.apple.knowledge-agent
+com.apple.knowledgeconstructiond
+com.apple.suggestd
+com.apple.parsecd
+com.apple.parsec-fbf
+com.apple.spotlightknowledged
+com.apple.intelligenceplatformd
+com.apple.Spotlight
+com.apple.routined
+com.apple.triald
+com.apple.ap.adprivacyd
+com.apple.ap.promotedcontentd
+com.apple.ScreenTimeAgent
+com.apple.UsageTrackingAgent
+com.apple.familycircled
+com.apple.AMPArtworkAgent
+com.apple.AMPDeviceDiscoveryAgent
+com.apple.AMPDevicesAgent
+com.apple.AMPLibraryAgent
+com.apple.AMPSystemPlayerAgent
+com.apple.amp.mediasharingd
+com.apple.itunescloudd
+com.apple.newsd
+com.apple.weatherd
+com.apple.tipsd
+com.apple.helpd
+com.apple.gamed
+com.apple.GameController.gamecontrolleragentd
+com.apple.voicememod
+com.apple.financed
+com.apple.homed
+com.apple.remindd
+com.apple.email.maild
+com.apple.translationd
+com.apple.Maps.mapspushd
+com.apple.maps.destinationd
+com.apple.CallHistoryPluginHelper
+com.apple.CallHistorySyncHelper
+com.apple.AirPlayUIAgent
+com.apple.commerce
+com.apple.appstoreagent
+com.apple.storeuid
+com.apple.Safari.History
+com.apple.Safari.PasswordBreachAgent
+com.apple.Safari.SafeBrowsing.Service
+com.apple.SafariBookmarksSyncAgent
+com.apple.SafariHistoryServiceAgent
+com.apple.SafariLaunchAgent
+com.apple.SafariNotificationAgent
+'
+
+# Preferenze: host|dominio|chiave|tipo|valore. host `cur` = -currentHost.
+# App Nap spento: nessun processo figlio di un'app nascosta viene rallentato.
+# Movimento e trasparenza ridotti: WindowServer lavora meno quando lo schermo
+# e' acceso. Siri, Handoff, ricevitore AirPlay e suggerimenti di ricerca: radio
+# e richieste di rete che a un host remoto non servono.
+user_defaults='
+-|-g|NSAppSleepDisabled|bool|true
+-|com.apple.assistant.support|Assistant Enabled|bool|false
+-|com.apple.Siri|StatusMenuVisible|bool|false
+-|com.apple.Siri|UserHasDeclinedEnable|bool|true
+cur|com.apple.coreservices.useractivityd|ActivityAdvertisingAllowed|bool|false
+cur|com.apple.coreservices.useractivityd|ActivityReceivingAllowed|bool|false
+cur|com.apple.controlcenter|AirplayRecieverEnabled|bool|false
+-|com.apple.universalaccess|reduceMotion|bool|true
+-|com.apple.universalaccess|reduceTransparency|bool|true
+-|com.apple.lookup.shared|LookupSuggestionsDisabled|bool|true
+'
+
+# Niente download/installazione automatica di aggiornamenti macOS: con
+# FileVault attivo un riavvio non presidiato lascia l'host irraggiungibile alla
+# schermata di sblocco. Restano attivi ConfigData e Critical (XProtect, MRT).
+# Bluetooth spento: su un host remoto non c'e' nulla da accoppiare.
+system_defaults='
+-|/Library/Preferences/com.apple.SoftwareUpdate|AutomaticDownload|bool|false
+-|/Library/Preferences/com.apple.SoftwareUpdate|AutomaticallyInstallMacOSUpdates|bool|false
+-|/Library/Preferences/com.apple.commerce|AutoUpdate|bool|false
+-|/Library/Preferences/com.apple.Bluetooth|ControllerPowerState|int|0
+'
+
+# pmset: alimentatore (-c) sempre sveglio, disco mai in sleep, display spento
+# dopo 1 minuto (meno calore sul case, meno lavoro per WindowServer), Power Nap
+# spento (niente manutenzione Apple in background); proximitywake (-a) spento.
+# L'ibernazione resta com'e': protegge lo stato se manca la corrente.
+pmset_ac_settings='sleep=0 disksleep=0 displaysleep=1 powernap=0 lowpowermode=0 womp=1 tcpkeepalive=1 ttyskeepawake=1'
+pmset_all_settings='proximitywake=0'
+
+git_maintenance_labels='org.git-scm.git.hourly org.git-scm.git.daily org.git-scm.git.weekly'
+
+say() {
+  printf '%s\n' "$*"
+}
+
+run() {
+  if [ "$dry_run" = 1 ]; then
+    printf '+ %s\n' "$*"
+    return 0
+  fi
+  "$@"
+}
+
+require_user() {
+  if [ "$uid" = 0 ] && [ "$dry_run" = 0 ]; then
+    say "agent-host-tune: '$cmd' agisce sul dominio gui dell'utente: eseguilo senza sudo" >&2
+    exit 77
+  fi
+}
+
+require_root() {
+  if [ "$uid" != 0 ] && [ "$dry_run" = 0 ]; then
+    say "agent-host-tune: '$cmd' modifica impostazioni di sistema: eseguilo con sudo" >&2
+    exit 77
+  fi
+}
+
+ensure_state_dir() {
+  [ "$dry_run" = 1 ] && return 0
+  /bin/mkdir -p "$1" || exit 73
+}
+
+# --- preferenze -------------------------------------------------------------
+
+defaults_read() { # host dominio chiave
+  if [ "$1" = cur ]; then
+    "$defaults_bin" -currentHost read "$2" "$3" 2>/dev/null
+  else
+    "$defaults_bin" read "$2" "$3" 2>/dev/null
+  fi
+}
+
+defaults_mutate() { # host azione dominio chiave [tipo valore]
+  host=$1
+  shift
+  if [ "$host" = cur ]; then
+    run "$defaults_bin" -currentHost "$@"
+  else
+    run "$defaults_bin" "$@"
+  fi
+}
+
+normalize() { # tipo valore -> forma stampata da `defaults read`
+  case "$1:$2" in
+    bool:true|bool:TRUE|bool:YES|bool:yes|bool:1) printf '1' ;;
+    bool:false|bool:FALSE|bool:NO|bool:no|bool:0) printf '0' ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
+apply_defaults() { # tabella file-di-stato
+  table=$1
+  state_file=$2
+  printf '%s\n' "$table" | while IFS='|' read -r host domain key type value; do
+    [ -n "$host" ] || continue
+    current=$(defaults_read "$host" "$domain" "$key") || current='__absent__'
+    if [ "$dry_run" = 0 ] && ! /usr/bin/grep -Fq -e "$host|$domain|$key|" "$state_file" 2>/dev/null; then
+      printf '%s|%s|%s|%s|%s\n' "$host" "$domain" "$key" "$type" "$current" >>"$state_file"
+    fi
+    if [ "$current" = "$(normalize "$type" "$value")" ]; then
+      continue
+    fi
+    if defaults_mutate "$host" write "$domain" "$key" "-$type" "$value"; then
+      say "  $domain $key -> $value"
+    else
+      say "  ATTENZIONE: non riesco a scrivere $domain $key" >&2
+    fi
+  done
+}
+
+revert_defaults() { # file-di-stato
+  state_file=$1
+  [ -f "$state_file" ] || return 0
+  while IFS='|' read -r host domain key type prev; do
+    [ -n "$host" ] || continue
+    if [ "$prev" = '__absent__' ]; then
+      defaults_mutate "$host" delete "$domain" "$key" 2>/dev/null || true
+      say "  $domain $key -> (rimossa)"
+    else
+      case "$type:$prev" in
+        bool:1) prev=true ;;
+        bool:0) prev=false ;;
+      esac
+      defaults_mutate "$host" write "$domain" "$key" "-$type" "$prev" || true
+      say "  $domain $key -> $prev"
+    fi
+  done <"$state_file"
+  run /bin/rm -f "$state_file"
+}
+
+count_defaults() { # tabella -> "applicate/totali"
+  printf '%s\n' "$1" | {
+    ok=0
+    total=0
+    while IFS='|' read -r host domain key type value; do
+      [ -n "$host" ] || continue
+      total=$((total + 1))
+      current=$(defaults_read "$host" "$domain" "$key") || current='__absent__'
+      [ "$current" = "$(normalize "$type" "$value")" ] && ok=$((ok + 1))
+    done
+    printf '%s/%s' "$ok" "$total"
+  }
+}
+
+# --- servizi launchd utente -------------------------------------------------
+
+disabled_services() {
+  "$launchctl_bin" print-disabled "gui/$uid" 2>/dev/null |
+    /usr/bin/sed -n -E 's/^[[:space:]]*"([^"]*)" => (disabled|true)$/\1/p'
+}
+
+# Confronto dentro la shell, senza un grep per ognuna delle 60 etichette: su
+# un host saturo ogni fork in piu' si sente.
+is_disabled() { # etichetta lista
+  case "
+$2
+" in
+    *"
+$1
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+service_pid() { # etichetta -> PID secondo launchd, vuoto se non gira
+  "$launchctl_bin" print "gui/$uid/$1" 2>/dev/null | /usr/bin/awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+}
+
+# SIP rifiuta il bootout dei servizi Apple (errore 150): il disable vale dal
+# prossimo login e intanto si fermano i processi gia' avviati. Il PID arriva da
+# launchd per quell'etichetta del dominio gui/<uid>, quindi solo processi
+# dell'utente e solo servizi in lista. Alcuni ignorano SIGTERM: il SIGKILL va
+# solo a chi launchd riporta ancora con lo stesso PID dopo l'attesa.
+stop_services() { # "etichetta=pid ..."
+  list=$1
+  [ -n "$list" ] || return 0
+  pids=''
+  for pair in $list; do
+    pids="$pids ${pair#*=}"
+  done
+  # shellcheck disable=SC2086 # un argomento per PID
+  run "$kill_bin" -TERM $pids 2>/dev/null || true
+  [ "$dry_run" = 1 ] || /bin/sleep "$kill_grace_s"
+  survivors=''
+  for pair in $list; do
+    [ "$(service_pid "${pair%%=*}")" = "${pair#*=}" ] && survivors="$survivors ${pair#*=}"
+  done
+  if [ -n "$survivors" ]; then
+    # shellcheck disable=SC2086 # un argomento per PID
+    run "$kill_bin" -KILL $survivors 2>/dev/null || true
+  fi
+  # shellcheck disable=SC2086 # conta i PID
+  set -- $pids
+  say "  processi fermati: $#"
+}
+
+apply_services() {
+  state_file="$user_state_dir/services.changed"
+  already=$(disabled_services)
+  changed=0
+  running=''
+  for label in $user_services; do
+    if ! is_disabled "$label" "$already"; then
+      run "$launchctl_bin" disable "gui/$uid/$label" || continue
+      if [ "$dry_run" = 0 ] && ! /usr/bin/grep -Fqx -e "$label" "$state_file" 2>/dev/null; then
+        printf '%s\n' "$label" >>"$state_file"
+      fi
+      changed=$((changed + 1))
+    fi
+    pid=$(service_pid "$label")
+    [ -n "$pid" ] && running="$running $label=$pid"
+  done
+  say "  servizi disattivati ora: $changed"
+  stop_services "$running"
+}
+
+revert_services() {
+  state_file="$user_state_dir/services.changed"
+  [ -f "$state_file" ] || return 0
+  while IFS= read -r label; do
+    [ -n "$label" ] || continue
+    run "$launchctl_bin" enable "gui/$uid/$label" || true
+    plist="/System/Library/LaunchAgents/$label.plist"
+    if [ -f "$plist" ]; then
+      run "$launchctl_bin" bootstrap "gui/$uid" "$plist" 2>/dev/null || true
+    fi
+    say "  riattivato $label"
+  done <"$state_file"
+  run /bin/rm -f "$state_file"
+}
+
+count_services() {
+  already=$(disabled_services)
+  ok=0
+  total=0
+  for label in $user_services; do
+    total=$((total + 1))
+    is_disabled "$label" "$already" && ok=$((ok + 1))
+  done
+  printf '%s/%s' "$ok" "$total"
+}
+
+# --- manutenzione git -------------------------------------------------------
+
+# I plist di `git maintenance start` non chiedono priorita' bassa: prefetch e
+# commit-graph dei quattro repo competono alla pari con gli agenti. Con
+# ProcessType=Background launchd applica QoS background (CPU e I/O frenati).
+reload_agent() { # etichetta plist
+  if "$launchctl_bin" print "gui/$uid/$1" 2>/dev/null | /usr/bin/grep -q 'state = running'; then
+    say "  $1 e' in esecuzione: il plist nuovo vale dal prossimo caricamento"
+    return 0
+  fi
+  run "$launchctl_bin" bootout "gui/$uid/$1" 2>/dev/null || true
+  attempt=0
+  until run "$launchctl_bin" bootstrap "gui/$uid" "$2" 2>/dev/null; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 5 ]; then
+      say "  ATTENZIONE: bootstrap di $1 fallito; vale dal prossimo login" >&2
+      return 0
+    fi
+    /bin/sleep 1
+  done
+}
+
+maintenance_is_background() { # plist
+  [ "$("$plutil_bin" -extract ProcessType raw "$1" 2>/dev/null)" = Background ]
+}
+
+apply_git_maintenance() {
+  for label in $git_maintenance_labels; do
+    plist="$launch_agents_dir/$label.plist"
+    [ -f "$plist" ] || continue
+    maintenance_is_background "$plist" && continue
+    run "$plutil_bin" -replace ProcessType -string Background "$plist" || continue
+    run "$plutil_bin" -replace LowPriorityIO -bool YES "$plist" || continue
+    run "$plutil_bin" -replace Nice -integer 10 "$plist" || continue
+    say "  $label -> Background, LowPriorityIO, Nice 10"
+    reload_agent "$label" "$plist"
+  done
+}
+
+revert_git_maintenance() {
+  for label in $git_maintenance_labels; do
+    plist="$launch_agents_dir/$label.plist"
+    [ -f "$plist" ] || continue
+    maintenance_is_background "$plist" || continue
+    run "$plutil_bin" -remove ProcessType "$plist" || true
+    run "$plutil_bin" -remove LowPriorityIO "$plist" || true
+    run "$plutil_bin" -remove Nice "$plist" || true
+    say "  $label -> priorita' normale"
+    reload_agent "$label" "$plist"
+  done
+}
+
+count_git_maintenance() {
+  ok=0
+  total=0
+  for label in $git_maintenance_labels; do
+    plist="$launch_agents_dir/$label.plist"
+    [ -f "$plist" ] || continue
+    total=$((total + 1))
+    maintenance_is_background "$plist" && ok=$((ok + 1))
+  done
+  printf '%s/%s' "$ok" "$total"
+}
+
+# --- pmset ------------------------------------------------------------------
+
+# Si legge sempre il profilo dell'alimentatore, anche se in quel momento il
+# Mac va a batteria: e' quello che `pmset -c` cambia e che il revert ripristina.
+pmset_current() { # chiave -> valore nel profilo AC
+  "$pmset_bin" -g custom 2>/dev/null |
+    /usr/bin/awk -v k="$1" '/^AC Power:/ { s = 1; next } /^[^ ].*:$/ { s = 0 } s && $1 == k { print $2; exit }'
+}
+
+apply_pmset_group() { # flag impostazioni file-di-stato
+  flag=$1
+  settings=$2
+  state_file=$3
+  set --
+  for pair in $settings; do
+    key=${pair%%=*}
+    value=${pair#*=}
+    current=$(pmset_current "$key")
+    if [ "$dry_run" = 0 ] && [ -n "$current" ] && ! /usr/bin/grep -q -e "^$flag $key " "$state_file" 2>/dev/null; then
+      printf '%s %s %s\n' "$flag" "$key" "$current" >>"$state_file"
+    fi
+    [ "$current" = "$value" ] && continue
+    set -- "$@" "$key" "$value"
+  done
+  [ "$#" -gt 0 ] || return 0
+  if run "$pmset_bin" "$flag" "$@"; then
+    say "  pmset $flag $*"
+  else
+    say "  ATTENZIONE: pmset $flag $* fallito" >&2
+  fi
+}
+
+revert_pmset() {
+  state_file="$system_state_dir/pmset.prev"
+  [ -f "$state_file" ] || return 0
+  while read -r flag key prev; do
+    [ -n "$flag" ] || continue
+    run "$pmset_bin" "$flag" "$key" "$prev" || true
+    say "  pmset $flag $key $prev"
+  done <"$state_file"
+  run /bin/rm -f "$state_file"
+}
+
+count_pmset() {
+  ok=0
+  total=0
+  for pair in $pmset_ac_settings $pmset_all_settings; do
+    total=$((total + 1))
+    [ "$(pmset_current "${pair%%=*}")" = "${pair#*=}" ] && ok=$((ok + 1))
+  done
+  printf '%s/%s' "$ok" "$total"
+}
+
+# --- Spotlight --------------------------------------------------------------
+
+# Ogni worktree del sito porta migliaia di file nuovi: mds/mdworker li indicizza
+# tutti, in concorrenza con gli agenti. Nessun agente usa mdfind.
+spotlight_enabled() {
+  "$mdutil_bin" -s /System/Volumes/Data 2>/dev/null | /usr/bin/grep -q 'Indexing enabled'
+}
+
+apply_spotlight() {
+  state_file="$system_state_dir/spotlight.prev"
+  if spotlight_enabled; then
+    [ "$dry_run" = 1 ] || [ -f "$state_file" ] || printf 'enabled\n' >"$state_file"
+    run "$mdutil_bin" -a -i off >/dev/null && say "  Spotlight: indicizzazione spenta"
+  fi
+}
+
+revert_spotlight() {
+  state_file="$system_state_dir/spotlight.prev"
+  [ -f "$state_file" ] || return 0
+  run "$mdutil_bin" -a -i on >/dev/null && say "  Spotlight: indicizzazione riaccesa"
+  run /bin/rm -f "$state_file"
+}
+
+restart_bluetooth() {
+  run "$pkill_bin" -x bluetoothd 2>/dev/null || true
+}
+
+# --- comandi ----------------------------------------------------------------
+
+state_word() { # "n/m"
+  if [ "${1%%/*}" = "${1#*/}" ]; then printf 'ok'; else printf 'da applicare'; fi
+}
+
+cmd_status() {
+  services=$(count_services)
+  udefaults=$(count_defaults "$user_defaults")
+  maint=$(count_git_maintenance)
+  pm=$(count_pmset)
+  sdefaults=$(count_defaults "$system_defaults")
+  if spotlight_enabled; then spot='da applicare'; else spot='ok'; fi
+  say "Voci utente (agent-host-tune apply):"
+  say "  servizi Apple disattivati     $services  $(state_word "$services")"
+  say "  preferenze                    $udefaults  $(state_word "$udefaults")"
+  say "  git maintenance in background $maint  $(state_word "$maint")"
+  say "Voci di sistema (sudo agent-host-tune apply-system):"
+  say "  pmset                         $pm  $(state_word "$pm")"
+  say "  aggiornamenti e Bluetooth     $sdefaults  $(state_word "$sdefaults")"
+  say "  Spotlight spento              $spot"
+  say "Informazioni (non modificate da questo comando):"
+  say "  $("$fdesetup_bin" status 2>/dev/null | /usr/bin/head -1)"
+  speed=$("$pmset_bin" -g therm 2>/dev/null | /usr/bin/awk '/CPU_Speed_Limit/ { print $3 }')
+  say "  limite termico CPU: ${speed:-?}%  carico: $("$sysctl_bin" -n vm.loadavg 2>/dev/null)"
+  say "  swap: $("$sysctl_bin" -n vm.swapusage 2>/dev/null)"
+}
+
+cmd_apply() {
+  require_user
+  ensure_state_dir "$user_state_dir"
+  say "Servizi utente:"
+  apply_services
+  say "Preferenze:"
+  apply_defaults "$user_defaults" "$user_state_dir/defaults.prev"
+  say "Manutenzione git:"
+  apply_git_maintenance
+  run "$pmset_bin" displaysleepnow >/dev/null 2>&1 || true
+  say "Fatto. Le voci di sistema richiedono: sudo $0 apply-system"
+}
+
+cmd_revert() {
+  require_user
+  say "Servizi utente:"
+  revert_services
+  say "Preferenze:"
+  revert_defaults "$user_state_dir/defaults.prev"
+  say "Manutenzione git:"
+  revert_git_maintenance
+  say "Fatto. Alcuni servizi ripartono solo al prossimo login."
+}
+
+cmd_apply_system() {
+  require_root
+  ensure_state_dir "$system_state_dir"
+  say "pmset:"
+  apply_pmset_group -c "$pmset_ac_settings" "$system_state_dir/pmset.prev"
+  apply_pmset_group -a "$pmset_all_settings" "$system_state_dir/pmset.prev"
+  say "Spotlight:"
+  apply_spotlight
+  say "Aggiornamenti e Bluetooth:"
+  apply_defaults "$system_defaults" "$system_state_dir/defaults.prev"
+  restart_bluetooth
+  say "Fatto."
+}
+
+cmd_revert_system() {
+  require_root
+  say "pmset:"
+  revert_pmset
+  say "Spotlight:"
+  revert_spotlight
+  say "Aggiornamenti e Bluetooth:"
+  revert_defaults "$system_state_dir/defaults.prev"
+  restart_bluetooth
+  say "Fatto."
+}
+
+case "$cmd" in
+  status) cmd_status ;;
+  apply) cmd_apply ;;
+  revert) cmd_revert ;;
+  apply-system) cmd_apply_system ;;
+  revert-system) cmd_revert_system ;;
+esac
