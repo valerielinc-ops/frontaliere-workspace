@@ -53,7 +53,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; ( cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply >/dev/null 2>&1; node scripts/sync-main-checkout.mjs >/dev/null 2>&1 & ) || true'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; d=\"$w/frontaliere-si-o-no\"; [ -d \"$d\" ] || exit 0; ( cd \"$d\" && { sh \"$w/bin/site-hook\" scripts/prune-merged-worktrees.mjs --apply; node scripts/sync-main-checkout.mjs; } & ) </dev/null >/dev/null 2>&1 || true'"
           }
         ]
       }
@@ -68,7 +68,7 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"$CLAUDE_PROJECT_DIR\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$d/frontaliere-si-o-no\"; [ -f \"$d/scripts/prune-merged-worktrees.mjs\" ] || d=\"$WORKSPACE/frontaliere-si-o-no\"; cd \"$d\" && node scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'"
+            "command": "sh -c 'w=\"${WORKSPACE:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; [ -f \"$w/bin/site-hook\" ] || w=\"$w/..\"; [ -f \"$w/bin/site-hook\" ] || exit 0; cd \"$w/frontaliere-si-o-no\" && sh \"$w/bin/site-hook\" scripts/prune-merged-worktrees.mjs --apply --orphans-only 2>/dev/null || true'"
           }
         ]
       }
