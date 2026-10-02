@@ -205,6 +205,13 @@ Sono di **due account diversi**, e questo cambia i comandi. `gh` e' autenticato 
 |---|---|---|---|---|
 | `frontaliere-si-o-no` | `valerielinc-ops` | si' | **si'** | **mai a mano** — `tests` verde → `pr-review-loop` → auto-merge su `## LGTM` |
 | `frontaliere-articles` | `nanakokyobashi-rgb` | si' | **no** | **come il sito**: `tests` verde → review → auto-merge su `## LGTM` |
+| `frontaliere-workspace` (root) | `valerielinc-ops` | si' | **si'** | nessuna review: `gh pr merge <N> --auto --squash`, GitHub mergia quando `sanity` (`PR sanity`) e' verde |
+
+Il check `sanity` del repo root e' obbligatorio dal 2026-10-02 per il ruleset
+`main: check sanity obbligatorio (auto-merge)` (id 24351027) su `main`, con
+bypass `always` per il ruolo admin: senza check obbligatori `--auto` mergiava
+subito, senza aspettare la CI. Il bypass tiene possibili i push diretti degli
+owner, ma un merge di PR da parte degli agenti passa sempre da `--auto`.
 
 **`gh` va sempre puntato esplicitamente sul corpus.** Da un worktree di
 `frontaliere-articles`, `gh` inferisce il repo dal remote e di solito funziona, ma
