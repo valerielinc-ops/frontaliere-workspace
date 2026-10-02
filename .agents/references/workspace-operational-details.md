@@ -680,6 +680,30 @@ controlla `stat -f %Su /dev/console`: se non e' l'utente, il Mac e' alla
 finestra di login ed entri con Condivisione schermo (porta 5900, gia' attiva)
 attraverso Tailscale.
 
+**Prima esecuzione di un eseguibile nuovo.** macOS (Gatekeeper/XProtect)
+analizza ogni eseguibile alla prima esecuzione. I test degli agenti creano
+continuamente binari finti in cartelle temporanee (es. un `gh` finto sotto
+`/var/folders/.../T/`), e ognuno e' un file mai visto: il 2026-10-02, dopo
+`apply-system`, `XprotectService` restava al 50-98% di un thread (~29 s di CPU
+al minuto) e la prima esecuzione di uno script appena creato costava in
+mediana **3,3 s** (max 6,3 s) contro 11,5 ms della seconda. E' il costo
+nascosto piu' grosso della macchina: rallenta ogni suite che genera stub.
+
+Il rimedio e' l'esenzione Strumenti per sviluppatori, concedibile solo dalla
+GUI (Condivisione schermo via Tailscale): Impostazioni di Sistema → Privacy e
+sicurezza → Strumenti per sviluppatori (il pannello compare dopo `spctl
+developer-mode enable-terminal`, gia' eseguito), `+`, Cmd+Shift+G,
+`/usr/libexec/sshd-keygen-wrapper` (il processo responsabile delle sessioni
+SSH, lo stesso dell'Accesso completo al disco per SSH), attivarlo. Compromesso:
+cio' che le sessioni SSH eseguono non passa piu' dal controllo
+Gatekeeper/XProtect alla prima esecuzione. Verifica, da una sessione SSH
+nuova: il primo `time` deve scendere verso il secondo.
+
+```bash
+d=$(mktemp -d); for i in 1 2 3 4 5; do printf '#!/bin/sh\n' >"$d/s$i"; chmod +x "$d/s$i"; done
+time (for i in 1 2 3 4 5; do "$d/s$i"; done); time (for i in 1 2 3 4 5; do "$d/s$i"; done)
+```
+
 **Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
 coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso
 senza monitor esterno il Mac dorme comunque), display spento, base rialzata.
