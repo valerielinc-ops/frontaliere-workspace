@@ -9,12 +9,10 @@ hooks = true
 multi_agent = true
 
 [agents]
-# Tetto misurato per questo host, non per il coordinatore GitHub: la sua
-# concorrenza (8 letture) non e' il vincolo. Il runtime Codex e' condiviso fra
-# le sessioni e regge ~5 job in tutto; con 16 GB lo swap supera gia' l'80%
-# durante una flotta, e i comandi pesanti restano serializzati dal lease di
-# bin/agent-resource-guard.mjs, quindi thread in piu' aspettano senza rendere.
-max_concurrent_threads_per_session = 4
+# Fan-out richiesto dal proprietario: 15 thread per sessione. Il coordinatore
+# GitHub ha una concorrenza separata; i comandi pesanti restano serializzati
+# dal lease di bin/agent-resource-guard.mjs.
+max_concurrent_threads_per_session = 15
 
 [shell_environment_policy]
 inherit = "core"
@@ -32,3 +30,7 @@ FAST_BUILD = "1"
 NODE_OPTIONS = "--max-old-space-size=12288"
 GOOGLE_APPLICATION_CREDENTIALS = "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json"
 FRONTALIERE_GH_COORDINATOR = "1"
+
+[analytics]
+# Evita warning locali quando il daemon condiviso lavora con molto fan-out.
+enabled = false
