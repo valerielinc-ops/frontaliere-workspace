@@ -1,20 +1,122 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  LEASE_START_GRACE_MS,
   acquireHeavyLease,
   classifyCommand,
   cleanupRuntime,
   guardPost,
   guardPre,
   invocationId,
+  leaseStaleReason,
   parsePayload,
   pressureDecision,
+  queueHead,
   redactCommand,
   runtimeDirectory,
+  waitForHeavyLease,
 } from './agent-resource-guard.mjs';
+
+const DEAD_PID = 2 ** 22 + 12345;
+
+function withRuntime(fn) {
+  const runtime = mkdtempSync(path.join(os.tmpdir(), 'frontaliere-guard-test-'));
+  try {
+    return fn(runtime);
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
+}
+
+function oldLease(extra = {}) {
+  const startedAt = Date.now() - LEASE_START_GRACE_MS - 1000;
+  return { id: 'held', sessionId: 'other', category: 'build-or-test', startedAt, expiresAt: Date.now() + 3_600_000, ...extra };
+}
+
+function writeObserverStatus(runtime, id, seen) {
+  mkdirSync(path.join(runtime, 'observer-status'), { recursive: true });
+  writeFileSync(path.join(runtime, 'observer-status', `${id}.json`), JSON.stringify({ id, seen, endedAt: Date.now() }));
+}
+
+function writeTicket(runtime, enqueuedAt, pid, id) {
+  mkdirSync(path.join(runtime, 'queue'), { recursive: true });
+  const name = `${String(enqueuedAt).padStart(15, '0')}-${pid}-${id}.json`;
+  writeFileSync(path.join(runtime, 'queue', name), JSON.stringify({ id, pid, enqueuedAt }));
+  return name;
+}
+
+test('un lease e\' libero solo quando il comando e\' davvero finito o il TTL scade', () => withRuntime((runtime) => {
+  const alive = { observerAlive: () => true };
+  const dead = { observerAlive: () => false };
+  assert.equal(leaseStaleReason({ ...oldLease({ observerPid: 42 }), startedAt: Date.now() }, runtime, dead), undefined, 'nei primi secondi l\'observer puo\' mancare');
+  assert.equal(leaseStaleReason(oldLease({ expiresAt: Date.now() - 1 }), runtime, alive), 'scaduto');
+  assert.equal(leaseStaleReason(oldLease({ observerPid: 42 }), runtime, alive), undefined);
+  assert.equal(leaseStaleReason(oldLease({ observerPid: 42 }), runtime, dead), undefined, 'observer morto senza prova di fine');
+  writeObserverStatus(runtime, 'held', true);
+  assert.equal(leaseStaleReason(oldLease({ observerPid: 42 }), runtime, dead), 'comando terminato');
+  const unobserved = oldLease({ id: 'quiet', startedAt: Date.now() - 16 * 60 * 1000 });
+  assert.match(leaseStaleReason(unobserved, runtime, dead), /nessun processo osservato/);
+}));
+
+test('il lease di un comando finito senza PostToolUse non blocca il successivo', () => withRuntime((runtime) => {
+  assert.equal(acquireHeavyLease(runtime, oldLease({ observerPid: 42 })).acquired, true);
+  writeObserverStatus(runtime, 'held', true);
+  const next = acquireHeavyLease(runtime, { id: 'next', startedAt: Date.now(), expiresAt: Date.now() + 60_000 }, { observerAlive: () => false });
+  assert.equal(next.acquired, true);
+}));
+
+test('la coda e\' FIFO e scarta i biglietti degli hook morti', () => withRuntime((runtime) => {
+  const now = Date.now();
+  writeTicket(runtime, now - 3000, DEAD_PID, 'morto');
+  const alive = writeTicket(runtime, now - 2000, process.pid, 'vivo');
+  writeTicket(runtime, now - 1000, process.pid, 'dopo');
+  assert.equal(queueHead(runtime), alive);
+  assert.equal(readdirSync(path.join(runtime, 'queue')).length, 2, 'il biglietto morto e\' stato tolto');
+}));
+
+test('in coda si aspetta il proprio turno e si prende il lease appena libero', () => withRuntime((runtime) => {
+  const lease = () => ({ id: 'mine', startedAt: Date.now(), expiresAt: Date.now() + 60_000 });
+  const first = waitForHeavyLease(runtime, { id: 'mine' }, lease, { maxWaitMs: 1000, pollMs: 10 });
+  assert.equal(first.acquired, true);
+  assert.equal(readdirSync(path.join(runtime, 'queue')).length, 0, 'il biglietto viene tolto');
+
+  // Un biglietto piu' vecchio e vivo ha la precedenza anche a lease libero.
+  rmSync(path.join(runtime, 'heavy-lease.json'));
+  const ahead = writeTicket(runtime, Date.now() - 5000, process.pid, 'prima');
+  const blocked = waitForHeavyLease(runtime, { id: 'mine' }, lease, { maxWaitMs: 60, pollMs: 10 });
+  assert.equal(blocked.acquired, false);
+  assert.ok(blocked.waitedMs >= 60);
+  rmSync(path.join(runtime, 'queue', ahead));
+  assert.equal(waitForHeavyLease(runtime, { id: 'mine' }, lease, { maxWaitMs: 60, pollMs: 10 }).acquired, true);
+}));
+
+test('guardPre ammette un comando pesante dopo un lease orfano e respinge in coda solo a tempo scaduto', () => withRuntime((runtime) => {
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    FRONTALIERE_AGENT_RUNTIME_DIR: runtime,
+    FRONTALIERE_RESOURCE_FREE_PERCENT: '0',
+    FRONTALIERE_RESOURCE_SWAP_RATIO: '2',
+    FRONTALIERE_AGENT_OBSERVER_MAX_MS: '1',
+  });
+  try {
+    const info = { payload: {}, command: 'git grep -n Rewarded -- scripts/ci/check-sibling-patterns.mjs', cwd: process.cwd(), sessionId: 'mine', toolCallId: '' };
+    assert.equal(acquireHeavyLease(runtime, oldLease({ observerPid: 42 })).acquired, true);
+    const held = guardPre(info, process.cwd(), { maxWaitMs: 50, pollMs: 10, observerAlive: () => true });
+    assert.equal(held.allowed, false);
+    assert.match(held.reason, /in coda da \d+s senza turno/);
+
+    writeObserverStatus(runtime, 'held', true);
+    const after = guardPre(info, process.cwd(), { maxWaitMs: 50, pollMs: 10, observerAlive: () => false });
+    assert.equal(after.allowed, true);
+    assert.equal(JSON.parse(readFileSync(path.join(runtime, 'heavy-lease.json'), 'utf8')).id, after.id);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+}));
 
 test('classifica la ricerca Git senza limite come job pesante non delimitato', () => {
   const result = classifyCommand("git log --all -S'Rewarded service VAST' --oneline");
