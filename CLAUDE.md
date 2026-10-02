@@ -22,9 +22,11 @@ solo la sezione pertinente quando una regola qui sotto non basta.
 | `frontaliere-articles/` | `nanakokyobashi-rgb/frontaliere-articles` | Mirror pubblicatore del corpus e dell'API dati. |
 | `frontaliere-reddit-devvit/` | `nanakokyobashi-rgb/frontaliere-reddit-devvit` | App Devvit indipendente per pubblicare i nuovi articoli su Reddit. |
 
-Il clone del sito su questa macchina e' completo, non shallow. Non applicare le
-vecchie ricette `--no-thin --force` o altri workaround da clone shallow senza
-prima verificare `git rev-parse --is-shallow-repository`.
+Il clone del sito sul laptop principale e' completo, non shallow; sul Mac host
+agenti (MacBook Pro 2017) e' parziale `blob:none`, con prefetch orario spento
+(vedi `Host agenti remoto` nel riferimento). Non applicare le vecchie ricette
+`--no-thin --force` o altri workaround da clone shallow senza prima verificare
+`git rev-parse --is-shallow-repository` e `git config remote.origin.partialclonefilter`.
 
 ## Confine sito-corpus
 
