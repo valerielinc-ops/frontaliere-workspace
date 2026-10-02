@@ -310,7 +310,7 @@ come archivio. La procedura completa e il caso storico sono nella sezione
 ## Hook della root
 
 Gli hook devono restare attivi dalla root in `.claude/settings.json` e in
-`.codex/hooks.json`; puntano agli script del sito per gate PR, pulizia worktree,
+`.codex/hooks.json`; puntano agli script del sito per gate PR, pulizia worktree (sito, poi corpus),
 registrazione e attesa delle PR. Un blocco del gate e' feedback da correggere,
 non un errore da aggirare.
 

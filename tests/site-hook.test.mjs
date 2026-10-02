@@ -114,47 +114,60 @@ for (const config of ['.claude/settings.json', '.codex/hooks.json']) {
     }
   });
 
-  test(`${config}: SessionStart prunes in background from hooks-main, SessionEnd only orphans`, async () => {
-    const commands = hookCommands(config).filter((c) => c.command.includes('prune-merged-worktrees.mjs'));
-    const start = commands.find((c) => c.event === 'SessionStart');
-    const end = commands.find((c) => c.event === 'SessionEnd');
-    assert.ok(start && end, `prune assente da SessionStart/SessionEnd in ${config}`);
+  // Lo sweep gira nel sito e poi nel corpus (2026-10-02: nel corpus non c'era
+  // nessuno sweep e si erano accumulati 45 worktree, 10,7 GiB). In sequenza,
+  // non in parallelo, per non raddoppiare il carico; SessionStart non aspetta.
+  for (const withCorpus of [true, false]) {
+    test(`${config}: SessionStart prunes ${withCorpus ? 'site then corpus' : 'only the site without a corpus'} in background, SessionEnd only orphans`, async () => {
+      const commands = hookCommands(config).filter((c) => c.command.includes('prune-merged-worktrees.mjs'));
+      const start = commands.find((c) => c.event === 'SessionStart');
+      const end = commands.find((c) => c.event === 'SessionEnd');
+      assert.ok(start && end, `prune assente da SessionStart/SessionEnd in ${config}`);
 
-    const ws = realpathSync(mkdtempSync(join(tmpdir(), 'prune-hook-')));
-    try {
-      const site = join(ws, 'frontaliere-si-o-no');
-      const hooks = join(ws, 'hooks-main');
-      mkdirSync(join(ws, 'bin'));
-      copyFileSync(SITE_HOOK, join(ws, 'bin', 'site-hook'));
-      writeFileSync(join(ws, 'bin', 'site-hooks-refresh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-      for (const base of [site, hooks]) mkdirSync(join(base, 'scripts'), { recursive: true });
-      const log = join(ws, 'calls.log');
-      // Lo sweep finto dura piu' di quanto l'hook debba bloccare la sessione.
-      const probe = (tag, delayMs) => `import { appendFileSync } from 'node:fs';
+      const ws = realpathSync(mkdtempSync(join(tmpdir(), 'prune-hook-')));
+      try {
+        const site = join(ws, 'frontaliere-si-o-no');
+        const corpus = join(ws, 'frontaliere-articles');
+        const hooks = join(ws, 'hooks-main');
+        mkdirSync(join(ws, 'bin'));
+        copyFileSync(SITE_HOOK, join(ws, 'bin', 'site-hook'));
+        writeFileSync(join(ws, 'bin', 'site-hooks-refresh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        for (const base of [site, hooks]) mkdirSync(join(base, 'scripts'), { recursive: true });
+        if (withCorpus) mkdirSync(join(corpus, '.git'), { recursive: true });
+        const log = join(ws, 'calls.log');
+        // Lo sweep finto dura piu' di quanto l'hook debba bloccare la sessione.
+        const probe = (tag, delayMs) => `import { appendFileSync } from 'node:fs';
 setTimeout(() => appendFileSync(${JSON.stringify(log)}, '${tag} ' + process.cwd() + ' ' + process.argv.slice(2).join(' ') + '\\n'), ${delayMs});`;
-      writeFileSync(join(hooks, 'scripts', 'prune-merged-worktrees.mjs'), probe('main', 1500));
-      writeFileSync(join(site, 'scripts', 'prune-merged-worktrees.mjs'), probe('stale', 0));
-      writeFileSync(join(site, 'scripts', 'sync-main-checkout.mjs'), probe('sync', 0));
-      const env = {
-        ...process.env,
-        WORKSPACE: ws,
-        CLAUDE_PROJECT_DIR: ws,
-        CODEX_PROJECT_DIR: ws,
-        FRONTALIERE_SITE_HOOKS_DIR: hooks,
-      };
+        writeFileSync(join(hooks, 'scripts', 'prune-merged-worktrees.mjs'), probe('main', 1500));
+        writeFileSync(join(site, 'scripts', 'prune-merged-worktrees.mjs'), probe('stale', 0));
+        writeFileSync(join(site, 'scripts', 'sync-main-checkout.mjs'), probe('sync', 0));
+        const env = {
+          ...process.env,
+          WORKSPACE: ws,
+          CLAUDE_PROJECT_DIR: ws,
+          CODEX_PROJECT_DIR: ws,
+          FRONTALIERE_SITE_HOOKS_DIR: hooks,
+        };
 
-      const t0 = Date.now();
-      const r = spawnSync('sh', ['-c', start.command], { env, encoding: 'utf8', timeout: 10_000 });
-      assert.equal(r.status, 0, r.stderr);
-      assert.ok(Date.now() - t0 < 1200, `SessionStart ha aspettato lo sweep (${Date.now() - t0} ms)`);
-      for (let i = 0; i < 50 && !(existsSync(log) && readFileSync(log, 'utf8').includes('sync')); i++) await sleep(100);
-      const lines = readFileSync(log, 'utf8').trim().split('\n');
-      assert.deepEqual(lines, [`main ${site} --apply`, `sync ${site} `.trimEnd()]);
+        const expected = [`main ${site} --apply`, `sync ${site}`];
+        if (withCorpus) expected.push(`main ${corpus} --apply`);
+        const t0 = Date.now();
+        const r = spawnSync('sh', ['-c', start.command], { env, encoding: 'utf8', timeout: 10_000 });
+        assert.equal(r.status, 0, r.stderr);
+        assert.ok(Date.now() - t0 < 1200, `SessionStart ha aspettato lo sweep (${Date.now() - t0} ms)`);
+        const done = () => existsSync(log) && readFileSync(log, 'utf8').trim().split('\n').length >= expected.length;
+        for (let i = 0; i < 80 && !done(); i++) await sleep(100);
+        if (!withCorpus) await sleep(300); // nessuna riga in piu' deve arrivare
+        const lines = () => readFileSync(log, 'utf8').trim().split('\n').map((l) => l.trimEnd());
+        assert.deepEqual(lines(), expected);
 
-      rmSync(log);
-      const e = spawnSync('sh', ['-c', end.command], { env, encoding: 'utf8', timeout: 10_000 });
-      assert.equal(e.status, 0, e.stderr);
-      assert.equal(readFileSync(log, 'utf8').trim(), `main ${site} --apply --orphans-only`);
-    } finally { rmSync(ws, { recursive: true, force: true }); }
-  });
+        rmSync(log);
+        const e = spawnSync('sh', ['-c', end.command], { env, encoding: 'utf8', timeout: 10_000 });
+        assert.equal(e.status, 0, e.stderr);
+        const endExpected = [`main ${site} --apply --orphans-only`];
+        if (withCorpus) endExpected.push(`main ${corpus} --apply --orphans-only`);
+        assert.deepEqual(lines(), endExpected);
+      } finally { rmSync(ws, { recursive: true, force: true }); }
+    });
+  }
 }
