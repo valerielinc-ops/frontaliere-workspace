@@ -251,6 +251,11 @@ materializza soltanto il path necessario.
   usa `bin/gh-nanako` soltanto dopo aver caricato Remote Config.
 - Su entrambi i repo: test verdi -> review automatica -> auto-merge dopo
   `## LGTM`. Non mergiare a mano una PR che il ciclo sta seguendo.
+- Repo root `valerielinc-ops/frontaliere-workspace`: nessuna review
+  automatica; un ruleset su `main` rende obbligatorio il check `sanity`
+  (`PR sanity`). Dopo `gh pr create` attiva `gh pr merge <N> --repo
+  valerielinc-ops/frontaliere-workspace --auto --squash` e attendi `merged`
+  con la subscription; GitHub mergia solo a check verde.
 - **Completion gate per le implementazioni:** salvo richiesta esplicita di sola
   diagnosi, draft o codice non pubblicato, un'implementazione non è conclusa
   quando il codice è soltanto pronto o la PR è soltanto aperta. Lo stesso ciclo
