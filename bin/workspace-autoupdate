@@ -1,0 +1,205 @@
+#!/bin/bash
+
+# Tiene il workspace allineato a origin/main senza che nessuno se ne ricordi:
+# avanza il checkout root (da cui le sessioni leggono hook e script) e, se sono
+# cambiati bin/ o config/, rilascia il coordinator GitHub con
+# `bin/github-coordinator-release deploy`, che riavvia i servizi uno alla volta
+# solo quando il coordinator e' inattivo.
+#
+#   workspace-autoupdate run        un giro (lo lancia launchd ogni 15 minuti)
+#   workspace-autoupdate install    genera e carica il launch agent per questo Mac
+#   workspace-autoupdate uninstall  lo scarica e lo rimuove
+#   workspace-autoupdate status     launch agent e ultime righe del log
+#
+# Il checkout root avanza solo in fast-forward, solo su main e solo se git
+# accetta senza toccare modifiche locali: un conflitto lascia tutto com'e' e
+# finisce nel log. Un deploy rifiutato (coordinator occupato) si ritenta al
+# giro dopo. Esce 0 anche sugli errori: e' un job periodico.
+#
+# Il plist si genera qui e non sta in config/launchd/: contiene HOME e il path
+# del workspace di ogni macchina.
+
+set -u
+
+label=ch.frontaliere.workspace-autoupdate
+git_bin=${AU_GIT_BIN:-git}
+home_dir=${HOME:-~}
+log_dir=${AU_LOG_DIR:-$home_dir/Library/Logs/frontaliere}
+log_file="$log_dir/workspace-autoupdate.log"
+agents_dir=${AU_LAUNCH_AGENTS_DIR:-$home_dir/Library/LaunchAgents}
+release_root=${FRONTALIERE_GH_RELEASE_ROOT:-$home_dir/.local/share/frontaliere/github-coordinator}
+interval_s=${AU_INTERVAL_S:-900}
+lock_max_age_min=30
+max_log_lines=2000
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 0
+ws=${AU_WORKSPACE:-$(CDPATH= cd -- "$script_dir/.." && pwd -P)}
+
+log() {
+  /bin/mkdir -p "$log_dir" 2>/dev/null || return 0
+  printf '%s %s\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$log_file"
+}
+
+trim_log() {
+  [ -f "$log_file" ] || return 0
+  lines=$(/usr/bin/wc -l <"$log_file")
+  if [ "$lines" -gt "$max_log_lines" ]; then
+    /usr/bin/tail -n $((max_log_lines / 2)) "$log_file" >"$log_file.tmp" && /bin/mv "$log_file.tmp" "$log_file"
+  fi
+}
+
+g() {
+  "$git_bin" -C "$ws" "$@"
+}
+
+update_checkout() { # sha di destinazione
+  target=$1
+  branch=$(g symbolic-ref --short -q HEAD) || branch=''
+  head=$(g rev-parse HEAD 2>/dev/null) || return 0
+  if [ "$branch" != main ]; then
+    log "checkout root su '${branch:-HEAD staccato}': nessun avanzamento"
+    return 0
+  fi
+  [ "$head" = "$target" ] && return 0
+  if ! g merge-base --is-ancestor "$head" "$target"; then
+    log "checkout root con commit locali non su origin/main: nessun avanzamento"
+    return 0
+  fi
+  if out=$(g merge --ff-only -q "$target" 2>&1); then
+    log "checkout root ${head:0:8} -> ${target:0:8}"
+  else
+    log "checkout root fermo a ${head:0:8}: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-200)"
+  fi
+}
+
+update_coordinator() { # sha di destinazione
+  target=$1
+  current=''
+  if [ -L "$release_root/current" ]; then
+    current=$(/usr/bin/basename "$(/usr/bin/readlink "$release_root/current")")
+  fi
+  [ "$current" = "$target" ] && return 0
+  if [ -n "$current" ] && g cat-file -e "$current^{commit}" 2>/dev/null \
+    && [ -z "$(g diff --name-only "$current" "$target" -- bin config)" ]; then
+    return 0
+  fi
+  release="$ws/bin/github-coordinator-release"
+  if [ ! -x "$release" ]; then
+    log "coordinator: $release assente, nessun deploy"
+    return 0
+  fi
+  if out=$("$release" deploy --ref "$target" 2>&1); then
+    log "coordinator ${current:0:8} -> ${target:0:8}"
+  else
+    log "coordinator fermo a ${current:0:8}, deploy ritentato al prossimo giro: $(printf '%s' "$out" | /usr/bin/tail -n 3 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-300)"
+  fi
+}
+
+cmd_run() {
+  /bin/mkdir -p "$log_dir" 2>/dev/null
+  lock="$log_dir/workspace-autoupdate.lock"
+  if ! /bin/mkdir "$lock" 2>/dev/null; then
+    if [ -n "$(/usr/bin/find "$lock" -maxdepth 0 -mmin +"$lock_max_age_min" 2>/dev/null)" ]; then
+      /bin/rmdir "$lock" 2>/dev/null
+      /bin/mkdir "$lock" 2>/dev/null || return 0
+    else
+      return 0
+    fi
+  fi
+  trap '/bin/rmdir "$lock" 2>/dev/null' EXIT INT TERM
+  if ! out=$(g -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch -q origin main 2>&1); then
+    log "fetch fallito: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-200)"
+    return 0
+  fi
+  target=$(g rev-parse --verify -q origin/main) || return 0
+  update_checkout "$target"
+  update_coordinator "$target"
+  trim_log
+}
+
+plist_path() {
+  printf '%s/%s.plist\n' "$agents_dir" "$label"
+}
+
+xml() { # escape per i valori del plist
+  printf '%s' "$1" | /usr/bin/sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+cmd_install() {
+  /bin/mkdir -p "$agents_dir" "$log_dir" || exit 73
+  plist=$(plist_path)
+  cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$label</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>$(xml "$ws/bin/workspace-autoupdate")</string>
+		<string>run</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>$interval_s</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>$(xml "$ws")</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key><string>$(xml "$home_dir")</string>
+		<key>PATH</key><string>$(xml "$home_dir/.local/bin"):/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>WORKSPACE</key><string>$(xml "$ws")</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>$(xml "$log_dir/workspace-autoupdate.launchd.out.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml "$log_dir/workspace-autoupdate.launchd.err.log")</string>
+</dict>
+</plist>
+EOF
+  /usr/bin/plutil -lint -s "$plist" || exit 65
+  [ -n "${AU_NO_LAUNCHCTL:-}" ] && { printf '%s\n' "$plist"; return 0; }
+  domain="gui/$(/usr/bin/id -u)"
+  /bin/launchctl bootout "$domain/$label" 2>/dev/null
+  /bin/launchctl bootstrap "$domain" "$plist" || exit 1
+  printf 'caricato %s (ogni %ss): %s\n' "$label" "$interval_s" "$plist"
+}
+
+cmd_uninstall() {
+  /bin/launchctl bootout "gui/$(/usr/bin/id -u)/$label" 2>/dev/null
+  /bin/rm -f "$(plist_path)"
+  printf 'rimosso %s\n' "$label"
+}
+
+cmd_status() {
+  if /bin/launchctl print "gui/$(/usr/bin/id -u)/$label" >/dev/null 2>&1; then
+    printf '%s caricato\n' "$label"
+  else
+    printf '%s non caricato (workspace-autoupdate install)\n' "$label"
+  fi
+  [ -f "$log_file" ] && /usr/bin/tail -n 10 "$log_file"
+  return 0
+}
+
+# Tutto il lavoro sta in funzioni chiamate dall'ultima riga: bash legge lo
+# script a pezzi, e il fast-forward puo' sostituire questo file mentre gira.
+main() {
+  case "${1:-run}" in
+    run) cmd_run ;;
+    install) cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    status) cmd_status ;;
+    -h|--help) /usr/bin/sed -n '3,20p' "$0" ;;
+    *) printf 'uso: workspace-autoupdate [run|install|uninstall|status]\n' >&2; exit 64 ;;
+  esac
+}
+main "$@"; exit $?
