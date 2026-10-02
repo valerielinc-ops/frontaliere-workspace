@@ -613,6 +613,71 @@ una notifica macOS al massimo ogni 6 ore. Non uccide processi.
 **solo il reboot libera la memoria**. Il bug risulta corretto in macOS 27.0
 secondo segnalazioni di utenti, non da note di rilascio Apple.
 
+## Host agenti remoto (MacBook Pro 2017, macOS 13)
+
+Dal 2026-10-02 un secondo Mac, `MacBookPro14,1` (i5-7360U: **2 core fisici**,
+4 thread; 16 GB; macOS 13.7.8, l'ultimo che supporta), serve solo a eseguire
+Claude Code e Codex lanciati da remoto via Tailscale + SSH. Il leak kernel
+della sezione precedente e' di macOS 26 e qui non si applica.
+
+Misurato il 2026-10-02 con gli agenti al lavoro: load average 50-73, CPU 45%
+user + 33% sys, limite termico `CPU_Speed_Limit` 80-83%, 2,5 GB di swap. Il
+carico viene dagli agenti stessi (60 processi `git`, un `tsc --noEmit` da
+4,6 GB e 15 minuti, l'app-server Codex da 4 GB), non dall'OS: l'I/O del disco
+era 3-8 MB/s. Fuori dagli agenti consumano `fseventsd` (~14%, churn dei
+worktree), `kernel_task` (gestione termica), `trustd` (TLS delle chiamate
+degli agenti), `mds` (Spotlight) e XProtect.
+
+**Tuning.** `bin/agent-host-tune status|apply|revert` (voci utente, senza sudo)
+e `sudo bin/agent-host-tune apply-system|revert-system`; `--dry-run` mostra i
+comandi. Ogni apply registra il valore precedente e il revert ripristina
+quello, non un default.
+
+- Utente: 60 servizi Apple del dominio `gui/<uid>` disattivati (Foto, Siri,
+  suggerimenti, pubblicita', Screen Time, Musica/News/Meteo/Giochi/Mail, App
+  Store, sincronizzazioni Safari); App Nap spento; movimento e trasparenza
+  ridotti; Handoff, ricevitore AirPlay e suggerimenti di ricerca spenti; i
+  plist `org.git-scm.git.*` di `git maintenance` con `ProcessType=Background`,
+  `LowPriorityIO`, `Nice 10`.
+- Sistema: `pmset -c sleep 0 disksleep 0 displaysleep 1 powernap 0`,
+  `proximitywake 0`; Spotlight spento (`mdutil -a -i off`); niente
+  download/installazione automatica di macOS (ConfigData e Critical restano);
+  Bluetooth spento. L'ibernazione resta attiva.
+
+SIP rifiuta il `bootout` dei servizi Apple (`Boot-out failed: 150`): il
+`disable` vale dal prossimo login, e intanto `apply` ferma i processi gia'
+avviati (PID letto da launchd per quell'etichetta; SIGTERM, poi SIGKILL a chi
+lo ignora, come `tipsd`). `ScreenTimeAgent` e `UsageTrackingAgent` rifiutano
+anche il SIGKILL del proprio utente (`operation not permitted`). Finche' la
+sessione grafica non riparte una decina viene rilanciata su richiesta entro
+pochi minuti: rieseguire `apply` li ferma di nuovo. Primo giro: 37 processi
+fermati, RSS dei servizi in lista da 406 a 196 MB.
+
+Restano accesi di proposito iCloud/CloudKit e account (portachiavi), Dov'e',
+`corespotlightd`, `contactsd`, ReportCrash. `kern.maxvnodes` (263.168) e'
+pieno ma ricicla poco a riposo: alzarlo costerebbe memoria wired su una
+macchina che gia' va in swap, quindi non e' toccato. `kern.maxproc*` e
+`kern.maxfiles` hanno margine ampio (~370 processi su 2.784 per utente).
+
+**FileVault e riavvii.** FileVault e' attivo e deve restarlo: su questo disco
+c'e' la chiave del service account con poteri da owner. Dopo un riavvio
+normale il Mac si ferma alla schermata di sblocco e Tailscale/SSH non
+rispondono finche' qualcuno non digita la password davanti allo schermo. Per
+un riavvio da remoto usa `sudo fdesetup authrestart` (sblocco una tantum); e'
+anche il modo di rendere definitivi i servizi disattivati. Per lo stesso
+motivo `apply-system` spegne l'installazione automatica di macOS.
+`tailscaled` (`com.tailscale.tailscaled`) e `sshd` sono demoni di sistema e
+tornano senza login; i launch agent utente (coordinatore GitHub, webhook,
+`remote-awake`) partono invece solo con la sessione grafica. Dopo il riavvio
+controlla `stat -f %Su /dev/console`: se non e' l'utente, il Mac e' alla
+finestra di login ed entri con Condivisione schermo (porta 5900, gia' attiva)
+attraverso Tailscale.
+
+**Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
+coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso
+senza monitor esterno il Mac dorme comunque), display spento, base rialzata.
+Batteria a 586 cicli, condizione Normal.
+
 ## Aggiungere un terzo repo qui dentro
 
 Procedura spostata nella skill `add-repo-workspace` (`.claude/skills/add-repo-workspace/SKILL.md`),
