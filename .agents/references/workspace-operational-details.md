@@ -647,9 +647,11 @@ quello, non un default.
 SIP rifiuta il `bootout` dei servizi Apple (`Boot-out failed: 150`): il
 `disable` vale dal prossimo login, e intanto `apply` ferma i processi gia'
 avviati (PID letto da launchd per quell'etichetta; SIGTERM, poi SIGKILL a chi
-lo ignora, come `tipsd`). Finche' la sessione grafica non riparte alcuni
-vengono rilanciati su richiesta: rieseguire `apply` li ferma di nuovo. Primo
-giro: 37 processi fermati, RSS dei servizi in lista da 406 a 196 MB.
+lo ignora, come `tipsd`). `ScreenTimeAgent` e `UsageTrackingAgent` rifiutano
+anche il SIGKILL del proprio utente (`operation not permitted`). Finche' la
+sessione grafica non riparte una decina viene rilanciata su richiesta entro
+pochi minuti: rieseguire `apply` li ferma di nuovo. Primo giro: 37 processi
+fermati, RSS dei servizi in lista da 406 a 196 MB.
 
 Restano accesi di proposito iCloud/CloudKit e account (portachiavi), Dov'e',
 `corespotlightd`, `contactsd`, ReportCrash. `kern.maxvnodes` (263.168) e'
@@ -664,6 +666,12 @@ rispondono finche' qualcuno non digita la password davanti allo schermo. Per
 un riavvio da remoto usa `sudo fdesetup authrestart` (sblocco una tantum); e'
 anche il modo di rendere definitivi i servizi disattivati. Per lo stesso
 motivo `apply-system` spegne l'installazione automatica di macOS.
+`tailscaled` (`com.tailscale.tailscaled`) e `sshd` sono demoni di sistema e
+tornano senza login; i launch agent utente (coordinatore GitHub, webhook,
+`remote-awake`) partono invece solo con la sessione grafica. Dopo il riavvio
+controlla `stat -f %Su /dev/console`: se non e' l'utente, il Mac e' alla
+finestra di login ed entri con Condivisione schermo (porta 5900, gia' attiva)
+attraverso Tailscale.
 
 **Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
 coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso

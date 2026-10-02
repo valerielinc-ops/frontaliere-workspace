@@ -35,12 +35,14 @@ esac
 exit 0
 `;
 
-// 4243 ignora SIGTERM, come tipsd sulla macchina vera.
+// 4243 ignora SIGTERM, come tipsd sulla macchina vera; 4245 rifiuta anche
+// SIGKILL, come ScreenTimeAgent.
 const FAKE_KILL = `#!/bin/sh
 echo "kill $*" >>"$FAKE_DIR/log"
 sig=$1
 shift
 for pid in "$@"; do
+  [ "$pid" = 4245 ] && continue
   if [ "$sig" = -KILL ] || [ "$pid" != 4243 ]; then
     grep -v " $pid\\$" "$FAKE_DIR/running" >"$FAKE_DIR/running.tmp"
     mv "$FAKE_DIR/running.tmp" "$FAKE_DIR/running"
@@ -204,12 +206,16 @@ describe('agent-host-tune', () => {
 
   test('apply e revert utente sono un\'andata e ritorno esatta', () => {
     // tipsd era gia' spento ma ancora vivo: va fermato anche lui.
-    writeFileSync(join(dir, 'running'), 'com.apple.photoanalysisd 4242\ncom.apple.tipsd 4243\ncom.example.other 4244\n');
+    writeFileSync(join(dir, 'running'), [
+      'com.apple.photoanalysisd 4242', 'com.apple.tipsd 4243', 'com.example.other 4244', 'com.apple.ScreenTimeAgent 4245',
+    ].join('\n') + '\n');
     const first = tune(['apply']);
     assert.equal(first.status, 0, first.stderr);
     assert.equal(disabledState('com.apple.photoanalysisd'), 'disabled');
-    assert.match(read('log'), /^kill -TERM 4242 4243$/m);
-    assert.match(read('log'), /^kill -KILL 4243$/m, 'SIGKILL solo a chi ha ignorato SIGTERM');
+    // I PID seguono l'ordine della lista dei servizi.
+    assert.match(read('log'), /^kill -TERM 4242 4245 4243$/m);
+    assert.match(read('log'), /^kill -KILL 4245 4243$/m, 'SIGKILL solo a chi ha ignorato SIGTERM');
+    assert.match(first.stdout, /processi fermati: 2, protetti da macOS fino al prossimo login: 1/);
     assert.match(read('running'), /com\.example\.other 4244/, 'servizi fuori lista intatti');
     assert.equal(pref('std_com.apple.assistant.support_Assistant_Enabled'), '0');
     assert.equal(pref('std_-g_NSAppSleepDisabled'), '1');

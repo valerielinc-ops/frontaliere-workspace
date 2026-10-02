@@ -328,9 +328,15 @@ stop_services() { # "etichetta=pid ..."
     # shellcheck disable=SC2086 # un argomento per PID
     run "$kill_bin" -KILL $survivors 2>/dev/null || true
   fi
-  # shellcheck disable=SC2086 # conta i PID
-  set -- $pids
-  say "  processi fermati: $#"
+  # Screen Time (ScreenTimeAgent, UsageTrackingAgent) rifiuta anche il SIGKILL
+  # del proprio utente: resta vivo fino al prossimo login.
+  total=0
+  protected=0
+  for pair in $list; do
+    total=$((total + 1))
+    [ "$dry_run" = 0 ] && [ "$(service_pid "${pair%%=*}")" = "${pair#*=}" ] && protected=$((protected + 1))
+  done
+  say "  processi fermati: $((total - protected)), protetti da macOS fino al prossimo login: $protected"
 }
 
 apply_services() {
