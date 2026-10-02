@@ -31,6 +31,16 @@ export const GUARD_VERSION = 1;
 export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_PRESSURE_FREE_PERCENT = 8;
 export const DEFAULT_SWAP_USED_RATIO = 0.85;
+// I comandi pesanti durano poco (2026-10-02, 24h: p90 40s, massimo 172s),
+// ma il lease registrava solo il PID dell'hook, morto subito: un PostToolUse
+// mancato teneva fermi tutti gli agenti fino al TTL di 2 ore. Ora il lease
+// segue l'observer del comando e chi lo trova occupato aspetta in coda.
+// L'attesa deve restare sotto il timeout dell'hook (360s nelle due config):
+// un hook ucciso per timeout lascerebbe passare il comando senza lease.
+export const DEFAULT_QUEUE_WAIT_MS = 5 * 60 * 1000;
+export const DEFAULT_QUEUE_POLL_MS = 1000;
+export const DEFAULT_UNOBSERVED_LEASE_MS = 15 * 60 * 1000;
+export const LEASE_START_GRACE_MS = 30 * 1000;
 
 const THIS_FILE = fileURLToPath(import.meta.url);
 const BIN_DIR = path.dirname(THIS_FILE);
@@ -39,6 +49,8 @@ const LEASE_NAME = 'heavy-lease.json';
 const COMMANDS_NAME = 'commands.jsonl';
 const PENDING_DIR = 'pending';
 const OBSERVER_REGISTRY_NAME = 'observers.jsonl';
+const OBSERVER_STATUS_DIR = 'observer-status';
+const QUEUE_DIR = 'queue';
 const MAX_COMMAND_TEXT = 4000;
 
 function now() {
@@ -393,12 +405,54 @@ function removeLease(runtimeDir) {
   try { unlinkSync(leasePath(runtimeDir)); } catch { /* already gone */ }
 }
 
-export function acquireHeavyLease(runtimeDir, lease) {
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function observerStatusPath(runtimeDir, id) {
+  return path.join(runtimeDir, OBSERVER_STATUS_DIR, `${id}.json`);
+}
+
+function defaultObserverAlive(pid) {
+  return pidAlive(pid) && observerIsOurs(pid);
+}
+
+/**
+ * Perche' un lease non vale piu', o undefined se e' ancora valido. Un lease e'
+ * libero quando scade, quando il suo observer e' morto dopo aver visto il
+ * comando (il comando e' finito anche se il PostToolUse non e' arrivato), o
+ * quando nessuno osserva il comando da piu' del TTL ridotto per i lease non
+ * osservati. Nei primi secondi l'observer puo' non essere ancora registrato.
+ */
+export function leaseStaleReason(lease, runtimeDir, options = {}) {
+  if (!lease) return 'assente';
+  const at = options.now ?? now();
+  if (Number(lease.expiresAt) <= at) return 'scaduto';
+  const age = at - Number(lease.startedAt || at);
+  if (age < LEASE_START_GRACE_MS) return undefined;
+  const observerAlive = options.observerAlive ?? defaultObserverAlive;
+  const observerPid = Number(lease.observerPid);
+  if (observerPid > 0) {
+    if (observerAlive(observerPid)) return undefined;
+    if (readJson(observerStatusPath(runtimeDir, lease.id))?.seen) return 'comando terminato';
+  }
+  const unobservedMs = numberFromEnv('FRONTALIERE_RESOURCE_UNOBSERVED_LEASE_MS', DEFAULT_UNOBSERVED_LEASE_MS);
+  if (age >= unobservedMs) return `nessun processo osservato da ${Math.round(age / 1000)}s`;
+  return undefined;
+}
+
+export function acquireHeavyLease(runtimeDir, lease, options = {}) {
   ensureRuntime(runtimeDir);
   const file = leasePath(runtimeDir);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const current = readLease(runtimeDir);
-    if (current && Number(current.expiresAt) > now()) return { acquired: false, current };
+    if (current && !leaseStaleReason(current, runtimeDir, options)) return { acquired: false, current };
     if (current) removeLease(runtimeDir);
     try {
       const fd = openSync(file, 'wx', 0o600);
@@ -413,6 +467,68 @@ export function acquireHeavyLease(runtimeDir, lease) {
     }
   }
   return { acquired: false, current: readLease(runtimeDir) };
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+function queuePath(runtimeDir) {
+  return path.join(runtimeDir, QUEUE_DIR);
+}
+
+function enqueue(runtimeDir, info) {
+  const dir = queuePath(runtimeDir);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const enqueuedAt = now();
+  // Il nome ordina la coda: istante di arrivo, poi pid e id per gli ex aequo.
+  const name = `${String(enqueuedAt).padStart(15, '0')}-${process.pid}-${info.id}.json`;
+  writeJsonAtomic(path.join(dir, name), { ...info, pid: process.pid, enqueuedAt });
+  return name;
+}
+
+function dequeue(runtimeDir, name) {
+  try { unlinkSync(path.join(queuePath(runtimeDir), name)); } catch { /* already gone */ }
+}
+
+/**
+ * Il biglietto vivo piu' vecchio. I biglietti di hook morti (uccisi dal
+ * timeout o dalla fine della sessione) vengono tolti strada facendo.
+ */
+export function queueHead(runtimeDir, options = {}) {
+  const alive = options.pidAlive ?? pidAlive;
+  let names = [];
+  try { names = readdirSync(queuePath(runtimeDir)).filter((name) => name.endsWith('.json')).sort(); } catch { return undefined; }
+  for (const name of names) {
+    const ticket = readJson(path.join(queuePath(runtimeDir), name));
+    if (ticket && alive(Number(ticket.pid))) return name;
+    dequeue(runtimeDir, name);
+  }
+  return undefined;
+}
+
+/**
+ * Attende il lease in coda FIFO fino a maxWaitMs. Restituisce il lease
+ * acquisito oppure quello che lo ha impedito fino alla scadenza dell'attesa.
+ */
+export function waitForHeavyLease(runtimeDir, info, makeLease, options = {}) {
+  const maxWaitMs = options.maxWaitMs ?? numberFromEnv('FRONTALIERE_RESOURCE_QUEUE_MS', DEFAULT_QUEUE_WAIT_MS);
+  const pollMs = options.pollMs ?? numberFromEnv('FRONTALIERE_RESOURCE_QUEUE_POLL_MS', DEFAULT_QUEUE_POLL_MS);
+  const startedAt = now();
+  const ticket = enqueue(runtimeDir, info);
+  try {
+    for (;;) {
+      if (queueHead(runtimeDir, options) === ticket) {
+        const acquired = acquireHeavyLease(runtimeDir, makeLease(), options);
+        if (acquired.acquired) return { acquired: true, lease: acquired.lease, waitedMs: now() - startedAt };
+      }
+      const waitedMs = now() - startedAt;
+      if (waitedMs >= maxWaitMs) return { acquired: false, current: readLease(runtimeDir), waitedMs };
+      sleepSync(Math.min(pollMs, maxWaitMs - waitedMs));
+    }
+  } finally {
+    dequeue(runtimeDir, ticket);
+  }
 }
 
 function pendingPath(runtimeDir, id) {
@@ -493,6 +609,7 @@ function startObserver(runtimeDir, record, classification) {
       '--needle', classification.matchNeedle ?? '',
       '--baseline-pids', baselinePids.join(','),
       '--session', record.sessionId,
+      '--status', observerStatusPath(runtimeDir, record.id),
     ], { detached: true, stdio: 'ignore' });
     child.unref();
     appendRegistry(runtimeDir, {
@@ -509,16 +626,18 @@ function startObserver(runtimeDir, record, classification) {
 }
 
 function stalePendingCleanup(runtimeDir) {
-  const dir = path.join(runtimeDir, PENDING_DIR);
-  let files = [];
-  try { files = readdirSync(dir); } catch { return; }
   const cutoff = now() - 24 * 60 * 60 * 1000;
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    const full = path.join(dir, file);
-    try {
-      if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
-    } catch { /* best effort */ }
+  for (const name of [PENDING_DIR, OBSERVER_STATUS_DIR]) {
+    const dir = path.join(runtimeDir, name);
+    let files = [];
+    try { files = readdirSync(dir); } catch { continue; }
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      const full = path.join(dir, file);
+      try {
+        if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
+      } catch { /* best effort */ }
+    }
   }
 }
 
@@ -542,7 +661,7 @@ function stopObserver(runtimeDir, id) {
 export function cleanupRuntime(runtimeDir, sessionId) {
   ensureRuntime(runtimeDir);
   const lease = readLease(runtimeDir);
-  if (lease && (Number(lease.expiresAt) <= now() || (sessionId && lease.sessionId === sessionId))) removeLease(runtimeDir);
+  if (lease && (leaseStaleReason(lease, runtimeDir) || (sessionId && lease.sessionId === sessionId))) removeLease(runtimeDir);
 
   let pendingFiles = [];
   try { pendingFiles = readdirSync(path.join(runtimeDir, PENDING_DIR)); } catch { /* absent */ }
@@ -588,7 +707,7 @@ function remediation(classification) {
   return 'Attendi la fine del job pesante corrente e riprova; i job leggeri possono continuare.';
 }
 
-export function guardPre(info, workspace = findWorkspace(info.cwd)) {
+export function guardPre(info, workspace = findWorkspace(info.cwd), options = {}) {
   const runtimeDir = runtimeDirectory(workspace);
   ensureRuntime(runtimeDir);
   stalePendingCleanup(runtimeDir);
@@ -614,28 +733,14 @@ export function guardPre(info, workspace = findWorkspace(info.cwd)) {
     return { allowed: true, id, classification, runtimeDir };
   }
 
-  const existing = readLease(runtimeDir);
-  if (existing && Number(existing.expiresAt) > now()) {
-    const reason = leaseMessage(existing);
-    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason });
-    if (process.env.FRONTALIERE_RESOURCE_GUARD_VERBOSE === '1') process.stderr.write(`resource-guard: ${reason}\n`);
-    return { allowed: false, id, classification, runtimeDir, reason };
-  }
-  if (existing) removeLease(runtimeDir);
-
-  const snapshot = readHostSnapshot();
-  const pressure = pressureDecision(snapshot);
-  if (!isBypassEnabled() && (classification.unbounded || pressure.blocked)) {
-    const reason = classification.unbounded
-      ? `${classification.reason}: comando non delimitato`
-      : pressure.reason;
-    const fullReason = `${reason}. ${remediation(classification)}`;
-    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, snapshot, reason: fullReason });
+  if (!isBypassEnabled() && classification.unbounded) {
+    const fullReason = `${classification.reason}: comando non delimitato. ${remediation(classification)}`;
+    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason: fullReason });
     process.stderr.write(`\n🚫 resource-guard: comando pesante bloccato — ${fullReason}\n`);
     return { allowed: false, id, classification, runtimeDir, reason: fullReason };
   }
 
-  const lease = {
+  const makeLease = () => ({
     version: GUARD_VERSION,
     id,
     sessionId: info.sessionId,
@@ -645,22 +750,43 @@ export function guardPre(info, workspace = findWorkspace(info.cwd)) {
     startedAt: now(),
     expiresAt: now() + numberFromEnv('FRONTALIERE_RESOURCE_LEASE_MS', DEFAULT_LEASE_TTL_MS),
     hookPid: process.pid,
-  };
-  const acquired = acquireHeavyLease(runtimeDir, lease);
-  if (!acquired.acquired) {
-    const reason = leaseMessage(acquired.current);
-    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, snapshot, reason });
+  });
+  const waited = waitForHeavyLease(runtimeDir, { id, sessionId: info.sessionId, category: classification.kind }, makeLease, options);
+  if (!waited.acquired) {
+    const reason = `${leaseMessage(waited.current)}; in coda da ${Math.round(waited.waitedMs / 1000)}s senza turno`;
+    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason, waitedMs: waited.waitedMs });
     process.stderr.write(`\n🚫 resource-guard: ${reason}. ${remediation(classification)}\n`);
     return { allowed: false, id, classification, runtimeDir, reason };
   }
+  const { lease } = waited;
+  if (waited.waitedMs > 0) appendJson(runtimeDir, { type: 'command_dequeued', id, category: classification.kind, waitedMs: waited.waitedMs, at: now() });
 
-  const record = { ...baseRecord, snapshot, leaseExpiresAt: lease.expiresAt };
+  const snapshot = readHostSnapshot();
+  const pressure = pressureDecision(snapshot);
+  if (!isBypassEnabled() && pressure.blocked) {
+    removeOwnLease(runtimeDir, id);
+    const fullReason = `${pressure.reason}. ${remediation(classification)}`;
+    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, snapshot, reason: fullReason });
+    process.stderr.write(`\n🚫 resource-guard: comando pesante bloccato — ${fullReason}\n`);
+    return { allowed: false, id, classification, runtimeDir, reason: fullReason };
+  }
+
+  const record = { ...baseRecord, snapshot, leaseExpiresAt: lease.expiresAt, waitedMs: waited.waitedMs };
   appendJson(runtimeDir, { type: 'command_start', ...record });
   writePending(runtimeDir, id, record);
   const observerPid = startObserver(runtimeDir, record, classification);
-  if (observerPid) appendJson(runtimeDir, { type: 'observer_start', id, observerPid, category: classification.kind, at: now() });
-  else appendJson(runtimeDir, { type: 'observer_unavailable', id, category: classification.kind, at: now() });
-  return { allowed: true, id, classification, runtimeDir, observerPid };
+  if (observerPid) {
+    appendJson(runtimeDir, { type: 'observer_start', id, observerPid, category: classification.kind, at: now() });
+    // Da qui la vita del lease segue quella dell'observer, non solo il TTL.
+    if (readLease(runtimeDir)?.id === id) writeJsonAtomic(leasePath(runtimeDir), { ...lease, observerPid });
+  } else {
+    appendJson(runtimeDir, { type: 'observer_unavailable', id, category: classification.kind, at: now() });
+  }
+  return { allowed: true, id, classification, runtimeDir, observerPid, waitedMs: waited.waitedMs };
+}
+
+function removeOwnLease(runtimeDir, id) {
+  if (readLease(runtimeDir)?.id === id) removeLease(runtimeDir);
 }
 
 export function guardPost(info, workspace = findWorkspace(info.cwd)) {
@@ -687,6 +813,7 @@ export function guardPost(info, workspace = findWorkspace(info.cwd)) {
       removeLease(runtimeDir);
     }
     stopObserver(runtimeDir, id);
+    try { unlinkSync(observerStatusPath(runtimeDir, id)); } catch { /* no status */ }
   }
   return { runtimeDir, id, hadPending: Boolean(pending) };
 }

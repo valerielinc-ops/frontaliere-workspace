@@ -31,7 +31,8 @@
           },
           {
             "type": "command",
-            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --pre'"
+            "command": "sh -c 'd=\"${WORKSPACE:-${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}}\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || d=\"$d/..\"; [ -f \"$d/bin/agent-resource-guard.mjs\" ] || exit 0; node \"$d/bin/agent-resource-guard.mjs\" --pre'",
+            "timeout": 360
           },
           {
             "type": "command",

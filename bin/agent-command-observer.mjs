@@ -4,7 +4,7 @@
  * agent-resource-guard.mjs. It records the actual command PID(s), CPU and RSS
  * from `ps`; it never sends signals to the observed command.
  */
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -89,6 +89,7 @@ async function main() {
   const startedAt = Date.now();
   const maxDeadline = startedAt + MAX_RUNTIME_MS;
   let seen = false;
+  let missingSamples = 0;
   let missingPrimarySamples = 0;
   let sampleCount = 0;
   let maxCpuPct = 0;
@@ -156,6 +157,16 @@ async function main() {
     seen,
     endedAt: Date.now(),
   });
+  // Il guard legge questo file per liberare il lease quando il comando e'
+  // finito ma il PostToolUse non e' arrivato.
+  if (options.status) {
+    try {
+      mkdirSync(path.dirname(options.status), { recursive: true, mode: 0o700 });
+      writeFileSync(options.status, `${JSON.stringify({ id, seen, endedAt: Date.now() })}\n`, { mode: 0o600 });
+    } catch {
+      // best effort
+    }
+  }
 }
 
 main().catch(() => process.exitCode = 0);
