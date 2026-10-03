@@ -8,6 +8,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const VERSION = 1;
 const MAX_RUNTIME_MS = Number(process.env.FRONTALIERE_AGENT_OBSERVER_MAX_MS) || 3 * 60 * 60 * 1000;
@@ -53,7 +54,7 @@ function commandRows() {
   }
 }
 
-function matches(row, category, needle, sourceCommand, baselinePids) {
+export function matchesObservedProcess(row, category, needle, sourceCommand, baselinePids) {
   const text = row.command;
   if (text.includes('agent-command-observer.mjs')) return false;
   if (baselinePids.has(row.pid)) return false;
@@ -103,7 +104,7 @@ async function main() {
   append(runtimeDir, { type: 'observer_attached', version: VERSION, id, observerPid: process.pid, category, at: startedAt });
 
   while (!stopRequested && Date.now() < maxDeadline) {
-    const rows = commandRows().filter((row) => matches(row, category, needle, sourceCommand, baselinePids));
+    const rows = commandRows().filter((row) => matchesObservedProcess(row, category, needle, sourceCommand, baselinePids));
     if (rows.length) {
       if (!seen) {
         seen = true;
@@ -169,4 +170,6 @@ async function main() {
   }
 }
 
-main().catch(() => process.exitCode = 0);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(() => process.exitCode = 0);
+}
