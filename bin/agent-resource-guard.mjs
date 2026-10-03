@@ -250,6 +250,21 @@ function distinctiveGitToken(command) {
   return raw.match(/[A-Za-z0-9][A-Za-z0-9_.:\/-]{4,}/g)?.find((token) => !ignored.has(token.toLowerCase()));
 }
 
+// Restore only a Node script operand, not quoted prose or heredoc bodies.
+function officialNodeScript(command) {
+  const source = String(command ?? '');
+  const executable = shellExecutableText(source);
+  const pattern = /(?:^|[\s;&|])(?:[^\s;&|]*\/)?node\s+(?:(?:--(?:max-old-space-size|stack-size)(?:=\d+|\s+\d+)|--(?:enable-source-maps|no-warnings)|--)\s+)*(?:"([^"\n]+)"|'([^'\n]+)'|([^\s;&|]+))/g;
+  for (const match of source.matchAll(pattern)) {
+    const prefix = match[0].indexOf('node');
+    if (executable.slice(match.index + prefix, match.index + prefix + 4) !== 'node') continue;
+    const script = match[1] ?? match[2] ?? match[3];
+    const runner = script.match(/(?:^|\/)(codex-typecheck|run-related-tests|check-sibling-patterns|sibling-check-gate)\.mjs$/)?.[1];
+    if (runner) return { name: runner, start: match.index, end: match.index + match[0].length };
+  }
+  return undefined;
+}
+
 /**
  * Classify only commands that can materially compete for the machine. Plain
  * `git log` and `npm run typecheck` are still serialized, but only direct
@@ -277,6 +292,21 @@ export function classifyCommand(command) {
     };
   }
 
+  // Official wrappers wait for their heavy child process; observe the wrapper
+  // itself so discovery covers planning/startup as well as compiler/test time.
+  const runner = officialNodeScript(command);
+  if (runner) {
+    const otherHeavyPhase = classifyCommand(String(command).slice(0, runner.start) + ' ' + String(command).slice(runner.end)).heavy;
+    return {
+      kind: runner.name === 'codex-typecheck' ? 'typecheck' : runner.name === 'run-related-tests' ? 'build-or-test' : 'sibling-gate',
+      heavy: true,
+      unbounded: otherHeavyPhase,
+      text,
+      reason: otherHeavyPhase ? 'più fasi pesanti nello stesso comando: eseguirle in chiamate separate' : runner.name === 'codex-typecheck' ? 'typecheck incrementale del progetto' : runner.name === 'run-related-tests' ? 'suite di test correlati' : 'sweep dei file gemelli',
+      matchNeedle: `${runner.name}.mjs`,
+    };
+  }
+
   const compiler = /\b(?:tsc|typescript\/bin\/tsc|node_modules\/\.bin\/tsc)\b/.test(text) ||
     /\bnpm\s+run\s+(?:typecheck|typecheck:gate|typecheck:list|typecheck:baseline)\b/.test(text);
   if (compiler) {
@@ -288,17 +318,6 @@ export function classifyCommand(command) {
       text,
       reason: 'typecheck TypeScript dell’intero progetto',
       matchNeedle: 'tsc',
-    };
-  }
-
-  if (/\b(?:check-sibling-patterns|sibling-check-gate)\.mjs\b/.test(text)) {
-    return {
-      kind: 'sibling-gate',
-      heavy: true,
-      unbounded: false,
-      text,
-      reason: 'sweep dei file gemelli',
-      matchNeedle: text.includes('check-sibling-patterns') ? 'check-sibling-patterns' : 'sibling-check-gate',
     };
   }
 

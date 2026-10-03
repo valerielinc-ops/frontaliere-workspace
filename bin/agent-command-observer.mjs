@@ -58,6 +58,10 @@ export function matchesObservedProcess(row, category, needle, sourceCommand, bas
   const text = row.command;
   if (text.includes('agent-command-observer.mjs')) return false;
   if (baselinePids.has(row.pid)) return false;
+  if (['codex-typecheck.mjs', 'run-related-tests.mjs', 'check-sibling-patterns.mjs', 'sibling-check-gate.mjs'].includes(needle)) {
+    const escaped = needle.replaceAll('.', '\\.');
+    return new RegExp(`(?:^|[\\s/])${escaped}(?:\\s|$)`).test(text);
+  }
   if (category === 'git-history') return Boolean(needle) && text.includes(needle) && /\/git\s+(?:log|rev-list|grep)\b/.test(text);
   if (category === 'typecheck') return /(?:^|[\s/])tsc(?:\.js)?(?:\s|$)/.test(text) || text.includes('/typescript/bin/tsc');
   if (category === 'sibling-gate') return text.includes(needle || 'check-sibling-patterns');

@@ -43,6 +43,7 @@ export function shellExecutableText(command) {
         if (lineEnd !== -1) output.push('\n');
       } else {
         output.push(spaces(line.length));
+        if (lineEnd !== -1) output.push('\n');
       }
 
       index = lineEnd === -1 ? source.length : lineEnd + 1;
