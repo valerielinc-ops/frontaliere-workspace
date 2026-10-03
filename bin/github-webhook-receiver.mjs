@@ -51,6 +51,39 @@ export function webhookErrorStatus(error) {
   return 400;
 }
 
+const LOGGED_CLIENT_ERROR_STATUS = 400;
+
+/**
+ * Prefix a free-text receiver log line with an ISO timestamp, so the lines in
+ * the launchd stderr log can be matched with the hourly 5xx series of the
+ * Cloudflare tunnel.
+ */
+export function stamp(message, now = Date.now) {
+  return `${new Date(now()).toISOString()} ${message}`;
+}
+
+function writeStderrLine(line) {
+  try {
+    process.stderr.write(`${line}\n`);
+  } catch {
+    // Logging must not turn a contained failure into a process failure.
+  }
+}
+
+function defaultLog(entry) {
+  writeStderrLine(JSON.stringify(entry));
+}
+
+/**
+ * Only the responses an operator has to attribute are logged: every 5xx (the
+ * coordinator is unreachable, timed out or misconfigured) and the 400 of a
+ * delivery the coordinator rejected. 202, 401, 404 and 413 are the volume and
+ * the public noise of the ingress.
+ */
+function shouldLogWebhookResponse(status) {
+  return status >= 500 || status === LOGGED_CLIENT_ERROR_STATUS;
+}
+
 function describeError(error) {
   if (error instanceof Error) {
     return {
@@ -66,6 +99,7 @@ function describeError(error) {
 function logStructuredError(event, error, details = {}) {
   try {
     process.stderr.write(`${JSON.stringify({
+      ts: new Date().toISOString(),
       component: 'github-webhook-receiver',
       event,
       error: describeError(error),
@@ -215,7 +249,7 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0, con
       scheduler.stop();
       try { watcher?.close(); } catch { /* watcher already closed */ }
     }
-    process.stderr.write('github-webhook-receiver: source quiescent; restarting under supervisor\n');
+    writeStderrLine(stamp('github-webhook-receiver: source quiescent; restarting under supervisor'));
     onReload();
   };
   scheduler = createDebouncedReloadScheduler({ onReload: triggerReload, getActiveRequests });
@@ -224,13 +258,13 @@ function installSourceReloadWatcher(onReload, { getActiveRequests = () => 0, con
       const name = String(filename || '');
       if (triggered || !WATCHED_SOURCE_NAMES.has(name) || !sourceContentChanged(name)) return;
       if (scheduler.request()) {
-        process.stderr.write(
-          `github-webhook-receiver: source changed; restart scheduled (debounce=${SOURCE_RELOAD_DEBOUNCE_MS}ms, quiescence=${SOURCE_RELOAD_QUIESCENCE_MS}ms)\n`,
-        );
+        writeStderrLine(stamp(
+          `github-webhook-receiver: source changed; restart scheduled (debounce=${SOURCE_RELOAD_DEBOUNCE_MS}ms, quiescence=${SOURCE_RELOAD_QUIESCENCE_MS}ms)`,
+        ));
       }
     });
   } catch (error) {
-    process.stderr.write(`github-webhook-receiver: source watcher unavailable: ${error.message}\n`);
+    writeStderrLine(stamp(`github-webhook-receiver: source watcher unavailable: ${error.message}`));
   }
   return () => {
     scheduler.stop();
@@ -267,16 +301,20 @@ export function createGitHubWebhookReceiver({
   path = DEFAULT_PATH,
   onRequestStart = () => {},
   onRequestEnd = () => {},
+  ingest = ingestGitHubWebhook,
+  log = defaultLog,
+  now = Date.now,
 } = {}) {
   return createServer(async (request, response) => {
     onRequestStart();
+    const startedAt = now();
     try {
       if (request.method !== 'POST' || request.url?.split('?')[0] !== path) {
         jsonResponse(response, 404, { ok: false, error: 'not_found' });
         return;
       }
       const rawBody = await readBody(request);
-      const result = await ingestGitHubWebhook({
+      const result = await ingest({
         eventName: header(request, 'x-github-event'),
         deliveryId: header(request, 'x-github-delivery'),
         signature: header(request, 'x-hub-signature-256'),
@@ -285,14 +323,33 @@ export function createGitHubWebhookReceiver({
       jsonResponse(response, 202, result);
     } catch (error) {
       const status = webhookErrorStatus(error);
+      const errorLabel = error?.code || error?.message;
       const details = {
         ok: false,
-        error: error.code || error.message,
+        error: errorLabel,
       };
       for (const field of ['repo', 'actualIdentity', 'expectedIdentity', 'exitCode', 'nextAction']) {
         if (error?.[field] !== undefined) details[field] = error[field];
       }
       jsonResponse(response, status, details);
+      if (shouldLogWebhookResponse(status)) {
+        // Never the payload, the headers, the signature or the delivery id:
+        // the line must be safe to keep in a plain launchd log.
+        const finishedAt = now();
+        try {
+          log({
+            ts: new Date(finishedAt).toISOString(),
+            component: 'github-webhook-receiver',
+            event: 'webhook_response',
+            identity: identity ?? null,
+            status,
+            error: errorLabel || 'unknown',
+            durationMs: Math.max(0, finishedAt - startedAt),
+          });
+        } catch {
+          // A failing logger must not affect the response already sent.
+        }
+      }
     } finally {
       onRequestEnd();
     }
@@ -333,13 +390,13 @@ function startReceiverWorker({ identity, host, port, path }) {
     setTimeout(() => process.exit(exitCode), 1_000);
   };
   server.on('error', (error) => {
-    process.stderr.write(`github-webhook-receiver: ${error.message}\n`);
+    writeStderrLine(stamp(`github-webhook-receiver: ${error.message}`));
     terminate(1);
   });
   installProcessSafetyHandlers(terminate);
   process.once('disconnect', () => terminate(0));
   server.listen(port, host, () => {
-    process.stdout.write(`github-webhook-receiver listening on http://${host}:${port}${path}\n`);
+    process.stdout.write(`${stamp(`github-webhook-receiver listening on http://${host}:${port}${path}`)}\n`);
   });
 }
 
@@ -368,20 +425,20 @@ function startReceiverSupervisor(options) {
   installProcessSafetyHandlers(terminate);
   cluster.on('listening', (worker) => {
     if (rotation.markListening(worker)) {
-      process.stderr.write(`github-webhook-receiver: worker ${worker.id} ready; previous worker drained\n`);
+      writeStderrLine(stamp(`github-webhook-receiver: worker ${worker.id} ready; previous worker drained`));
     }
   });
   cluster.on('exit', (worker, code, signal) => {
     const replacement = rotation.markExit(worker);
     if (replacement) {
-      process.stderr.write(`github-webhook-receiver: worker ${worker.id} exited (${code ?? 'null'}/${signal ?? 'none'}); replacement forked\n`);
+      writeStderrLine(stamp(`github-webhook-receiver: worker ${worker.id} exited (${code ?? 'null'}/${signal ?? 'none'}); replacement forked`));
     }
   });
   stopSourceWatcher = installSourceReloadWatcher(() => {
-    if (rotation.reload()) process.stderr.write('github-webhook-receiver: replacement worker forked\n');
+    if (rotation.reload()) writeStderrLine(stamp('github-webhook-receiver: replacement worker forked'));
   }, { continuous: true });
   rotation.start();
-  process.stdout.write(`github-webhook-receiver supervisor active for http://${options.host}:${options.port}${options.path}\n`);
+  process.stdout.write(`${stamp(`github-webhook-receiver supervisor active for http://${options.host}:${options.port}${options.path}`)}\n`);
 }
 
 function main() {
@@ -405,7 +462,7 @@ if (invokedAsMain()) {
   try {
     main();
   } catch (error) {
-    process.stderr.write(`github-webhook-receiver: ${error.message}\n`);
+    writeStderrLine(stamp(`github-webhook-receiver: ${error.message}`));
     process.exitCode = 1;
   }
 }
