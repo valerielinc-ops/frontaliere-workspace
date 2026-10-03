@@ -3,6 +3,12 @@
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+# Resolve the caller's runtime before launchd's conservative PATH replaces it.
+coordinator_node="${FRONTALIERE_GH_NODE:-$(command -v node || PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin command -v node || true)}"
+if [[ "$coordinator_node" != /* || ! -f "$coordinator_node" || ! -x "$coordinator_node" ]]; then
+  echo 'github-coordinator-launcher: Node executable unavailable; set FRONTALIERE_GH_NODE to an absolute executable path' >&2
+  exit 127
+fi
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 # launchd inherits macOS's conservative 256-descriptor soft limit. The
@@ -67,7 +73,7 @@ missing_credentials() {
 
 rc_cache="$script_dir/github-coordinator-rc-cache.mjs"
 hydrate_from_cache() {
-  cached_exports="$(node "$rc_cache" hydrate --identity "$coordinator_identity" "$@" 2>/dev/null || true)"
+  cached_exports="$("$coordinator_node" "$rc_cache" hydrate --identity "$coordinator_identity" "$@" 2>/dev/null || true)"
   if [ -n "$cached_exports" ]; then
     eval "$cached_exports"
   fi
@@ -100,7 +106,7 @@ if [ -n "$needed" ]; then
     done
     IFS="$old_ifs"
     if [ -n "$loaded" ]; then
-      node "$rc_cache" persist --identity "$coordinator_identity" --only "$loaded" >/dev/null 2>&1 || true
+      "$coordinator_node" "$rc_cache" persist --identity "$coordinator_identity" --only "$loaded" >/dev/null 2>&1 || true
     fi
     if [ -n "$still_missing" ]; then
       hydrate_from_cache --any
@@ -109,4 +115,4 @@ if [ -n "$needed" ]; then
 fi
 export_token_aliases
 
-exec /usr/bin/env node "${FRONTALIERE_GH_COORDINATOR_ENTRY:-$script_dir/github-coordinator.mjs}" ${coordinator_args[@]+"${coordinator_args[@]}"}
+exec "$coordinator_node" "${FRONTALIERE_GH_COORDINATOR_ENTRY:-$script_dir/github-coordinator.mjs}" ${coordinator_args[@]+"${coordinator_args[@]}"}

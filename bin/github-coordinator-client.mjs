@@ -287,6 +287,7 @@ async function startDaemon(identity) {
       env: {
         ...process.env,
         FRONTALIERE_GH_IDENTITY: identity,
+        FRONTALIERE_GH_NODE: process.execPath,
       },
     });
     child.unref();
