@@ -150,6 +150,48 @@ test('lo sweep riconcilia le subscription persistite e consegna un merge perso',
   }
 });
 
+test('lo sweep recupera followLatest senza runId e conserva exact run e target incompleti', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-sweep-workflow-'));
+  const { broker, coordinator } = makeCoordinator(stateDirectory);
+  const calls = [];
+  const createdAt = new Date().toISOString();
+  const run = (id, conclusion) => ({
+    id, name: 'Deploy', path: '.github/workflows/deploy.yml', head_branch: 'main',
+    head_sha: 'a'.repeat(40), status: 'completed', conclusion, created_at: createdAt,
+  });
+  coordinator.submit = async ({ path }) => {
+    calls.push(path);
+    return { ok: true, status: 200, body: JSON.stringify(
+      path.endsWith('/actions/runs/100') ? run(100, 'cancelled') : { workflow_runs: [run(200, 'success')] },
+    ) };
+  };
+  try {
+    const broad = broker.subscribe({ repo: 'owner/repo', resource: 'workflow_run', workflow: 'deploy.yml', branch: 'main', followLatest: true, waitFor: ['completed'], ttlSeconds: 3600 });
+    const exact = broker.subscribe({ repo: 'owner/repo', resource: 'workflow_run', runId: 100, waitFor: ['cancelled'], ttlSeconds: 3600 });
+    broker.subscribe({ repo: 'owner/repo', resource: 'workflow_run', waitFor: ['completed'], ttlSeconds: 3600 });
+    // Persisted activity from the old regression; recovery must read the latest
+    // supported target, not mutate this snapshot or reuse its stale run ID.
+    Object.assign(broker.getSubscriptionRecord(broad.id), {
+      lastActivityRunId: '100', lastActivityState: 'cancelled', lastActivityAt: createdAt,
+    });
+    const nowMs = Date.now();
+    const result = await coordinator.reconcileStaleSubscriptions({ nowMs });
+    assert.equal(result.reconciled.length, 2);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0], /^\/repos\/owner\/repo\/actions\/workflows\/deploy.yml\/runs\?/);
+    assert.match(calls[0], /branch=main/);
+    assert.equal(calls[1], '/repos/owner/repo/actions/runs/100');
+    assert.equal(broker.pendingEvent(broad.id).runId, '200');
+    assert.equal(broker.getSubscriptionRecord(broad.id).lastActivityRunId, '200');
+    assert.equal(broker.pendingEvent(exact.id).runId, '100');
+    assert.equal((await coordinator.reconcileStaleSubscriptions({ nowMs: nowMs + 60_000 })).reconciled.length, 0);
+    assert.equal(calls.length, 2, 'pending deliveries and interval prevent repeated requests');
+  } finally {
+    broker.flush();
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('lo sweep rispetta l intervallo minimo e salta i target non riconciliabili', async () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-sweep-interval-'));
   const originalFetch = globalThis.fetch;
@@ -161,7 +203,7 @@ test('lo sweep rispetta l intervallo minimo e salta i target non riconciliabili'
   const { broker, coordinator } = makeCoordinator(stateDirectory);
   try {
     broker.subscribe({ repo: 'owner/repo', resource: 'pull_request', number: 1, waitFor: ['merged'], ttlSeconds: 3600 });
-    broker.subscribe({ repo: 'owner/repo', resource: 'workflow_run', branch: 'main', waitFor: ['completed'], ttlSeconds: 3600 });
+    broker.subscribe({ repo: 'owner/repo', resource: 'workflow_run', waitFor: ['completed'], ttlSeconds: 3600 });
     const nowMs = Date.now();
     await coordinator.reconcileStaleSubscriptions({ nowMs, minIntervalMs: 600_000 });
     await coordinator.reconcileStaleSubscriptions({ nowMs: nowMs + 300_000, minIntervalMs: 600_000 });
