@@ -25,6 +25,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { matchesObservedProcess } from './agent-command-observer.mjs';
 import { shellExecutableText } from './shell-command-scanner.mjs';
 
 export const GUARD_VERSION = 1;
@@ -301,8 +302,11 @@ export function classifyCommand(command) {
     };
   }
 
-  if (/\b(?:vite\s+build|npm\s+run\s+build|npm\s+run\s+test|vitest\s+run|playwright\s+test)\b/.test(text)) {
-    const matchNeedle = text.includes('vite') ? 'vite' : text.includes('vitest') ? 'vitest' : text.includes('playwright') ? 'playwright' : 'node';
+  const vitestRun = /(?:^|[\s/])vitest(?:\.mjs)?\s+run\b/.test(text);
+  const viteBuild = /(?:^|[\s/])vite(?:\.js)?\s+build\b/.test(text);
+  const playwrightTest = /\bplaywright\s+test\b/.test(text);
+  if (vitestRun || viteBuild || playwrightTest || /\bnpm\s+run\s+(?:build|test)\b/.test(text)) {
+    const matchNeedle = vitestRun ? 'vitest' : viteBuild ? 'vite' : playwrightTest ? 'playwright' : 'node';
     return {
       kind: 'build-or-test',
       heavy: true,
@@ -580,13 +584,7 @@ function observerBaselinePids(classification) {
     if (!match) continue;
     const command = match[2];
     if (command.includes('agent-command-observer.mjs')) continue;
-    const matched = classification.kind === 'git-history'
-      ? Boolean(needle) && command.includes(needle) && /\/git\s+(?:log|rev-list|grep)\b/.test(command)
-      : classification.kind === 'typecheck'
-        ? /(?:^|[\s/])tsc(?:\.js)?(?:\s|$)/.test(command) || command.includes('/typescript/bin/tsc')
-        : classification.kind === 'sibling-gate'
-          ? command.includes(needle || 'check-sibling-patterns')
-          : command.includes(needle);
+    const matched = matchesObservedProcess({ pid: Number(match[1]), command }, classification.kind, needle, classification.text, new Set());
     if (matched) pids.push(match[1]);
   }
   return pids;
