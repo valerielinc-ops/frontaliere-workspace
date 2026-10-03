@@ -135,7 +135,8 @@ test('un git grep mirato resta serializzato ma non viene rifiutato come full sca
 test('classifica il typecheck diretto e riconosce il wrapper incrementale', () => {
   assert.equal(classifyCommand('npm exec tsc -- --noEmit').unbounded, true);
   assert.equal(classifyCommand('tsc --noEmit --incremental').unbounded, false);
-  assert.equal(classifyCommand('node "$WORKSPACE/bin/codex-typecheck.mjs" --changed').heavy, false);
+  assert.equal(classifyCommand('node "$WORKSPACE/bin/codex-typecheck.mjs" --changed').heavy, true);
+  assert.equal(classifyCommand('node "$WORKSPACE/bin/codex-typecheck.mjs" --changed').unbounded, false);
 });
 
 test('la pressione memoria blocca sotto la soglia e lascia passare sopra', () => {
