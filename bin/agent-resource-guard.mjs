@@ -32,6 +32,19 @@ export const GUARD_VERSION = 1;
 export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_PRESSURE_FREE_PERCENT = 8;
 export const DEFAULT_SWAP_USED_RATIO = 0.85;
+// La quota di swap OCCUPATO non misura la pressione di adesso: su macOS le
+// pagine gia' scritte nello swap ci restano finche' il processo che le
+// possiede non le rilegge o non esce, e il file di swap cresce a gradini. Il
+// 2026-10-03 lo swap era al 89% (3,66 GB su 4) con il 71% di memoria libera e
+// il kernel a livello di pressione 1 (normale): la guardia rifiutava ogni test
+// di ogni agente, e chi aspettava sotto l'82% poteva aspettare per ore. Lo
+// swap pieno conta quindi solo se un segnale di pressione ATTUALE lo conferma:
+// il kernel in avviso o critico, oppure la memoria libera sotto questa soglia.
+// Senza segnale del kernel (altri sistemi, sysctl illeggibile) resta la regola
+// di prima, a tutela.
+export const DEFAULT_SWAP_CORROBORATION_FREE_PERCENT = 25;
+// `kern.memorystatus_vm_pressure_level` su macOS: 1 normale, 2 avviso, 4 critico.
+export const KERNEL_PRESSURE_WARN_LEVEL = 2;
 // I comandi pesanti durano poco (2026-10-02, 24h: p90 40s, massimo 172s),
 // ma il lease registrava solo il PID dell'hook, morto subito: un PostToolUse
 // mancato teneva fermi tutti gli agenti fino al TTL di 2 ore. Ora il lease
@@ -367,6 +380,10 @@ export function readHostSnapshot() {
   const swapUsedMatch = swapOutput.match(/used\s*=\s*([\d.]+\s*[KMGT]?B?)/i);
   const swapTotalBytes = parseSize(swapTotalMatch?.[1]);
   const swapUsedBytes = parseSize(swapUsedMatch?.[1]);
+  const pressureLevelOutput = process.platform === 'darwin'
+    ? runQuiet('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']).trim()
+    : '';
+  const pressureLevel = /^\d+$/.test(pressureLevelOutput) ? Number(pressureLevelOutput) : undefined;
 
   let processCount;
   const ps = runQuiet('ps', ['-A', '-o', 'pid=']);
@@ -380,6 +397,7 @@ export function readHostSnapshot() {
     totalBytes,
     swapUsedBytes,
     swapTotalBytes,
+    pressureLevel,
     processCount,
   };
 }
@@ -387,10 +405,21 @@ export function readHostSnapshot() {
 export function pressureDecision(snapshot, options = {}) {
   const freeThreshold = numberFromEnv('FRONTALIERE_RESOURCE_FREE_PERCENT', options.freePercent ?? DEFAULT_PRESSURE_FREE_PERCENT);
   const swapRatioThreshold = numberFromEnv('FRONTALIERE_RESOURCE_SWAP_RATIO', options.swapRatio ?? DEFAULT_SWAP_USED_RATIO);
+  const corroborationFree = numberFromEnv(
+    'FRONTALIERE_RESOURCE_SWAP_CORROBORATION_FREE_PERCENT',
+    options.swapCorroborationFreePercent ?? DEFAULT_SWAP_CORROBORATION_FREE_PERCENT,
+  );
   if (Number.isFinite(snapshot?.freePercent) && snapshot.freePercent <= freeThreshold) {
     return {
       blocked: true,
       reason: `memoria libera ${snapshot.freePercent.toFixed(1)}% (soglia ${freeThreshold}%)`,
+    };
+  }
+  const kernelLevel = Number.isFinite(snapshot?.pressureLevel) ? snapshot.pressureLevel : undefined;
+  if (kernelLevel !== undefined && kernelLevel >= KERNEL_PRESSURE_WARN_LEVEL) {
+    return {
+      blocked: true,
+      reason: `pressione memoria del kernel a livello ${kernelLevel} (avviso da ${KERNEL_PRESSURE_WARN_LEVEL})`,
     };
   }
   if (
@@ -400,7 +429,12 @@ export function pressureDecision(snapshot, options = {}) {
     snapshot.swapUsedBytes / snapshot.swapTotalBytes >= swapRatioThreshold
   ) {
     const ratio = (snapshot.swapUsedBytes / snapshot.swapTotalBytes) * 100;
-    return { blocked: true, reason: `swap utilizzato ${ratio.toFixed(1)}% (soglia ${(swapRatioThreshold * 100).toFixed(0)}%)` };
+    // Con il kernel a livello normale lo swap pieno e' memoria gia' scaricata,
+    // non pressione: conta solo se anche la memoria libera e' scarsa.
+    const freeIsLow = Number.isFinite(snapshot?.freePercent) && snapshot.freePercent < corroborationFree;
+    if (kernelLevel === undefined || freeIsLow) {
+      return { blocked: true, reason: `swap utilizzato ${ratio.toFixed(1)}% (soglia ${(swapRatioThreshold * 100).toFixed(0)}%)` };
+    }
   }
   return { blocked: false };
 }
