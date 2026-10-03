@@ -185,7 +185,9 @@ export function baseBranchMovement(eventName, payload) {
 
 function reconcilableSubscription(subscription) {
   if (subscription.resource === 'pull_request') return Boolean(subscription.number);
-  if (subscription.resource === 'workflow_run') return Boolean(subscription.runId);
+  if (subscription.resource === 'workflow_run') {
+    return Boolean(subscription.runId || subscription.workflow || subscription.branch || subscription.sha || subscription.followLatest);
+  }
   if (subscription.resource === 'deployment') return Boolean(subscription.deploymentId);
   return false;
 }
