@@ -318,7 +318,9 @@ function subscriptionIsStalled(subscription, nowMs) {
   return subscription.pending.length === 0
     && staleSinceMs !== null
     && staleSinceMs >= subscription.stalledAfterMs
-    && !TERMINAL_STATES.has(subscription.lastActivityState);
+    && (!TERMINAL_STATES.has(subscription.lastActivityState)
+      || (subscription.followLatest && subscription.resource === 'workflow_run'
+        && subscription.lastActivityState === 'cancelled'));
 }
 
 function eventIsTerminal(event) {
@@ -444,6 +446,7 @@ function normalizeSubscriptionSpec(spec, nowMs) {
     lastActivityState: null,
     lastActivityAction: null,
     lastActivityRunId: null,
+    lastActivityRunCreatedAt: null,
     expiresAtMs,
     expiresAt: new Date(expiresAtMs).toISOString(),
     pending: [],
@@ -515,6 +518,7 @@ function subscriptionPublic(
     lastActivityState: subscription.lastActivityState,
     lastActivityAction: subscription.lastActivityAction,
     lastActivityRunId: subscription.lastActivityRunId,
+    lastActivityRunCreatedAt: subscription.lastActivityRunCreatedAt || null,
     staleSinceMs,
     stalledAfterMs: subscription.stalledAfterMs,
     stalled,
@@ -620,6 +624,7 @@ function storedSubscription(value) {
     lastActivityRunId: value.lastActivityRunId === null || value.lastActivityRunId === undefined
       ? null
       : String(value.lastActivityRunId),
+    lastActivityRunCreatedAt: normalizedString(value.lastActivityRunCreatedAt),
     lastRenewedAt: normalizedString(value.lastRenewedAt),
     expiresAtMs,
     expiresAt: new Date(expiresAtMs).toISOString(),
@@ -743,6 +748,7 @@ function normalizedEvent({
   number = null,
   pullRequestNumbers = [],
   runId = null,
+  runCreatedAt = null,
   workflow = null,
   workflowId = null,
   workflowPath = null,
@@ -772,6 +778,7 @@ function normalizedEvent({
     number,
     pullRequestNumbers: unique(pullRequestNumbers.map((value) => String(value))),
     runId: runId === null || runId === undefined ? null : String(runId),
+    runCreatedAt: normalizedString(runCreatedAt),
     workflow: normalizedString(workflow),
     workflowId: workflowId === null || workflowId === undefined ? null : String(workflowId),
     workflowPath: normalizedString(workflowPath),
@@ -916,6 +923,7 @@ export function normalizeWebhookEvent({ eventName, deliveryId, payload, received
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: run.id,
+      runCreatedAt: run.created_at || null,
       // `workflow_run.name` is the run title. With `run-name` it holds the
       // workflow name only on `requested` (28-09: `tests` became `Code checks
       // and review · PR #10436 · synchronize`), so a name selector matched the
@@ -1057,6 +1065,25 @@ export function workflowSelectorMatchesRun(run, selector) {
   return candidates.some((candidate) => expected.has(candidate));
 }
 
+// Delivery/reconciliation time is not run creation time. An exact-run recovery
+// can arrive after a newer run and is broadcast to broad workflow observers too.
+function compareFollowLatestRun(event, subscription) {
+  if (!subscription.followLatest || subscription.resource !== 'workflow_run'
+    || !event.runId || !subscription.lastActivityRunId
+    || String(event.runId) === String(subscription.lastActivityRunId)) return 0;
+  const incoming = Date.parse(event.runCreatedAt || '');
+  const previous = Date.parse(subscription.lastActivityRunCreatedAt || '');
+  if (Number.isFinite(incoming) && Number.isFinite(previous) && incoming !== previous) {
+    return incoming > previous ? 1 : -1;
+  }
+  // Existing snapshots lack created_at. GitHub's increasing numeric run IDs
+  // preserve the high-water mark until a timestamped delivery refreshes it.
+  if (/^\d+$/.test(String(event.runId)) && /^\d+$/.test(String(subscription.lastActivityRunId))) {
+    return BigInt(event.runId) > BigInt(subscription.lastActivityRunId) ? 1 : -1;
+  }
+  return 0;
+}
+
 export function eventMatchesSubscriptionTarget(event, subscription) {
   if (!event || !subscription || event.repo !== subscription.repo) return false;
   const resources = event.resources || [event.resource];
@@ -1144,6 +1171,7 @@ export function normalizeReconciliationEvent({ subscription, data, checkedAt = n
       number: pullRequestNumbers.length === 1 ? pullRequestNumbers[0] : null,
       pullRequestNumbers,
       runId: data.id || data.run_id || subscription.runId,
+      runCreatedAt: data.created_at || null,
       // The REST run endpoint may expose `name` as the run display title,
       // while webhook workflow_run payloads expose the workflow selector.
       // Preserve the canonical selector only after the run is known to match
@@ -1310,21 +1338,30 @@ export class GitHubEventBroker {
         ...(subscription.sharedAgentIds || []),
         subscription.agentId,
       ]);
-      existing.pending = [...existing.pending, ...subscription.pending]
-        .filter((event, index, events) => events.findIndex((candidate) => candidate.id === event.id) === index)
-        .slice(-32);
       if (subscription.expiresAtMs > existing.expiresAtMs) {
         existing.expiresAtMs = subscription.expiresAtMs;
         existing.expiresAt = subscription.expiresAt;
       }
       const existingActivityMs = Date.parse(existing.lastActivityAt || '');
       const legacyActivityMs = Date.parse(subscription.lastActivityAt || '');
-      if (!Number.isFinite(existingActivityMs) || legacyActivityMs > existingActivityMs) {
-        existing.lastActivityAt = subscription.lastActivityAt;
+      const runOrder = compareFollowLatestRun({
+        runId: subscription.lastActivityRunId,
+        runCreatedAt: subscription.lastActivityRunCreatedAt,
+      }, existing);
+      if (runOrder >= 0 && (runOrder > 0 || !Number.isFinite(existingActivityMs) || legacyActivityMs > existingActivityMs)) {
+        existing.lastActivityAt = Number.isFinite(existingActivityMs) && Number.isFinite(legacyActivityMs)
+          ? new Date(Math.max(existingActivityMs, legacyActivityMs)).toISOString()
+          : subscription.lastActivityAt;
         existing.lastActivityState = subscription.lastActivityState;
         existing.lastActivityAction = subscription.lastActivityAction;
         existing.lastActivityRunId = subscription.lastActivityRunId;
+        existing.lastActivityRunCreatedAt = subscription.lastActivityRunCreatedAt || null;
       }
+      // Preserve current pending deliveries, but do not import stale legacy
+      // completions behind the selected follow-latest run's high-water mark.
+      existing.pending = [...existing.pending, ...subscription.pending.filter((event) => compareFollowLatestRun(event, existing) >= 0)]
+        .filter((event, index, events) => events.findIndex((candidate) => candidate.id === event.id) === index)
+        .slice(-32);
     }
     const seenById = new Map(current.seenDeliveries.map((delivery) => [delivery.id, delivery]));
     for (const delivery of legacy.seenDeliveries) seenById.set(delivery.id, delivery);
@@ -2109,22 +2146,28 @@ export class GitHubEventBroker {
       // prune above: it waits for a late listener, not for new events.
       if (subscription.expiresAtMs <= recordedAtMs) continue;
       if (!eventMatchesSubscriptionTarget(event, subscription)) continue;
+      const runOrder = compareFollowLatestRun(event, subscription);
+      if (runOrder < 0) continue;
       targetMatchedSubscriptionIds.push(subscription.id);
       const receivedAtMs = Date.parse(event.receivedAt || '');
       const previousActivityMs = Date.parse(subscription.lastActivityAt || '');
-      if (!Number.isFinite(previousActivityMs) || !Number.isFinite(receivedAtMs) || receivedAtMs >= previousActivityMs) {
+      if (runOrder > 0 || !Number.isFinite(previousActivityMs) || !Number.isFinite(receivedAtMs) || receivedAtMs >= previousActivityMs) {
         const activityAt = Number.isFinite(receivedAtMs)
-          ? new Date(receivedAtMs).toISOString()
+          ? new Date(Math.max(receivedAtMs, Number.isFinite(previousActivityMs) ? previousActivityMs : receivedAtMs)).toISOString()
           : new Date(this.now()).toISOString();
         const activityChanged = subscription.lastActivityAt !== activityAt
           || subscription.lastActivityState !== event.state
           || subscription.lastActivityAction !== event.action
-          || subscription.lastActivityRunId !== event.runId;
+          || subscription.lastActivityRunId !== event.runId
+          || (event.runCreatedAt && subscription.lastActivityRunCreatedAt !== event.runCreatedAt);
         if (activityChanged) {
           subscription.lastActivityAt = activityAt;
           subscription.lastActivityState = event.state;
           subscription.lastActivityAction = event.action;
+          const sameRun = subscription.lastActivityRunId === event.runId;
           subscription.lastActivityRunId = event.runId;
+          subscription.lastActivityRunCreatedAt = event.runCreatedAt
+            || (sameRun ? subscription.lastActivityRunCreatedAt : null);
         }
       }
       if (!eventMatchesSubscription(event, subscription)) continue;
