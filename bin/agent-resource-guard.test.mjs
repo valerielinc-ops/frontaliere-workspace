@@ -145,6 +145,32 @@ test('la pressione memoria blocca sotto la soglia e lascia passare sopra', () =>
   assert.equal(pressureDecision({ freePercent: 20, swapUsedBytes: 9, swapTotalBytes: 10 }).blocked, true);
 });
 
+// Il caso misurato il 2026-10-03: swap occupato all'89% (3,66 GB su 4) ma 71%
+// di memoria libera e kernel a livello 1. Lo swap pieno era memoria gia'
+// scaricata, non pressione, e bloccava ogni test di ogni agente.
+test('lo swap pieno non blocca quando il kernel dice normale e la memoria libera abbonda', () => {
+  const stale = { freePercent: 71, swapUsedBytes: 3660, swapTotalBytes: 4096, pressureLevel: 1 };
+  assert.equal(pressureDecision(stale).blocked, false);
+});
+
+test('lo swap pieno blocca ancora quando un segnale di pressione attuale lo conferma', () => {
+  // Kernel in avviso o critico: blocca anche con memoria libera e swap vuoto.
+  assert.equal(pressureDecision({ freePercent: 71, swapUsedBytes: 9, swapTotalBytes: 10, pressureLevel: 2 }).blocked, true);
+  assert.equal(pressureDecision({ freePercent: 71, swapUsedBytes: 1, swapTotalBytes: 10, pressureLevel: 4 }).blocked, true);
+  // Kernel normale ma memoria libera sotto la soglia di conferma.
+  assert.equal(pressureDecision({ freePercent: 20, swapUsedBytes: 9, swapTotalBytes: 10, pressureLevel: 1 }).blocked, true);
+  // Il motivo nomina il segnale che ha deciso.
+  assert.match(pressureDecision({ freePercent: 71, swapUsedBytes: 1, swapTotalBytes: 10, pressureLevel: 4 }).reason, /kernel/);
+  assert.match(pressureDecision({ freePercent: 20, swapUsedBytes: 9, swapTotalBytes: 10, pressureLevel: 1 }).reason, /swap/);
+});
+
+test('senza il segnale del kernel lo swap pieno resta un blocco, come prima', () => {
+  assert.equal(pressureDecision({ freePercent: 71, swapUsedBytes: 9, swapTotalBytes: 10 }).blocked, true);
+  assert.equal(pressureDecision({ freePercent: 71, swapUsedBytes: 9, swapTotalBytes: 10, pressureLevel: Number.NaN }).blocked, true);
+  // La memoria libera sotto la soglia principale blocca qualunque cosa dica il kernel.
+  assert.equal(pressureDecision({ freePercent: 7, swapUsedBytes: 0, swapTotalBytes: 10, pressureLevel: 1 }).blocked, true);
+});
+
 test('il lease atomico ammette un solo job pesante', () => {
   const runtime = mkdtempSync(path.join(os.tmpdir(), 'frontaliere-guard-test-'));
   try {
