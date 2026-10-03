@@ -180,7 +180,7 @@ test('archivia solo gli orfani certi, dopo la grace di avvio', () => {
   try {
     const subscribe = (spec) => broker.subscribe({ repo: 'owner/repo', ttlSeconds: 7 * 24 * 3_600, ...spec }).id;
     const idleOld = subscribe({ resource: 'pull_request', number: 10, waitFor: ['merged'] });
-    const idleUnreconcilable = subscribe({ resource: 'workflow_run', branch: 'main', waitFor: ['completed'] });
+    const idleUnreconcilable = subscribe({ resource: 'workflow_run', waitFor: ['completed'] });
     const live = subscribe({ resource: 'pull_request', number: 11, waitFor: ['merged'] });
     const expiringSoon = subscribe({ resource: 'pull_request', number: 14, waitFor: ['merged'], ttlSeconds: 3_600 });
     clock.nowMs = nowMs - 7.5 * HOUR;
