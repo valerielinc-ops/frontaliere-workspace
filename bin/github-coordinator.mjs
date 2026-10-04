@@ -1423,7 +1423,9 @@ export function graphqlResponseError(body, status) {
   const messages = parsed.errors
     .map((error) => (typeof error === 'string' ? error : error && typeof error === 'object' ? error.message : null))
     .filter((message) => typeof message === 'string');
-  return messages.length > 0 ? messages.join('\n') : null;
+  if (messages.length > 0) return messages.join('\n');
+  // Fail closed: a non-empty `errors` without readable messages is still an error.
+  return parsed.errors.length > 0 ? 'GraphQL errors' : null;
 }
 
 /**

@@ -128,6 +128,7 @@ test('una risposta GraphQL senza errors resta exit 0 con --jq applicato', async 
   assert.equal(result.stdout, 'frontaliere-si-o-no\n');
   assert.equal(graphqlResponseError('{"data":{},"errors":[]}', 200), null);
   assert.equal(graphqlResponseError('not json', 200), null);
+  assert.equal(graphqlResponseError('{"errors":[{},{}]}', 200), 'GraphQL errors');
 });
 
 test('una risposta REST con un campo errors non cambia l\'uscita', async () => {
