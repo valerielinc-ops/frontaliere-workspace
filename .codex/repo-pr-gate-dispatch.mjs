@@ -30,6 +30,7 @@ const KNOWN_REPOSITORIES = new Map([
 const REPO_FLAG_RE = /(?:^|\s)(?:--repo|-R)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/g;
 const REPO_FLAG_TEST_RE = /(?:^|\s)(?:--repo|-R)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/;
 const COMMAND_CWD_RE = /(?:^|&&|;|\|\||\n|["'])\s*cd(?:\s+--)?\s+(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|]+))\s*&&/g;
+const HEAD_FLAG_RE = /(?:^|\s)(?:--head|-H)(?:=|\s+)(?:"([^"\n]+)"|'([^'\n]+)'|([^\s;&|]+))/;
 
 /**
  * @param {string} command
@@ -117,15 +118,74 @@ export function literalCommandDirectory(command, baseCwd) {
 }
 
 /**
+ * The branch named by `gh pr create --head <branch>` (or `-H`), without the
+ * optional `owner:` prefix. Undefined when absent or not a literal.
+ *
+ * @param {string} command
+ * @returns {string|undefined}
+ */
+export function headBranch(command) {
+  const after = String(command ?? '').split(/\bgh\s+pr\s+create\b/u).slice(1).join(' ');
+  const match = after.match(HEAD_FLAG_RE);
+  if (!match) return undefined;
+  let value = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+  if (!value || /[$`]/.test(value)) return undefined;
+  const owner = value.indexOf(':');
+  if (owner >= 0) value = value.slice(owner + 1);
+  return value || undefined;
+}
+
+/**
+ * The worktree of `repositoryRoot` in which `branch` is checked out, if any.
+ *
+ * @param {string} repositoryRoot
+ * @param {string|undefined} branch
+ * @returns {string|undefined}
+ */
+export function branchWorktree(repositoryRoot, branch) {
+  if (!branch) return undefined;
+  const listing = gitValue(repositoryRoot, ['worktree', 'list', '--porcelain']);
+  let current;
+  for (const line of listing.split('\n')) {
+    if (line.startsWith('worktree ')) current = line.slice('worktree '.length);
+    else if (line === `branch refs/heads/${branch}` && current) return current;
+  }
+  return undefined;
+}
+
+/**
+ * The `hooks-main` worktree kept on origin/main by `bin/site-hooks-refresh`;
+ * `bin/hook-dispatch.mjs` (siteHook) already prefers it for the site's hooks.
+ *
+ * @param {string} repositoryRoot
+ * @returns {string}
+ */
+export function hooksMainWorktree(repositoryRoot) {
+  return join(repositoryRoot, '.claude', 'worktrees', 'hooks-main');
+}
+
+/**
  * Prefer a worktree named by the command/payload, but never route a gate to an
  * unrelated Git repository. The old dispatcher always executed the clean
  * main-checkout copy of the gate, so a worktree proposing a newer gate was
  * judged by stale code and saw a different candidate set.
+ *
+ * Order (2026-10-04): literal `cd`, payload cwd, the worktree where the
+ * `--head` branch is checked out, `hooks-main`, and only then the main
+ * checkout. A sub-agent that runs `gh pr create --head <branch>` without a
+ * `cd` from the workspace root used to land on the main checkout, which sits
+ * on another session's branch: its gate and sibling checker were weeks behind
+ * origin/main and blocked on candidates that the proposed code did not have.
  */
 export function repositoryCheckout(repositoryRoot, command, payloadCwd) {
   const baseCwd = isDirectory(payloadCwd) ? payloadCwd : repositoryRoot;
-  const candidates = [literalCommandDirectory(command, baseCwd), payloadCwd, repositoryRoot]
-    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  const candidates = [
+    literalCommandDirectory(command, baseCwd),
+    payloadCwd,
+    branchWorktree(repositoryRoot, headBranch(command)),
+    hooksMainWorktree(repositoryRoot),
+    repositoryRoot,
+  ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
   for (const candidate of candidates) {
     const gate = join(candidate, 'scripts', 'ci', 'sibling-check-gate.mjs');
     if (existsSync(gate) && sameGitRepository(candidate, repositoryRoot)) return candidate;
@@ -149,6 +209,24 @@ function parsePayload(rawPayload) {
   }
 }
 
+/**
+ * The checkout whose sibling gate judges this command, or undefined when the
+ * command targets a repository this dispatcher does not gate. Shared with
+ * bin/pr-gate-cache.mjs, whose cache key must follow the same gate.
+ *
+ * @param {string} command
+ * @param {string|undefined} payloadCwd
+ * @param {string} workspaceRoot
+ * @returns {string|undefined}
+ */
+export function gateCheckout(command, payloadCwd, workspaceRoot = ROOT) {
+  const repository = explicitRepository(command);
+  if (hasExplicitRepositoryFlag(command) && repository === undefined) return undefined;
+  const configuredRoot = repositoryDirectory(repository, workspaceRoot);
+  if (!configuredRoot) return undefined;
+  return repositoryCheckout(configuredRoot, command, payloadCwd);
+}
+
 function main() {
   let rawPayload;
   try {
@@ -160,12 +238,8 @@ function main() {
   const parsed = parsePayload(rawPayload.trim());
   if (!parsed || !hasPullRequestCreationCommand(parsed.command)) process.exit(0);
 
-  const workspaceRoot = process.env.WORKSPACE || ROOT;
-  const repository = explicitRepository(parsed.command);
-  if (hasExplicitRepositoryFlag(parsed.command) && repository === undefined) process.exit(0);
-  const configuredRoot = repositoryDirectory(repository, workspaceRoot);
-  if (!configuredRoot) process.exit(0);
-  const repositoryRoot = repositoryCheckout(configuredRoot, parsed.command, parsed.cwd);
+  const repositoryRoot = gateCheckout(parsed.command, parsed.cwd, process.env.WORKSPACE || ROOT);
+  if (!repositoryRoot) process.exit(0);
   const gate = join(repositoryRoot, 'scripts', 'ci', 'sibling-check-gate.mjs');
 
   // A child repository without this repository-specific gate must not inherit
