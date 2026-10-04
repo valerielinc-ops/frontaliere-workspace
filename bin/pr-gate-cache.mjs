@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { shellExecutableText } from './shell-command-scanner.mjs';
+import { gateCheckout, headBranch } from '../.codex/repo-pr-gate-dispatch.mjs';
 
 const THIS_FILE = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(path.dirname(THIS_FILE), '..');
@@ -70,14 +71,42 @@ function bodyFileFromCommand(command, cwd) {
   return path.resolve(cwd, match[1] ?? match[2] ?? match[3]);
 }
 
+function branchCommit(checkout, branch) {
+  if (!checkout || !branch) return '';
+  try {
+    return execFileSync('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
 export function cacheContext({ command, cwd, workspace = ROOT, dispatcher, gateFiles = [] }) {
   const resolvedCwd = path.resolve(cwd || workspace);
   const refs = gitRefs(resolvedCwd);
   const bodyFile = bodyFileFromCommand(command, resolvedCwd);
+  // The checkout whose gate the dispatcher will run (the --head worktree,
+  // hooks-main, ...), not always the main checkout: the key must change when
+  // that gate or checker changes.
+  let checkout;
+  try {
+    checkout = gateCheckout(command, cwd, workspace);
+  } catch {
+    checkout = undefined;
+  }
+  const site = path.join(workspace, 'frontaliere-si-o-no');
   const files = [
     dispatcher,
-    path.join(workspace, 'frontaliere-si-o-no', 'scripts', 'ci', 'sibling-check-gate.mjs'),
-    path.join(workspace, 'frontaliere-si-o-no', 'scripts', 'ci', 'check-sibling-patterns.mjs'),
+    path.join(site, 'scripts', 'ci', 'sibling-check-gate.mjs'),
+    path.join(site, 'scripts', 'ci', 'check-sibling-patterns.mjs'),
+    ...(checkout && checkout !== site
+      ? [
+          path.join(checkout, 'scripts', 'ci', 'sibling-check-gate.mjs'),
+          path.join(checkout, 'scripts', 'ci', 'check-sibling-patterns.mjs'),
+        ]
+      : []),
     ...gateFiles,
   ].filter(Boolean);
   return {
@@ -85,6 +114,10 @@ export function cacheContext({ command, cwd, workspace = ROOT, dispatcher, gateF
     cwd: resolvedCwd,
     head: refs.head,
     base: refs.base,
+    // A command run from the workspace root names the judged branch only via
+    // --head: `head` above is then the root's HEAD. Without the branch's own
+    // commit a new commit on it would be served the previous verdict.
+    judgedCommit: branchCommit(checkout, headBranch(command)),
     body: bodyFile ? statSignature(bodyFile) : 'inline-body',
     code: files.map(statSignature).sort(),
   };
