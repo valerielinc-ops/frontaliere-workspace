@@ -1,8 +1,33 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+const MANIFEST_REL = 'scripts/ci/loop-sync-manifest.json';
+// Il manifest che decide e' quello di `origin/main` del corpus, lo stesso che
+// usano CI e trasporto. Il checkout condiviso `frontaliere-articles/` non si
+// aggiorna da solo: il 2026-10-04 era fermo al 2026-09-20, 925 commit dietro,
+// e su un gemello `identical` aggiunto dopo rispondeva «nessun vincolo».
+export const MANIFEST_GIT_REF = 'origin/main';
+
+function defaultGitShow(repoRoot, spec) {
+  return execFileSync('git', ['-C', repoRoot, 'show', spec], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000,
+  });
+}
+
+function defaultGitTip(repoRoot, ref) {
+  return execFileSync('git', ['-C', repoRoot, 'log', '-1', '--format=%h %cs', ref], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000,
+  }).trim();
+}
 
 export const REPO_NAMES = Object.freeze({
   site: 'frontaliere-si-o-no',
@@ -132,7 +157,12 @@ export function createManifestIndex(entries) {
   return { byRepo, allByRepo, warnings };
 }
 
-export function loadManifest({ workspaceRoot = findWorkspaceRoot(), manifestPath } = {}) {
+export function loadManifest({
+  workspaceRoot = findWorkspaceRoot(),
+  manifestPath,
+  gitShow = defaultGitShow,
+  gitTip = defaultGitTip,
+} = {}) {
   const corpusRoot = path.join(workspaceRoot, REPO_NAMES.corpus);
   if (!isDirectory(corpusRoot)) {
     throw new WhereToFixError(
@@ -141,19 +171,41 @@ export function loadManifest({ workspaceRoot = findWorkspaceRoot(), manifestPath
     );
   }
 
-  const resolvedManifestPath = manifestPath || process.env.LOOP_SYNC_MANIFEST_PATH || path.join(
-    corpusRoot,
-    'scripts/ci/loop-sync-manifest.json',
-  );
-
+  // Un path esplicito (argomento o env) vince: e' una scelta di chi chiama.
+  // Altrimenti si legge `origin/main` senza fare rete; la copia di lavoro e'
+  // solo il ripiego, dichiarato, quando il ref non e' leggibile.
+  const explicitPath = manifestPath || process.env.LOOP_SYNC_MANIFEST_PATH;
+  const workingCopyPath = path.join(corpusRoot, MANIFEST_REL);
+  const loadWarnings = [];
+  let resolvedManifestPath = explicitPath || workingCopyPath;
+  let source = explicitPath ? `file ${explicitPath}` : null;
   let raw;
-  try {
-    raw = fs.readFileSync(resolvedManifestPath, 'utf8');
-  } catch (error) {
-    throw new WhereToFixError(
-      'MANIFEST_UNREADABLE',
-      `Manifest non leggibile: ${resolvedManifestPath} (${error.code || error.message}).`,
-    );
+  if (!explicitPath) {
+    try {
+      raw = gitShow(corpusRoot, `${MANIFEST_GIT_REF}:${MANIFEST_REL}`);
+      resolvedManifestPath = `${corpusRoot}@${MANIFEST_GIT_REF}:${MANIFEST_REL}`;
+      let tip = '';
+      try { tip = gitTip(corpusRoot, MANIFEST_GIT_REF); } catch { /* solo informativo */ }
+      source = `${REPO_NAMES.corpus} ${MANIFEST_GIT_REF}${tip ? ` @ ${tip}` : ''}`;
+    } catch {
+      raw = undefined;
+      loadWarnings.push(
+        `${MANIFEST_GIT_REF} del corpus non leggibile: uso la copia di lavoro ${workingCopyPath}, ` +
+        `che puo' essere vecchia (git -C ${REPO_NAMES.corpus} fetch origin main).`,
+      );
+    }
+  }
+
+  if (raw === undefined) {
+    try {
+      raw = fs.readFileSync(resolvedManifestPath, 'utf8');
+      source ??= `copia di lavoro ${resolvedManifestPath}`;
+    } catch (error) {
+      throw new WhereToFixError(
+        'MANIFEST_UNREADABLE',
+        `Manifest non leggibile: ${resolvedManifestPath} (${error.code || error.message}).`,
+      );
+    }
   }
 
   let parsed;
@@ -170,10 +222,13 @@ export function loadManifest({ workspaceRoot = findWorkspaceRoot(), manifestPath
     throw new WhereToFixError('MANIFEST_SHAPE', `Manifest senza array files: ${resolvedManifestPath}.`);
   }
 
+  const index = createManifestIndex(parsed.files);
+  index.warnings = [...loadWarnings, ...(index.warnings || [])];
   return {
     manifestPath: resolvedManifestPath,
+    source,
     entries: parsed.files,
-    index: createManifestIndex(parsed.files),
+    index,
   };
 }
 
