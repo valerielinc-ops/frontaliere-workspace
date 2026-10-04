@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { connect } from 'node:net';
 import test from 'node:test';
 
 import { createGitHubWebhookReceiver, stamp } from '../bin/github-webhook-receiver.mjs';
@@ -30,7 +31,7 @@ async function withReceiver({ ingest }, run) {
       },
       body: JSON.stringify({ secret: BODY_SENTINEL }),
     });
-    await run({ post, lines });
+    await run({ post, lines, port });
   } finally {
     await new Promise((resolvePromise) => receiver.close(resolvePromise));
   }
@@ -54,6 +55,7 @@ test('a 503 from an unreachable coordinator leaves one timestamped webhook_respo
     assert.equal(line.identity, 'default');
     assert.equal(line.status, 503);
     assert.equal(line.error, 'ECONNREFUSED');
+    assert.equal(line.phase, 'ingest');
     assert.equal(typeof line.durationMs, 'number');
     assert.ok(line.durationMs >= 0);
     assert.match(line.ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
@@ -105,8 +107,57 @@ test('the log line carries no payload, signature or delivery id', async () => {
     }
     assert.deepEqual(
       Object.keys(lines[0]).sort(),
-      ['component', 'durationMs', 'error', 'event', 'identity', 'status', 'ts'],
+      ['component', 'durationMs', 'error', 'event', 'identity', 'phase', 'status', 'ts'],
     );
+  });
+});
+
+test('an error without a code is logged by class name, never by its message', async () => {
+  const ingest = async () => {
+    throw new Error(`github coordinator unavailable near ${BODY_SENTINEL}`);
+  };
+  await withReceiver({ ingest }, async ({ post, lines }) => {
+    const response = await post();
+    assert.equal(response.status, 503);
+    await response.text();
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].error, 'uncoded:Error');
+    assert.equal(JSON.stringify(lines[0]).includes(BODY_SENTINEL), false);
+  });
+});
+
+test('a client abort while the body is read is logged with phase read_body', async () => {
+  let ingested = false;
+  const ingest = async () => {
+    ingested = true;
+    return { ok: true };
+  };
+  await withReceiver({ ingest }, async ({ lines, port }) => {
+    await new Promise((resolvePromise, rejectPromise) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write([
+          'POST /github/webhook HTTP/1.1',
+          'host: 127.0.0.1',
+          'content-type: application/json',
+          'content-length: 1000',
+          '',
+          '{"partial":',
+        ].join('\r\n'));
+        setTimeout(() => socket.destroy(), 50);
+      });
+      socket.on('error', () => {});
+      socket.on('close', resolvePromise);
+      socket.setTimeout(5_000, () => rejectPromise(new Error('socket timeout')));
+    });
+    const deadline = Date.now() + 5_000;
+    while (lines.length === 0 && Date.now() < deadline) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    assert.equal(ingested, false);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].status, 503);
+    assert.equal(lines[0].phase, 'read_body');
+    assert.equal(lines[0].error, 'ECONNRESET');
   });
 });
 

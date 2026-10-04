@@ -80,6 +80,17 @@ function defaultLog(entry) {
  * delivery the coordinator rejected. 202, 401, 404 and 413 are the volume and
  * the public noise of the ingress.
  */
+/**
+ * The error label kept in the log. A code is a fixed identifier; a message
+ * may one day quote the payload (it is still returned in the HTTP body), so an
+ * error without a code is logged only by its class name.
+ */
+function logErrorLabel(error) {
+  if (error?.code) return String(error.code);
+  const name = error instanceof Error ? error.name : typeof error;
+  return `uncoded:${name || 'unknown'}`;
+}
+
 function shouldLogWebhookResponse(status) {
   return status >= 500 || status === LOGGED_CLIENT_ERROR_STATUS;
 }
@@ -308,12 +319,16 @@ export function createGitHubWebhookReceiver({
   return createServer(async (request, response) => {
     onRequestStart();
     const startedAt = now();
+    // Which step failed: a client/tunnel abort while the body is read and a
+    // reset of the coordinator socket both surface as ECONNRESET -> 503.
+    let phase = 'read_body';
     try {
       if (request.method !== 'POST' || request.url?.split('?')[0] !== path) {
         jsonResponse(response, 404, { ok: false, error: 'not_found' });
         return;
       }
       const rawBody = await readBody(request);
+      phase = 'ingest';
       const result = await ingest({
         eventName: header(request, 'x-github-event'),
         deliveryId: header(request, 'x-github-delivery'),
@@ -343,7 +358,8 @@ export function createGitHubWebhookReceiver({
             event: 'webhook_response',
             identity: identity ?? null,
             status,
-            error: errorLabel || 'unknown',
+            phase,
+            error: logErrorLabel(error),
             durationMs: Math.max(0, finishedAt - startedAt),
           });
         } catch {
