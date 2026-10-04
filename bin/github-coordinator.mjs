@@ -1364,19 +1364,68 @@ function cacheResponse(entry, cacheState) {
   };
 }
 
+const UNSUPPORTED_FIELD = Symbol('unsupported gh api field');
+
+// `-F` like gh's magicFieldValue: only `true`/`false`/`null` and integers
+// (strconv.Atoi) change type; floats and JSON stay strings. `@file`/`@-` and
+// the `{owner}`/`{repo}`/`{branch}` placeholders depend on the caller's cwd
+// and stdin, so they go to the real CLI instead of being sent literally.
 function fieldValue(raw, typed) {
   if (!typed) return raw;
+  if (raw.startsWith('@') || /\{(?:owner|repo|branch)\}/.test(raw)) return UNSUPPORTED_FIELD;
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   if (raw === 'null') return null;
-  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) return Number(raw);
-  try { return JSON.parse(raw); } catch { return raw; }
+  if (/^[+-]?\d+$/.test(raw)) {
+    const number = Number(raw);
+    // Beyond 2^53 JSON would round the integer gh sends exactly.
+    return Number.isSafeInteger(number) ? number : UNSUPPORTED_FIELD;
+  }
+  return raw;
 }
 
 function splitField(raw, typed) {
   const separator = raw.indexOf('=');
   if (separator <= 0) return null;
-  return { name: raw.slice(0, separator), value: fieldValue(raw.slice(separator + 1), typed) };
+  const name = raw.slice(0, separator);
+  // `key[]=a` / `key[sub]=b` build arrays and objects in gh: real CLI only.
+  if (name.includes('[')) return null;
+  const value = fieldValue(raw.slice(separator + 1), typed);
+  return value === UNSUPPORTED_FIELD ? null : { name, value };
+}
+
+/**
+ * The payload gh sends to `graphql`: `query` and `operationName` at the top,
+ * every other field under `variables` (pkg/cmd/api groupGraphQLVariables).
+ */
+export function graphqlRequestBody(data) {
+  const body = {};
+  const variables = {};
+  for (const [name, value] of Object.entries(data)) {
+    if (name === 'query' || name === 'operationName') body[name] = value;
+    else variables[name] = value;
+  }
+  if (Object.keys(variables).length > 0) body.variables = variables;
+  return body;
+}
+
+/**
+ * The error gh prints as `gh: …` (and exits 1) for a GraphQL response:
+ * a top-level `message`, or the messages of `errors` joined by newlines.
+ * `null` when the response carries no error.
+ */
+export function graphqlResponseError(body, status) {
+  let parsed;
+  try { parsed = JSON.parse(body); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (typeof parsed.message === 'string' && parsed.message !== '') return `${parsed.message} (HTTP ${status})`;
+  if (!Array.isArray(parsed.errors)) return null;
+  const messages = parsed.errors
+    .map((error) => (typeof error === 'string' ? error : error && typeof error === 'object' ? error.message : null))
+    .filter((message) => typeof message === 'string');
+  if (messages.length > 0) return messages.join('\n');
+  // Fail closed: a non-empty `errors` without readable messages is still an error.
+  return parsed.errors.length > 0 ? 'GraphQL errors' : null;
 }
 
 /**
@@ -1465,7 +1514,10 @@ export function parseGhApiArguments(args) {
   let body;
   if (isGraphql) {
     if (normalizedMethod !== 'POST' || typeof data.query !== 'string') return null;
-    body = data;
+    // gh pages GraphQL through `$endCursor`/`pageInfo`, not Link headers:
+    // here only the first page would come back.
+    if (paginate) return null;
+    body = graphqlRequestBody(data);
     path = '/graphql';
   } else if (isSafeRead(normalizedMethod)) {
     const query = new URLSearchParams();
@@ -3683,6 +3735,21 @@ export class GitHubCoordinator {
       const next = nextPagePath(response.headers?.link);
       if (!next) break;
       path = next;
+    }
+
+    const graphqlError = parsed.path === '/graphql'
+      ? graphqlResponseError(pages[0]?.body || '', pages[0]?.status)
+      : null;
+    if (graphqlError !== null) {
+      // Like gh: the body still goes to stdout (without --jq), the messages
+      // to stderr, and the exit is 1 — a script must not read `errors` as data.
+      const raw = renderGhApiResponse(pages, { ...parsed, jq: null });
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: raw.ok ? raw.output : '',
+        stderr: `gh: ${graphqlError}\n`,
+      };
     }
 
     const rendered = renderGhApiResponse(pages, parsed);
