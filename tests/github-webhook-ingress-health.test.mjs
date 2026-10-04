@@ -145,6 +145,23 @@ test('a 4 hour gap between checks records host_slept and restarts the grace', as
     enabled: false,
   });
   assert.deepEqual(codes(disabled.warnings), ['host_slept']);
+  // Only a host with an ingress can attribute the window to Cloudflare 530.
+  assert.match(slept.message, /Cloudflare 530/);
+  assert.doesNotMatch(disabled.warnings[0].message, /530/);
+});
+
+test('receivers are probed only for the requested identities', async () => {
+  const single = fakeProbes();
+  const result = await checkIngress({ now: 1_000, probes: single.probes, enabled: true, identities: ['default'] });
+  assert.deepEqual(single.calls.tcp, [WEBHOOK_PORTS.default]);
+  assert.deepEqual(Object.keys(result.ingress.receivers), ['default']);
+
+  const unknown = fakeProbes();
+  const other = await checkIngress({ now: 1_000, probes: unknown.probes, enabled: true, identities: ['test-x'] });
+  assert.deepEqual(unknown.calls.tcp, []);
+  assert.deepEqual(other.ingress.receivers, {});
+  // The tunnel is shared and still checked.
+  assert.equal(unknown.calls.cloudflaredRunning, 1);
 });
 
 test('a regular 40 s gap is not a sleep', async () => {

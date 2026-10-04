@@ -443,7 +443,8 @@ export async function checkIngress({
     warnings.push({
       code: 'host_slept',
       ...gap,
-      message: `host: no health check from ${gap.from} to ${gap.to}; the host slept or the health job did not run, webhook deliveries in this window got Cloudflare 530`,
+      message: `host: no health check from ${gap.from} to ${gap.to}; the host slept or the health job did not run`
+        + (enabled ? ', webhook deliveries in this window may have got Cloudflare 530' : ''),
     });
   }
 
