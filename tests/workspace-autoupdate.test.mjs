@@ -7,11 +7,12 @@
 import test, { beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const SCRIPT = resolve(import.meta.dirname, '..', 'bin', 'workspace-autoupdate');
+const RELEASE = resolve(import.meta.dirname, '..', 'bin', 'github-coordinator-release');
 
 const FAKE_RELEASE = `#!/bin/sh
 echo "$*" >>"$FAKE_LOG"
@@ -40,6 +41,19 @@ function commitOnOrigin(file, content) {
 
 function run(extraEnv = {}) {
   return spawnSync('/bin/bash', [SCRIPT, 'run'], { env: { ...env, ...extraEnv }, encoding: 'utf8' });
+}
+
+// Una directory PATH con solo i comandi elencati: node non c'e' su nessuna
+// piattaforma, come sotto un launch agent con il PATH di sistema.
+function toolsOnly(names) {
+  const tools = join(dir, 'tools');
+  mkdirSync(tools, { recursive: true });
+  for (const name of names) {
+    const found = spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: { PATH: process.env.PATH }, encoding: 'utf8' }).stdout.trim();
+    assert.ok(found.startsWith('/'), `${name} non trovato nel PATH dei test`);
+    symlinkSync(found, join(tools, name));
+  }
+  return tools;
 }
 
 const log = () => (existsSync(join(dir, 'logs', 'workspace-autoupdate.log')) ? readFileSync(join(dir, 'logs', 'workspace-autoupdate.log'), 'utf8') : '');
@@ -130,5 +144,49 @@ describe('workspace-autoupdate', () => {
     assert.match(plist, new RegExp(`<string>${join(dir, 'ws').replaceAll('/', '\\/')}/bin/workspace-autoupdate</string>`));
     assert.match(plist, /<integer>900<\/integer>/);
     assert.match(plist, /<string>Background<\/string>/);
+  });
+
+  // launchd non eredita il PATH della shell: col PATH fisso di sistema il
+  // deploy del coordinator falliva a ogni giro con `node: command not found`.
+  test('il plist generato porta la directory di node nel PATH', () => {
+    const agents = join(dir, 'agents');
+    const nodeDir = dirname(process.execPath);
+    const r = spawnSync('/bin/bash', [SCRIPT, 'install'], {
+      env: { ...env, PATH: `${nodeDir}:/usr/bin:/bin`, AU_LAUNCH_AGENTS_DIR: agents, AU_NO_LAUNCHCTL: '1' },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const plist = readFileSync(join(agents, 'ch.frontaliere.workspace-autoupdate.plist'), 'utf8');
+    const path = plist.match(/<key>PATH<\/key><string>([^<]*)<\/string>/)?.[1] ?? '';
+    const entries = path.split(':');
+    assert.ok(entries.includes(nodeDir), `PATH del plist senza ${nodeDir}: ${path}`);
+    assert.ok(entries.includes(join(dir, '.local', 'bin')), path);
+    assert.equal(new Set(entries).size, entries.length, `PATH con duplicati: ${path}`);
+  });
+
+  test('install senza node nel PATH fallisce e non scrive il plist', () => {
+    const agents = join(dir, 'agents');
+    const r = spawnSync('/bin/bash', [SCRIPT, 'install'], {
+      env: { ...env, PATH: toolsOnly([]), AU_LAUNCH_AGENTS_DIR: agents, AU_NO_LAUNCHCTL: '1' },
+      encoding: 'utf8',
+    });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /node/);
+    assert.equal(existsSync(join(agents, 'ch.frontaliere.workspace-autoupdate.plist')), false);
+  });
+
+  test('run con PATH senza node dichiara node assente', () => {
+    // Il release tool vero, non quello finto: e' lui che deve dire la causa.
+    const seed = join(dir, 'seed');
+    copyFileSync(RELEASE, join(seed, 'bin', 'github-coordinator-release'));
+    writeFileSync(join(seed, 'bin', 'github-coordinator.mjs'), 'export {};\n');
+    mkdirSync(join(seed, 'config'));
+    writeFileSync(join(seed, 'config', 'github-event-routing.json'), '{}\n');
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-q', '-m', 'release vero');
+    git(seed, 'push', '-q', 'origin', 'main');
+    assert.equal(run({ PATH: toolsOnly(['git', 'dirname', 'basename', 'id', 'mkdir', 'rm', 'tar', 'date', 'mv', 'chmod']) }).status, 0);
+    assert.match(log(), /node non nel PATH/);
+    assert.doesNotMatch(log(), /sintassi non valida/);
   });
 });
