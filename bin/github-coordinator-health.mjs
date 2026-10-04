@@ -9,12 +9,15 @@ import { spawnSync } from 'node:child_process';
 import {
   accessSync,
   constants as fsConstants,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createConnection } from 'node:net';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
@@ -36,6 +39,24 @@ export const HEALTH_PROBE_TIMEOUT_MS = 10_000;
 export const ALERT_ONLY_REPEAT_MS = 60 * 60 * 1_000;
 const DEFAULT_IDENTITIES = ['default', 'nanako'];
 const ALERT_ONLY_STATE_FILE = 'github-coordinator-health-alert-only.json';
+
+// Public webhook ingress: GitHub -> Cloudflare Tunnel (cloudflared) -> local
+// receiver (launchd ch.frontaliere.github-webhook-<identity>) -> coordinator.
+// When the tunnel has no connector Cloudflare answers 530; when the receiver is
+// down cloudflared answers 502. GitHub never retries either, so both must be
+// visible locally instead of only as Cloudflare 5xx on the site monitor.
+export const WEBHOOK_PORTS = Object.freeze({ default: 18787, nanako: 18788 });
+export const INGRESS_PROBE_TIMEOUT_MS = 2_000;
+// cloudflared reconnects on its own after network changes; only a tunnel that
+// stays unready past this grace is an incident.
+export const TUNNEL_NOT_READY_GRACE_MS = 120_000;
+// The launchd health job runs every 30 s: a gap this large between two checks
+// means the host slept (or the job did not run), which is when Cloudflare
+// answers 530 to GitHub.
+export const HOST_SLEEP_GAP_MS = 300_000;
+const DEFAULT_CLOUDFLARED_METRICS = '127.0.0.1:20241';
+const CLOUDFLARED_LAUNCH_AGENT = join('Library', 'LaunchAgents', 'com.cloudflare.cloudflared.plist');
+const PRESENCE_STATE_FILE = 'github-coordinator-health-presence.json';
 
 export function launchdHealthFindings(
   identity,
@@ -321,16 +342,237 @@ export async function checkCoordinatorHealth(identity) {
   };
 }
 
+/**
+ * Whether this host serves the public webhook ingress. The Mac host agenti can
+ * run the coordinators without a tunnel: there the ingress probes would be
+ * permanent false alerts, so the guard lives here and not only in the tests.
+ */
+export function ingressEnabled({ env = process.env, exists = existsSync, home = homedir() } = {}) {
+  const value = env?.FRONTALIERE_WEBHOOK_INGRESS;
+  if (value === '1') return true;
+  if (value === '0') return false;
+  return Boolean(exists(join(home, CLOUDFLARED_LAUNCH_AGENT)));
+}
+
+function tcpListening(port, { host = '127.0.0.1', timeoutMs = INGRESS_PROBE_TIMEOUT_MS } = {}) {
+  // A bare TCP connect: a POST would be counted by the receiver as a webhook
+  // signature failure.
+  return new Promise((resolvePromise) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+    const finish = (listening) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(listening);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function cloudflaredProcessRunning() {
+  const result = spawnSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' });
+  if (result.status !== 0) return false;
+  return String(result.stdout || '').split('\n')
+    .some((line) => /\bcloudflared\b/.test(line) && /\btunnel\b.*\brun\b/.test(line));
+}
+
+async function cloudflaredReady({ env = process.env, timeoutMs = INGRESS_PROBE_TIMEOUT_MS } = {}) {
+  const address = env.FRONTALIERE_CLOUDFLARED_METRICS || DEFAULT_CLOUDFLARED_METRICS;
+  try {
+    const response = await fetch(`http://${address}/ready`, { signal: AbortSignal.timeout(timeoutMs) });
+    let body = null;
+    try { body = await response.json(); } catch { /* status alone is still meaningful */ }
+    return {
+      reachable: true,
+      status: response.status,
+      readyConnections: Number(body?.readyConnections ?? 0) || 0,
+    };
+  } catch (error) {
+    return { reachable: false, error: error?.message || String(error) };
+  }
+}
+
+export const defaultIngressProbes = Object.freeze({
+  tcp: (port) => tcpListening(port),
+  cloudflaredRunning: () => cloudflaredProcessRunning(),
+  ready: () => cloudflaredReady(),
+});
+
+function finiteOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * Probe the local half of the webhook ingress (receivers and cloudflared) and
+ * record host sleep. Pure apart from the injected probes: the caller loads and
+ * persists `state` / `nextState`.
+ */
+export async function checkIngress({
+  now = Date.now(),
+  probes = defaultIngressProbes,
+  state = null,
+  enabled = false,
+  identities = Object.keys(WEBHOOK_PORTS),
+} = {}) {
+  const alerts = [];
+  const warnings = [];
+  const previousCheckAtMs = finiteOrNull(state?.lastCheckAtMs);
+  const previousNotReadySinceMs = finiteOrNull(state?.notReadySinceMs);
+  const nextState = {
+    lastCheckAtMs: now,
+    notReadySinceMs: previousNotReadySinceMs,
+    lastSleepGap: state?.lastSleepGap && typeof state.lastSleepGap === 'object' ? state.lastSleepGap : null,
+  };
+
+  // Host sleep is recorded even without an ingress: the gap is what makes a
+  // Cloudflare 530 window attributable without reading `pmset -g log`.
+  let slept = false;
+  if (previousCheckAtMs !== null && now - previousCheckAtMs >= HOST_SLEEP_GAP_MS) {
+    slept = true;
+    const gap = {
+      gapMs: now - previousCheckAtMs,
+      from: new Date(previousCheckAtMs).toISOString(),
+      to: new Date(now).toISOString(),
+    };
+    nextState.lastSleepGap = gap;
+    warnings.push({
+      code: 'host_slept',
+      ...gap,
+      message: `host: no health check from ${gap.from} to ${gap.to}; the host slept or the health job did not run`
+        + (enabled ? ', webhook deliveries in this window may have got Cloudflare 530' : ''),
+    });
+  }
+
+  const ingress = {
+    enabled: Boolean(enabled),
+    ...(nextState.lastSleepGap ? { lastSleepGap: nextState.lastSleepGap } : {}),
+  };
+
+  if (enabled) {
+    const receiverEntries = identities
+      .filter((identity) => Object.prototype.hasOwnProperty.call(WEBHOOK_PORTS, identity))
+      .map((identity) => [identity, WEBHOOK_PORTS[identity]]);
+    const listening = await Promise.all(receiverEntries.map(([, port]) => (
+      Promise.resolve().then(() => probes.tcp(port)).then(Boolean, () => false)
+    )));
+    ingress.receivers = {};
+    receiverEntries.forEach(([identity, port], index) => {
+      ingress.receivers[identity] = { port, listening: listening[index] };
+      if (!listening[index]) {
+        alerts.push({
+          code: 'webhook_receiver_down',
+          identity,
+          port,
+          message: `${identity}: webhook receiver is not listening on 127.0.0.1:${port}; cloudflared answers GitHub with 502`,
+        });
+      }
+    });
+
+    let running = false;
+    try { running = Boolean(await probes.cloudflaredRunning()); } catch { running = false; }
+    let readyConnections = null;
+    if (!running) {
+      nextState.notReadySinceMs = null;
+      alerts.push({
+        code: 'tunnel_process_missing',
+        message: 'cloudflared: no `cloudflared tunnel run` process; GitHub deliveries get Cloudflare 530',
+      });
+    } else {
+      let ready;
+      try { ready = await probes.ready(); } catch (error) { ready = { reachable: false, error: error?.message }; }
+      if (!ready?.reachable) {
+        // cloudflared may legitimately run without a metrics listener: never an alert.
+        nextState.notReadySinceMs = null;
+        warnings.push({
+          code: 'tunnel_metrics_unreachable',
+          message: `cloudflared: metrics endpoint unreachable (${ready?.error || 'no response'}); readiness unknown`,
+        });
+      } else {
+        readyConnections = Number(ready.readyConnections || 0);
+        if (ready.status === 200 && readyConnections >= 1) {
+          nextState.notReadySinceMs = null;
+        } else {
+          // After a wake the grace restarts: the pre-sleep start does not count.
+          const since = (slept ? null : previousNotReadySinceMs) ?? now;
+          nextState.notReadySinceMs = since;
+          if (now - since >= TUNNEL_NOT_READY_GRACE_MS) {
+            alerts.push({
+              code: 'tunnel_not_ready',
+              readyConnections,
+              notReadySince: new Date(since).toISOString(),
+              message: `cloudflared: tunnel has ${readyConnections} ready connections since ${new Date(since).toISOString()}; GitHub deliveries get Cloudflare 530`,
+            });
+          } else {
+            warnings.push({
+              code: 'tunnel_reconnecting',
+              readyConnections,
+              message: `cloudflared: tunnel has ${readyConnections} ready connections, within the reconnect grace`,
+            });
+          }
+        }
+      }
+    }
+    ingress.tunnel = { running, readyConnections };
+  }
+
+  // Reconnecting right after a wake is not a fault: restart the grace.
+  if (slept) nextState.notReadySinceMs = null;
+  return { alerts, warnings, ingress, nextState };
+}
+
+function presenceStatePath() {
+  return join(stateDirectory(), PRESENCE_STATE_FILE);
+}
+
+function readPresenceState(path) {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'));
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runIngressCheck(identities) {
+  const statePath = presenceStatePath();
+  const result = await checkIngress({
+    state: readPresenceState(statePath),
+    enabled: ingressEnabled(),
+    identities,
+  });
+  writeStateFileAtomic(statePath, result.nextState);
+  return result;
+}
+
 export async function checkHealth(identities = DEFAULT_IDENTITIES) {
   const normalizedIdentities = identities.map(normalizeIdentity);
-  const results = await Promise.all(normalizedIdentities.map(checkCoordinatorHealth));
+  const [results, ingressHealth] = await Promise.all([
+    Promise.all(normalizedIdentities.map(checkCoordinatorHealth)),
+    runIngressCheck(normalizedIdentities),
+  ]);
   return {
-    ok: results.every((result) => result.ok),
+    ok: results.every((result) => result.ok) && ingressHealth.alerts.length === 0,
     checkedAt: new Date().toISOString(),
-    alerts: results.flatMap((result) => result.alerts),
-    warnings: results.flatMap((result) => result.warnings),
+    alerts: [...results.flatMap((result) => result.alerts), ...ingressHealth.alerts],
+    warnings: [...results.flatMap((result) => result.warnings), ...ingressHealth.warnings],
     identities: results,
+    ingress: ingressHealth.ingress,
   };
+}
+
+/**
+ * The periodic alert-only job prints unhealthy reports, plus the one healthy
+ * report that closes a host sleep window: its from/to line up with the hourly
+ * Cloudflare 5xx counts of the webhook hosts.
+ */
+export function shouldPrintAlertOnly(result) {
+  if (result?.ok !== true) return true;
+  return Array.isArray(result?.warnings) && result.warnings.some((warning) => warning?.code === 'host_slept');
 }
 
 export function alertOnlyHealthReport(result) {
@@ -377,7 +619,7 @@ function readAlertOnlyState(path) {
   }
 }
 
-function writeAlertOnlyState(path, state) {
+function writeStateFileAtomic(path, state) {
   const directory = dirname(path);
   const temporary = `${path}.${process.pid}.tmp`;
   try {
@@ -418,7 +660,7 @@ export function shouldEmitAlertOnly(
   if (previous
     && previous.fingerprint === fingerprint
     && nowMs - previous.emittedAtMs < repeatMs) return false;
-  writeAlertOnlyState(statePath, { fingerprint, emittedAtMs: nowMs });
+  writeStateFileAtomic(statePath, { fingerprint, emittedAtMs: nowMs });
   return true;
 }
 
@@ -438,7 +680,7 @@ if (process.argv[1] && process.argv[1].endsWith('/github-coordinator-health.mjs'
     String(process.env.FRONTALIERE_GH_HEALTH_DEDUPE || '').toLowerCase(),
   );
   if (alertOnly && dedupe && result.ok) clearAlertOnlyState();
-  if (!alertOnly || !result.ok) {
+  if (!alertOnly || shouldPrintAlertOnly(result)) {
     const output = alertOnly ? alertOnlyHealthReport(result) : result;
     if (!dedupe || shouldEmitAlertOnly(output)) process.stdout.write(`${JSON.stringify(output)}\n`);
   }
