@@ -50,7 +50,7 @@ jobs:
           done
 
       - name: Test coordinator broker and daemon lifecycle
-        run: node --test tests/github-follow-latest-activity.test.mjs tests/github-event-lifecycle.test.mjs tests/github-event-sweep.test.mjs tests/github-coordinator-node-runtime.test.mjs tests/github-webhook-ingress-health.test.mjs tests/github-webhook-receiver-log.test.mjs
+        run: node --test tests/github-follow-latest-activity.test.mjs tests/github-event-lifecycle.test.mjs tests/github-event-sweep.test.mjs tests/github-coordinator-node-runtime.test.mjs tests/github-webhook-ingress-health.test.mjs tests/github-webhook-receiver-log.test.mjs tests/github-coordinator-graphql.test.mjs
 
       - name: Validate PR body contract
         shell: bash --noprofile --norc -eo pipefail {0}
