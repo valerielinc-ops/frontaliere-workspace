@@ -129,6 +129,8 @@ xml() { # escape per i valori del plist
 # deploy del coordinator rispondeva `node: command not found` a ogni giro
 # (node sta in /opt/homebrew/bin): la directory di node si fissa qui, quando
 # chi installa la vede. ~/.local/bin resta prima: contiene lo shim di gh.
+# La directory e' risolta una volta sola: se node si sposta (upgrade di un
+# version manager), rieseguire `install`.
 launchd_path() {
   node_bin=$(command -v node 2>/dev/null) || node_bin=''
   case "$node_bin" in

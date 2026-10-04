@@ -45,7 +45,7 @@ function run(extraEnv = {}) {
 
 // Una directory PATH con solo i comandi elencati: node non c'e' su nessuna
 // piattaforma, come sotto un launch agent con il PATH di sistema.
-function toolsWithout(names) {
+function toolsOnly(names) {
   const tools = join(dir, 'tools');
   mkdirSync(tools, { recursive: true });
   for (const name of names) {
@@ -167,7 +167,7 @@ describe('workspace-autoupdate', () => {
   test('install senza node nel PATH fallisce e non scrive il plist', () => {
     const agents = join(dir, 'agents');
     const r = spawnSync('/bin/bash', [SCRIPT, 'install'], {
-      env: { ...env, PATH: toolsWithout([]), AU_LAUNCH_AGENTS_DIR: agents, AU_NO_LAUNCHCTL: '1' },
+      env: { ...env, PATH: toolsOnly([]), AU_LAUNCH_AGENTS_DIR: agents, AU_NO_LAUNCHCTL: '1' },
       encoding: 'utf8',
     });
     assert.notEqual(r.status, 0);
@@ -185,7 +185,7 @@ describe('workspace-autoupdate', () => {
     git(seed, 'add', '-A');
     git(seed, 'commit', '-q', '-m', 'release vero');
     git(seed, 'push', '-q', 'origin', 'main');
-    assert.equal(run({ PATH: toolsWithout(['git', 'dirname', 'basename', 'id', 'mkdir', 'rm', 'tar', 'date', 'mv', 'chmod']) }).status, 0);
+    assert.equal(run({ PATH: toolsOnly(['git', 'dirname', 'basename', 'id', 'mkdir', 'rm', 'tar', 'date', 'mv', 'chmod']) }).status, 0);
     assert.match(log(), /node non nel PATH/);
     assert.doesNotMatch(log(), /sintassi non valida/);
   });
