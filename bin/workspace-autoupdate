@@ -125,7 +125,30 @@ xml() { # escape per i valori del plist
   printf '%s' "$1" | /usr/bin/sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
+# launchd non eredita il PATH della shell. Con il solo PATH di sistema il
+# deploy del coordinator rispondeva `node: command not found` a ogni giro
+# (node sta in /opt/homebrew/bin): la directory di node si fissa qui, quando
+# chi installa la vede. ~/.local/bin resta prima: contiene lo shim di gh.
+# La directory e' risolta una volta sola: se node si sposta (upgrade di un
+# version manager), rieseguire `install`.
+launchd_path() {
+  node_bin=$(command -v node 2>/dev/null) || node_bin=''
+  case "$node_bin" in
+    /*) ;;
+    *) printf 'workspace-autoupdate: node non nel PATH (PATH=%s): nessun plist scritto\n' "${PATH:-}" >&2; return 1 ;;
+  esac
+  out=''
+  for entry in "$home_dir/.local/bin" "${node_bin%/*}" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+    case ":$out:" in
+      *":$entry:"*) ;;
+      *) out=${out:+$out:}$entry ;;
+    esac
+  done
+  printf '%s\n' "$out"
+}
+
 cmd_install() {
+  launchd_env_path=$(launchd_path) || exit 69
   /bin/mkdir -p "$agents_dir" "$log_dir" || exit 73
   plist=$(plist_path)
   cat >"$plist" <<EOF
@@ -156,7 +179,7 @@ cmd_install() {
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key><string>$(xml "$home_dir")</string>
-		<key>PATH</key><string>$(xml "$home_dir/.local/bin"):/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>PATH</key><string>$(xml "$launchd_env_path")</string>
 		<key>WORKSPACE</key><string>$(xml "$ws")</string>
 	</dict>
 	<key>StandardOutPath</key>

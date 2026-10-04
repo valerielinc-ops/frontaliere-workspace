@@ -46,6 +46,14 @@ LABELS="ch.frontaliere.github-coordinator-default ch.frontaliere.github-coordina
 die() { echo "github-coordinator-release: $*" >&2; exit 1; }
 note() { echo "github-coordinator-release: $*" >&2; }
 
+# Every command but status runs node. Under a launch agent with the system
+# PATH, `node --check` failed with "command not found" and the release was
+# reported as "sintassi non valida"; wait_coordinator_idle would instead have
+# read a missing node as an idle coordinator. Name the real cause first.
+require_node() {
+  command -v node >/dev/null 2>&1 || die "node non nel PATH (PATH=${PATH:-})"
+}
+
 resolve_sha() {
   git -C "$WORKSPACE" rev-parse --verify "$1^{commit}" 2>/dev/null || die "ref non risolvibile: $1"
 }
@@ -360,6 +368,10 @@ while [ "$#" -gt 0 ]; do
     *) ARG="$1"; shift ;;
   esac
 done
+
+case "$command" in
+  install|activate|migrate-launchd|restart|wait-idle|deploy) require_node ;;
+esac
 
 case "$command" in
   status) show_status ;;
