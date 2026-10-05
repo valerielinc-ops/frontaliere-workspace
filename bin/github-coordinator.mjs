@@ -1010,7 +1010,7 @@ function prepareSecretSetInput(args) {
   return { args: preparedArgs, stdin: readFileSync(bodyFile) };
 }
 
-function resolveRealGh() {
+export function resolveRealGh() {
   const explicit = process.env.FRONTALIERE_REAL_GH;
   if (explicit) {
     accessSync(resolve(explicit), fsConstants.X_OK);

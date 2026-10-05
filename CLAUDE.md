@@ -177,6 +177,9 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 - Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
   una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
   permesso per l'agent di riprendere il polling.
+- `gh auth git-credential get|store|erase` (il credential helper di git) va
+  diretto al `gh` reale, senza passare dal socket: nessun token nel protocollo
+  del coordinatore e `git push` funziona nei worktree senza ripieghi.
 - `gh` resta il comando compatibile da usare normalmente: la coda, le corsie
   di concorrenza (16 letture API, 6 processi `gh`, 2 trasferimenti lunghi,
   mutation serializzate a 1 s; tetto globale 16 ridotto automaticamente con
