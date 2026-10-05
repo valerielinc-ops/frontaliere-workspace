@@ -186,6 +186,10 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   `/opt/homebrew/bin/gh` o `curl https://api.github.com`. `status` espone
   corsie, attese in coda e budget dei limiti secondari; `status --full` anche
   i tipi di comando più frequenti.
+- Il metodo di `gh api` segue la regola del `gh` reale, in locale come in CI:
+  senza `-X` e' GET, ma diventa POST appena ci sono parametri
+  (`-f`/`-F`/`--field`/`--raw-field`). Una lettura con parametri (filtri,
+  `search/issues -f q=...`, paginazione) vuole `-X GET` esplicito.
 - `gh pr checks --watch` e `gh run watch` sono vietati: un solo osservatore
   condiviso deve seguire una PR o una run. Controlla il daemon con
   `bin/gh-frontaliere status` (oppure

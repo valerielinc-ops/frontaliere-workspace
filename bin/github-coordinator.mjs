@@ -1513,7 +1513,13 @@ export function parseGhApiArguments(args) {
   // `--paginate`: hand both to it so a local run fails exactly like CI.
   if (slurp && (jq !== null || !paginate)) return null;
   const isGraphql = endpoint === 'graphql';
-  const normalizedMethod = String(method || (isGraphql ? 'POST' : fields.length ? 'GET' : 'GET')).toUpperCase();
+  // Same default as the real gh (`gh help api`): GET normally, POST as soon as
+  // any parameter is added. A read with parameters needs an explicit `-X GET`;
+  // turning `-f body=...` into a GET made local writes exit 0 doing nothing.
+  const normalizedMethod = String(method || (isGraphql || fields.length ? 'POST' : 'GET')).toUpperCase();
+  // The real gh rejects `--paginate` with an explicit non-GET method and
+  // otherwise decides itself how to page a POST: never page writes natively.
+  if (paginate && !isGraphql && normalizedMethod !== 'GET') return null;
   let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const data = Object.fromEntries(fields.map(({ name, value }) => [name, value]));
   let body;

@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
 import {
+  apiRequestIsRead,
   classifyBucket,
+  classifyJob,
   cancellationRequestDetails,
   createDebouncedReloadScheduler,
   GitHubCoordinator,
@@ -2792,6 +2794,57 @@ test('intercetta il sottoinsieme comune di gh api mantenendo jq e paginazione', 
     true,
   );
   assert.equal(parseGhApiArguments(['api', '--input', 'payload.json', 'repos/o/r']), null);
+});
+
+test('gh api senza -X: POST quando ci sono parametri, come il gh reale', () => {
+  // `gh help api`: «The default HTTP request method is "GET" normally and
+  // "POST" if any parameters were added.» Lo shim ne faceva una GET con i
+  // campi in query string: `gh api rate_limit -f x=1` rispondeva 5000 in
+  // locale dove il gh reale riceve 404, e un commento `-f body=...` usciva 0
+  // senza scrivere niente.
+  const raw = parseGhApiArguments(['api', 'rate_limit', '-f', 'x=1']);
+  assert.equal(raw.method, 'POST');
+  assert.equal(raw.path, '/rate_limit');
+  assert.deepEqual(raw.body, { x: '1' });
+
+  const comment = parseGhApiArguments(['api', 'repos/o/r/issues/1/comments', '--raw-field=body=ciao']);
+  assert.equal(comment.method, 'POST');
+  assert.equal(comment.path, '/repos/o/r/issues/1/comments');
+  assert.deepEqual(comment.body, { body: 'ciao' });
+
+  const typed = parseGhApiArguments(['api', 'repos/o/r/issues', '-F', 'milestone=3', '--field', 'locked=false']);
+  assert.equal(typed.method, 'POST');
+  assert.deepEqual(typed.body, { milestone: 3, locked: false });
+
+  // Una lettura con parametri vuole -X GET esplicito, come col gh reale.
+  const read = parseGhApiArguments(['api', '-X', 'GET', 'repos/o/r/pulls', '-f', 'state=open']);
+  assert.equal(read.method, 'GET');
+  assert.equal(read.body, undefined);
+  assert.equal(read.path, '/repos/o/r/pulls?state=open');
+  assert.equal(parseGhApiArguments(['api', 'repos/o/r/pulls', '--method=get', '-F', 'per_page=5']).path, '/repos/o/r/pulls?per_page=5');
+
+  // Senza parametri resta GET; graphql resta POST con query e variables.
+  assert.equal(parseGhApiArguments(['api', 'rate_limit']).method, 'GET');
+  const graphql = parseGhApiArguments(['api', 'graphql', '-f', 'query=query{viewer{login}}', '-F', 'n=1']);
+  assert.equal(graphql.method, 'POST');
+  assert.equal(graphql.path, '/graphql');
+  assert.deepEqual(graphql.body, { query: 'query{viewer{login}}', variables: { n: 1 } });
+
+  // --paginate su una richiesta non GET: il gh reale la rifiuta (-X POST) o la
+  // invia come POST; la decide lui, non la corsia nativa.
+  assert.equal(parseGhApiArguments(['api', 'repos/o/r/issues', '--paginate', '-f', 'state=open']), null);
+  assert.equal(parseGhApiArguments(['api', '-X', 'POST', 'repos/o/r/issues', '--paginate']), null);
+  assert.equal(parseGhApiArguments(['api', '-X', 'GET', 'repos/o/r/issues', '--paginate', '-f', 'state=open']).paginate, true);
+});
+
+test('gh api con parametri senza -X: corsia mutation, niente cache ne corsia anonima', () => {
+  const post = classifyJob({ type: 'exec', args: ['api', 'repos/o/r/issues/1/comments', '-f', 'body=ciao'] });
+  assert.equal(post.mutation, true);
+  assert.equal(post.lane, 'mutation');
+  const get = classifyJob({ type: 'exec', args: ['api', '-X', 'GET', 'search/issues', '-f', 'q=repo:o/r'] });
+  assert.equal(get.mutation, false);
+  assert.notEqual(get.lane, 'mutation');
+  assert.equal(apiRequestIsRead({ method: 'POST', path: '/repos/o/r/issues/1/comments', body: { body: 'ciao' } }), false);
 });
 
 test('--paginate senza --jq/--slurp unisce le pagine REST in un array, come il gh reale', () => {
