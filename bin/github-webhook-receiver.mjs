@@ -5,6 +5,12 @@
  *
  * Keep this listener behind a TLS reverse proxy or an authenticated tunnel.
  * The coordinator still verifies X-Hub-Signature-256 before accepting data.
+ *
+ * GitHub delivers each webhook to one URL, and the public tunnel ends on one
+ * Mac. `--relay <url>` (repeatable, or FRONTALIERE_WEBHOOK_RELAYS, comma
+ * separated) forwards every delivery this receiver accepted to the receivers
+ * of the other Macs, unchanged and with its signature, so their coordinators
+ * see the same events. A relayed delivery is marked and never relayed again.
  */
 
 import { createServer } from 'node:http';
@@ -20,6 +26,10 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const DEFAULT_PATH = '/github/webhook';
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
+export const RELAY_HEADER = 'x-frontaliere-webhook-relay';
+export const RELAY_TIMEOUT_MS = 10_000;
+export const RELAY_RETRY_DELAYS_MS = Object.freeze([1_000, 5_000, 30_000]);
+const EXTRA_HOST_RETRY_MS = 30_000;
 const SOURCE_RELOAD_DEBOUNCE_MS = 3_000;
 const SOURCE_RELOAD_QUIESCENCE_MS = 250;
 const WATCHED_SOURCE_NAMES = new Set([
@@ -307,6 +317,115 @@ async function readBody(request) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * The relay targets, validated: http(s) URLs only, duplicates dropped. A
+ * malformed value stops the receiver at start rather than losing deliveries
+ * in silence.
+ */
+export function parseRelayTargets(values = []) {
+  const targets = [];
+  for (const value of values.flatMap((entry) => String(entry || '').split(','))) {
+    const candidate = value.trim();
+    if (!candidate) continue;
+    let url;
+    try {
+      url = new URL(candidate);
+    } catch {
+      throw Object.assign(new Error(`webhook_relay_url_invalid: ${candidate}`), { code: 'webhook_relay_url_invalid' });
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw Object.assign(new Error(`webhook_relay_url_invalid: ${candidate}`), { code: 'webhook_relay_url_invalid' });
+    }
+    if (!targets.includes(url.href)) targets.push(url.href);
+  }
+  return targets;
+}
+
+/**
+ * Which local outcomes are forwarded: an accepted delivery (202) and one the
+ * local coordinator could not take (5xx), since the signature was not checked
+ * and another Mac may still need it. A rejected signature, a wrong path or an
+ * oversized body is the public noise of the ingress and stays here.
+ */
+export function shouldRelayStatus(status) {
+  return status === 202 || status >= 500;
+}
+
+const defaultSleep = (ms) => new Promise((resolvePromise) => {
+  const timer = setTimeout(resolvePromise, ms);
+  timer.unref?.();
+});
+
+/**
+ * Forward deliveries to the receivers of the other Macs. Best effort: a
+ * network error or a 5xx is retried with RELAY_RETRY_DELAYS_MS, a 4xx is not
+ * (the peer refused it and will refuse it again). The coordinator there
+ * deduplicates by X-GitHub-Delivery, so a retry after a lost answer is safe.
+ * A failure is logged with the target origin only; what a delivery still
+ * misses there is recovered by the coordinator's reconciliation.
+ */
+export function createWebhookRelay({
+  targets = [],
+  fetchImpl = globalThis.fetch,
+  log = defaultLog,
+  sleep = defaultSleep,
+  timeoutMs = RELAY_TIMEOUT_MS,
+  retryDelaysMs = RELAY_RETRY_DELAYS_MS,
+  now = Date.now,
+} = {}) {
+  const forwardOne = async (target, delivery, identity) => {
+    const headers = {
+      'content-type': 'application/json',
+      'user-agent': 'frontaliere-github-webhook-relay',
+      [RELAY_HEADER]: '1',
+    };
+    if (delivery.eventName) headers['x-github-event'] = delivery.eventName;
+    if (delivery.deliveryId) headers['x-github-delivery'] = delivery.deliveryId;
+    if (delivery.signature) headers['x-hub-signature-256'] = delivery.signature;
+    let lastError = 'unknown';
+    let attempts = 0;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      if (attempt > 0) await sleep(retryDelaysMs[attempt - 1]);
+      attempts += 1;
+      try {
+        const response = await fetchImpl(target, {
+          method: 'POST',
+          headers,
+          body: delivery.rawBody,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        await response.arrayBuffer().catch(() => {});
+        if (response.status < 300) return true;
+        lastError = `http_${response.status}`;
+        if (response.status < 500) break;
+      } catch (error) {
+        lastError = error?.cause?.code || error?.code || error?.name || 'fetch_failed';
+      }
+    }
+    try {
+      log({
+        ts: new Date(now()).toISOString(),
+        component: 'github-webhook-receiver',
+        event: 'webhook_relay_failed',
+        identity: identity ?? null,
+        target: new URL(target).origin,
+        error: String(lastError),
+        attempts,
+      });
+    } catch {
+      // A failing logger must not affect the other targets.
+    }
+    return false;
+  };
+
+  return {
+    targets,
+    forward(delivery, { identity } = {}) {
+      return Promise.all(targets.map((target) => forwardOne(target, delivery, identity)));
+    },
+  };
+}
+
 export function createGitHubWebhookReceiver({
   identity,
   path = DEFAULT_PATH,
@@ -315,6 +434,7 @@ export function createGitHubWebhookReceiver({
   ingest = ingestGitHubWebhook,
   log = defaultLog,
   now = Date.now,
+  relay = null,
 } = {}) {
   return createServer(async (request, response) => {
     onRequestStart();
@@ -322,6 +442,8 @@ export function createGitHubWebhookReceiver({
     // Which step failed: a client/tunnel abort while the body is read and a
     // reset of the coordinator socket both surface as ECONNRESET -> 503.
     let phase = 'read_body';
+    let delivery = null;
+    let status = null;
     try {
       if (request.method !== 'POST' || request.url?.split('?')[0] !== path) {
         jsonResponse(response, 404, { ok: false, error: 'not_found' });
@@ -329,15 +451,17 @@ export function createGitHubWebhookReceiver({
       }
       const rawBody = await readBody(request);
       phase = 'ingest';
-      const result = await ingest({
+      delivery = {
         eventName: header(request, 'x-github-event'),
         deliveryId: header(request, 'x-github-delivery'),
         signature: header(request, 'x-hub-signature-256'),
         rawBody,
-      }, { identity });
+      };
+      const result = await ingest(delivery, { identity });
+      status = 202;
       jsonResponse(response, 202, result);
     } catch (error) {
-      const status = webhookErrorStatus(error);
+      status = webhookErrorStatus(error);
       const errorLabel = error?.code || error?.message;
       const details = {
         ok: false,
@@ -368,8 +492,23 @@ export function createGitHubWebhookReceiver({
       }
     } finally {
       onRequestEnd();
+      if (relay && delivery && shouldRelayStatus(status) && !header(request, RELAY_HEADER)) {
+        // After the answer to GitHub, which waits at most 10 s. Counted as an
+        // active request so a source reload waits for it.
+        onRequestStart();
+        relay.forward(delivery, { identity }).catch(() => {}).finally(onRequestEnd);
+      }
     }
   });
+}
+
+function optionValues(args, name) {
+  const values = [];
+  args.forEach((value, index) => {
+    if (value === name && args[index + 1]) values.push(args[index + 1]);
+    else if (value.startsWith(`${name}=`)) values.push(value.slice(name.length + 1));
+  });
+  return values;
 }
 
 function optionValue(args, name, fallback) {
@@ -378,30 +517,42 @@ function optionValue(args, name, fallback) {
   return args[index].startsWith(`${name}=`) ? args[index].slice(name.length + 1) : args[index + 1] || fallback;
 }
 
-function receiverOptions(args = process.argv.slice(2)) {
-  const identity = optionValue(args, '--identity', process.env.FRONTALIERE_GH_IDENTITY);
-  const host = optionValue(args, '--host', process.env.FRONTALIERE_WEBHOOK_HOST || DEFAULT_HOST);
-  const port = Number(optionValue(args, '--port', process.env.FRONTALIERE_WEBHOOK_PORT || DEFAULT_PORT));
-  const path = optionValue(args, '--path', process.env.FRONTALIERE_WEBHOOK_PATH || DEFAULT_PATH);
+export function receiverOptions(args = process.argv.slice(2), env = process.env) {
+  const identity = optionValue(args, '--identity', env.FRONTALIERE_GH_IDENTITY);
+  const host = optionValue(args, '--host', env.FRONTALIERE_WEBHOOK_HOST || DEFAULT_HOST);
+  const port = Number(optionValue(args, '--port', env.FRONTALIERE_WEBHOOK_PORT || DEFAULT_PORT));
+  const path = optionValue(args, '--path', env.FRONTALIERE_WEBHOOK_PATH || DEFAULT_PATH);
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) throw new Error('webhook_port_invalid');
-  return { identity, host, port, path };
+  // Extra addresses (the Tailscale IP of this Mac) for the deliveries another
+  // receiver relays here; the first host stays the one of the tunnel.
+  const extraHosts = optionValues(args, '--extra-host')
+    .concat(String(env.FRONTALIERE_WEBHOOK_EXTRA_HOSTS || '').split(','))
+    .map((value) => value.trim())
+    .filter((value, index, all) => value && value !== host && all.indexOf(value) === index);
+  const relays = parseRelayTargets(optionValues(args, '--relay').concat(env.FRONTALIERE_WEBHOOK_RELAYS || ''));
+  return { identity, host, port, path, extraHosts, relays };
 }
 
-function startReceiverWorker({ identity, host, port, path }) {
+function startReceiverWorker({ identity, host, port, path, extraHosts = [], relays = [] }) {
   let activeRequestCount = 0;
   let terminating = false;
-  const server = createGitHubWebhookReceiver({
+  const relay = relays.length ? createWebhookRelay({ targets: relays }) : null;
+  const createServerForHost = () => createGitHubWebhookReceiver({
     identity,
     path,
+    relay,
     onRequestStart: () => { activeRequestCount += 1; },
     onRequestEnd: () => { activeRequestCount = Math.max(0, activeRequestCount - 1); },
   });
+  const server = createServerForHost();
+  const extraServers = [];
   const terminate = (exitCode = 0) => {
     if (terminating) {
       if (exitCode !== 0) process.exitCode = exitCode;
       return;
     }
     terminating = true;
+    for (const extra of extraServers) extra.close();
     server.close(() => process.exit(exitCode));
     setTimeout(() => process.exit(exitCode), 1_000);
   };
@@ -412,8 +563,26 @@ function startReceiverWorker({ identity, host, port, path }) {
   installProcessSafetyHandlers(terminate);
   process.once('disconnect', () => terminate(0));
   server.listen(port, host, () => {
-    process.stdout.write(`${stamp(`github-webhook-receiver listening on http://${host}:${port}${path}`)}\n`);
+    const relayNote = relays.length ? ` (relay to ${relays.map((target) => new URL(target).origin).join(', ')})` : '';
+    process.stdout.write(`${stamp(`github-webhook-receiver listening on http://${host}:${port}${path}${relayNote}`)}\n`);
   });
+  // An extra address may not exist yet at login (Tailscale still connecting):
+  // its failure is retried and never stops the main listener.
+  const listenExtra = (extraHost) => {
+    if (terminating) return;
+    const extra = createServerForHost();
+    extra.once('error', (error) => {
+      writeStderrLine(stamp(`github-webhook-receiver: ${extraHost}:${port} unavailable (${error.code || error.message}); retry in ${EXTRA_HOST_RETRY_MS / 1000}s`));
+      extra.close();
+      const timer = setTimeout(() => listenExtra(extraHost), EXTRA_HOST_RETRY_MS);
+      timer.unref?.();
+    });
+    extra.listen(port, extraHost, () => {
+      extraServers.push(extra);
+      process.stdout.write(`${stamp(`github-webhook-receiver listening on http://${extraHost}:${port}${path}`)}\n`);
+    });
+  };
+  for (const extraHost of extraHosts) listenExtra(extraHost);
 }
 
 function startReceiverSupervisor(options) {
