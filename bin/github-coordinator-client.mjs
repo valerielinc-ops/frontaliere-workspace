@@ -72,6 +72,17 @@ export function normalizeIdentity(value = process.env.FRONTALIERE_GH_IDENTITY ||
   return identity;
 }
 
+// `gh auth git-credential get|store|erase` e' il credential helper di git: legge
+// la richiesta da stdin e scrive username/token su stdout. Il coordinatore non
+// inoltra stdin (rc 1 muto) e il token non deve passare dal socket: il client
+// esegue direttamente il gh reale (vedi gh-frontaliere).
+export function isGitCredentialCommand(args) {
+  return Array.isArray(args)
+    && args[0] === 'auth'
+    && args[1] === 'git-credential'
+    && ['get', 'store', 'erase'].includes(args[2]);
+}
+
 export function stateDirectory() {
   return process.env.FRONTALIERE_GH_STATE_DIR || DEFAULT_STATE_DIR;
 }
