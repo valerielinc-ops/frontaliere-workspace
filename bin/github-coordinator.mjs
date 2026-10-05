@@ -1246,13 +1246,14 @@ function cancellationApiDetails(pathname, method) {
   const normalizedMethod = String(method || 'GET').toUpperCase();
   if (normalizedMethod !== 'POST') return null;
   const path = String(pathname || '').split('?')[0];
-  const match = path.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)\/cancel$/);
+  const match = path.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)\/(cancel|force-cancel)$/);
   if (!match) return null;
+  const forced = match[4] === 'force-cancel';
   return {
-    kind: 'workflow-run-cancellation',
+    kind: forced ? 'workflow-run-force-cancellation' : 'workflow-run-cancellation',
     repo: `${match[1]}/${match[2]}`,
     runId: match[3],
-    target: path,
+    target: forced ? `${path} (cancellazione FORZATA)` : path,
   };
 }
 
@@ -1268,7 +1269,8 @@ function repoFromCliArguments(args) {
 function cancellationFromCliApiArguments(args, inheritedRepo = null) {
   if (args[0] !== 'api') return null;
   let endpoint = null;
-  let method = 'GET';
+  let method = null;
+  let hasBodyFlag = false;
   let repo = inheritedRepo;
   const optionsWithValue = new Set([
     '--cache', '--field', '--header', '--hostname', '--input', '--jq', '--method',
@@ -1285,6 +1287,9 @@ function cancellationFromCliApiArguments(args, inheritedRepo = null) {
       method = value.slice('--method='.length);
       continue;
     }
+    // Il gh reale passa a POST quando ci sono parametri e manca -X.
+    if (['-f', '-F', '--field', '--raw-field', '--input'].includes(value)
+      || /^(--field|--raw-field|--input)=/.test(value)) hasBodyFlag = true;
     if (value === '--repo' && args[index + 1]) {
       repo = String(args[index + 1]);
       index += 1;
@@ -1303,8 +1308,8 @@ function cancellationFromCliApiArguments(args, inheritedRepo = null) {
   }
   if (!endpoint) return null;
   let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  if (repo && /^\/actions\/runs\/\d+\/cancel$/.test(path)) path = `/repos/${repo}${path}`;
-  return cancellationApiDetails(path, method);
+  if (repo && /^\/actions\/runs\/\d+\/(cancel|force-cancel)$/.test(path)) path = `/repos/${repo}${path}`;
+  return cancellationApiDetails(path, method ?? (hasBodyFlag ? 'POST' : 'GET'));
 }
 
 /**

@@ -212,7 +212,8 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   duplicati/orfani sono warning separati. Il controllo è locale e non chiama
   GitHub.
 - Le cancellazioni di run Actions (`gh run cancel` oppure il POST al relativo
-  endpoint) richiedono sempre due passaggi: la prima richiesta viene bloccata e
+  endpoint, `cancel` e `force-cancel`, anche il POST implicito di `gh api` con
+  `-f`/`-F`/`--input` senza `-X`) richiedono sempre due passaggi: la prima richiesta viene bloccata e
   produce un `request_id`; l'agent deve fermarsi e chiedere al proprietario una
   seconda conferma, senza invocare autonomamente il comando di conferma. Dopo
   aver verificato target e comando, il proprietario esegue da un terminale

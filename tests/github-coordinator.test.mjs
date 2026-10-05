@@ -992,6 +992,37 @@ test('sospende ogni cancellazione Actions fino alla conferma separata del propri
     type: 'exec',
     args: ['--repo', 'owner/repo', 'api', '--method', 'POST', 'actions/runs/123/cancel'],
   }).target, '/repos/owner/repo/actions/runs/123/cancel');
+  // force-cancel e POST implicito (parametri senza -X) non aggirano la conferma.
+  const forced = cancellationRequestDetails({
+    type: 'api', method: 'POST', path: '/repos/owner/repo/actions/runs/123/force-cancel',
+  });
+  assert.equal(forced.kind, 'workflow-run-force-cancellation');
+  assert.equal(forced.runId, '123');
+  assert.match(forced.target, /force-cancel.*FORZATA/);
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', '-X', 'POST', 'repos/owner/repo/actions/runs/123/force-cancel'],
+  }).kind, 'workflow-run-force-cancellation');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', '-X', 'POST', 'actions/runs/123/force-cancel', '--repo', 'owner/repo'],
+  }).target, '/repos/owner/repo/actions/runs/123/force-cancel (cancellazione FORZATA)');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', 'actions/runs/123/cancel', '--input', 'payload.json', '--repo', 'owner/repo'],
+  }).target, '/repos/owner/repo/actions/runs/123/cancel');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', 'repos/owner/repo/actions/runs/123/cancel', '-f', 'x=y'],
+  }).runId, '123');
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', 'repos/owner/repo/actions/runs/123/force-cancel', '--raw-field=x=y'],
+  }).kind, 'workflow-run-force-cancellation');
+  assert.equal(cancellationRequestDetails({
+    type: 'api', method: 'GET', path: '/repos/owner/repo/actions/runs/123/force-cancel',
+  }), null);
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', '-X', 'GET', 'repos/owner/repo/actions/runs/123/force-cancel'],
+  }), null);
+  assert.equal(cancellationRequestDetails({
+    type: 'exec', args: ['api', 'repos/owner/repo/actions/runs/123/force-cancel'],
+  }), null);
 
   const coordinator = new GitHubCoordinator({
     identity: 'test',
