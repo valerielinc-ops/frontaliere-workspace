@@ -163,14 +163,17 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   inoltra alla porta locale `18787` e `https://gh-nanako.frontaliereticino.ch/github/webhook`
   alla `18788`. I receiver sono launch agent macOS persistenti; non mettere il
   token del tunnel o il secret webhook nei repository.
-- Il tunnel finisce sul Mac principale: GitHub consegna ogni webhook a un solo
-  URL, quindi i coordinatori degli altri Mac (host agenti) li ricevono solo se
-  il receiver del Mac principale li inoltra con `--relay
-  http://<IP Tailscale>:<porta>/github/webhook` (ripetibile) e il receiver
-  dell'altro Mac ascolta anche su quell'IP con `--extra-host <IP Tailscale>`.
-  L'inoltro conserva la firma, non viene ri-inoltrato e il coordinatore
-  deduplica per delivery. Senza inoltro `webhookEvents` resta 0 e le attese
-  passano solo dalla riconciliazione periodica.
+- GitHub consegna ogni webhook a un solo URL, quindi ogni Mac con un
+  coordinatore ha un proprio webhook. Il Mac host agenti ha un suo tunnel
+  (`com.cloudflare.cloudflared`) con `https://gh-default-agenti.frontaliereticino.ch/github/webhook`
+  e `https://gh-nanako-agenti.frontaliereticino.ch/github/webhook` sulle stesse
+  porte, registrati come webhook separati sui tre repo con lo stesso secret
+  (dal 2026-10-05). In alternativa a un tunnel il receiver puo' inoltrare le
+  consegne a un altro Mac via Tailscale con `--relay
+  http://<IP Tailscale>:<porta>/github/webhook`, mentre il ricevente ascolta
+  anche su quell'IP con `--extra-host`; il coordinatore deduplica per
+  delivery. Se `webhookEvents` resta 0, le attese passano solo dalla
+  riconciliazione periodica.
 - Se un webhook manca, solo il coordinatore può eseguire una riconciliazione
   una-shot con `bin/gh-frontaliere events reconcile <subscription-id>`; non è un
   permesso per l'agent di riprendere il polling.

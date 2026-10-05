@@ -715,21 +715,26 @@ col login automatico si apre da sola. Dopo un riavvio controlla
 `stat -f %Su /dev/console`: se non e' l'utente, entri con Condivisione schermo
 (porta 5900, gia' attiva) attraverso Tailscale.
 
-**Webhook GitHub.** Qui non gira `cloudflared`: il tunnel di
-`gh-default`/`gh-nanako.frontaliereticino.ch` finisce sul Mac principale e
-GitHub consegna ogni webhook a un solo URL. Fino al 2026-10-05 i coordinatori
-di questo Mac avevano `webhookEvents: 0` e vedevano PR e run solo con la
-riconciliazione periodica (verificato: una POST all'URL pubblico non arriva al
-receiver locale). Rimedio: i receiver di questo Mac ascoltano anche sull'IP
-Tailscale (`--extra-host`, nel plist
-`~/Library/LaunchAgents/ch.frontaliere.github-webhook-<identita'>.plist`) e
-quelli del Mac principale inoltrano ogni consegna accettata con
-`--relay http://<IP Tailscale di questo Mac>:<18787|18788>/github/webhook`.
-Dopo una modifica del plist: `launchctl bootout gui/$(id -u)/<label>` e
-`launchctl bootstrap gui/$(id -u) <plist>`. Verifica: `webhookEvents` in
-`bin/gh-frontaliere status --full` cresce senza riconciliazioni; un inoltro
-fallito lascia una riga `webhook_relay_failed` nel log d'errore del receiver
-del Mac principale.
+**Webhook GitHub.** GitHub consegna ogni webhook a un solo URL, e il tunnel
+di `gh-default`/`gh-nanako.frontaliereticino.ch` finisce sul Mac principale.
+Fino al 2026-10-05 i coordinatori di questo Mac avevano `webhookEvents: 0` e
+vedevano PR e run solo con la riconciliazione periodica (verificato: una POST
+all'URL pubblico non arrivava al receiver locale). Dal 2026-10-05 questo Mac ha
+un proprio tunnel, il launch agent `com.cloudflare.cloudflared`
+(`launchctl print gui/$(id -u)/com.cloudflare.cloudflared`), con
+`https://gh-default-agenti.frontaliereticino.ch/github/webhook` -> 18787 e
+`https://gh-nanako-agenti.frontaliereticino.ch/github/webhook` -> 18788. Sono
+registrati come webhook separati, con gli stessi eventi e lo stesso secret, su
+`frontaliere-si-o-no`, `frontaliere-workspace` (identita' default) e
+`frontaliere-articles` (identita' nanako); gli URL del Mac principale restano
+attivi. Non reinstallare `cloudflared` e non toccarne il token. I receiver
+ascoltano anche sull'IP Tailscale (`--extra-host`, nel plist
+`~/Library/LaunchAgents/ch.frontaliere.github-webhook-<identita'>.plist`), cosi'
+un altro Mac puo' inoltrare con `--relay`. Dopo una modifica del plist:
+`launchctl bootout gui/$(id -u)/<label>` e `launchctl bootstrap gui/$(id -u)
+<plist>`. Verifica: `webhookEvents` in `bin/gh-frontaliere status --full`
+cresce e `webhookSignatureFailures` resta fermo; le consegne arrivate due volte
+(direttamente e inoltrate) finiscono in `webhookDuplicates`.
 
 **Aggiornamento automatico.** `bin/workspace-autoupdate install` carica il
 launch agent `ch.frontaliere.workspace-autoupdate` (ogni 15 minuti, a priorita'
