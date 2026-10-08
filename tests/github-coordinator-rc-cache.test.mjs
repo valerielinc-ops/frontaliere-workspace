@@ -146,7 +146,12 @@ esac
   chmodSync(security, 0o700);
   const rcEnv = join(directory, 'rc-env.sh');
   writeFileSync(rcEnv, `echo loaded >> ${JSON.stringify(join(directory, 'rc-loads.log'))}
-if [ "\${FAKE_RC_FAIL:-}" = "1" ]; then return 1; fi
+if [ "\${FAKE_RC_FAIL:-}" = "1" ]; then
+  echo "📦 Remote Config: 0 params available" >&2
+  echo "✖ Il loader di Remote Config non e' caricabile: mancano moduli tracciati." >&2
+  echo "  generator/scripts/lib/missing.mjs — tracciato, fuori dal checkout sparse." >&2
+  return 1
+fi
 export GITHUB_PAT='rc-default-token'
 export GITHUB_PAT_NANAKO='rc-nanako-token'
 export FRONTALIERE_GH_WEBHOOK_SECRET='rc-webhook-secret'
@@ -162,6 +167,7 @@ process.stdout.write(JSON.stringify({
   unrelated: pick('UNRELATED_RC_SECRET'),
 }));
 `);
+  let lastStderr = '';
   const run = (args = ['serve', '--identity', 'default'], extraEnv = {}) => {
     const result = spawnSync(LAUNCHER, args, {
       encoding: 'utf8',
@@ -176,6 +182,7 @@ process.stdout.write(JSON.stringify({
       },
     });
     assert.equal(result.status, 0, result.stderr);
+    lastStderr = result.stderr;
     return JSON.parse(result.stdout);
   };
   const rcLoads = () => (existsSync(join(directory, 'rc-loads.log'))
@@ -190,8 +197,27 @@ process.stdout.write(JSON.stringify({
     const entry = JSON.parse(readFileSync(file, 'utf8'));
     writeFileSync(file, JSON.stringify({ ...entry, storedAt: entry.storedAt - milliseconds }));
   };
-  return { directory, store, run, rcLoads, item, age, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
+  return { directory, store, run, stderr: () => lastStderr, rcLoads, item, age, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
 }
+
+test('il launcher riporta nel log la causa detta da rc-env.sh, senza il resto del suo output', () => {
+  const fixture = launcherFixture();
+  try {
+    // Senza cache e senza Remote Config il coordinator parte comunque: e' lui a
+    // dire che manca il token. Qui conta che il motivo arrivi al log di launchd.
+    const started = fixture.run(undefined, { FAKE_RC_FAIL: '1', FRONTALIERE_GH_RC_CACHE: '0' });
+    assert.equal(started.token, null);
+    assert.match(fixture.stderr(), /^✖ Il loader di Remote Config non e' caricabile/m);
+    assert.match(fixture.stderr(), /generator\/scripts\/lib\/missing\.mjs/, 'anche le righe di dettaglio');
+    assert.doesNotMatch(fixture.stderr(), /params available/);
+
+    const loaded = fixture.run(undefined, { FRONTALIERE_GH_RC_CACHE: '0' });
+    assert.equal(loaded.token, 'rc-default-token');
+    assert.equal(fixture.stderr(), '', 'un caricamento riuscito non scrive nel log');
+  } finally {
+    fixture.cleanup();
+  }
+});
 
 test('il launcher parte dalla cache senza Remote Config e la rinnova dopo un giorno', { skip: process.platform !== 'darwin' }, () => {
   const fixture = launcherFixture();

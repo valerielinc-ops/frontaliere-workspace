@@ -92,7 +92,16 @@ if [ -n "$needed" ]; then
   fi
   needed="$(missing_credentials)"
   if [ -n "$needed" ]; then
-    . "${FRONTALIERE_GH_RC_ENV_SCRIPT:-$script_dir/rc-env.sh}" >/dev/null 2>&1 || true
+    # rc-env.sh says on its "✖" lines why it loaded nothing (auth, a corpus
+    # loader that cannot be imported). Those reach the launchd error log; the
+    # rest of its output stays out, as before.
+    rc_env_log="$(mktemp "${TMPDIR:-/tmp}/github-coordinator-rc-env.XXXXXX" 2>/dev/null || true)"
+    . "${FRONTALIERE_GH_RC_ENV_SCRIPT:-$script_dir/rc-env.sh}" >/dev/null 2>"${rc_env_log:-/dev/null}" || true
+    if [ -n "$rc_env_log" ]; then
+      sed -n '/^✖/,$p' "$rc_env_log" >&2 || true
+      rm -f "$rc_env_log"
+    fi
+    unset rc_env_log
     export_token_aliases
     still_missing="$(missing_credentials)"
     loaded=""

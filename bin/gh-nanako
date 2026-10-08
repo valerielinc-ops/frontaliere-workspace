@@ -20,16 +20,32 @@
 
 set -uo pipefail
 
+_rc_log=""
 if [ -z "${GITHUB_PAT_NANAKO:-}" ]; then
+  # rc-env.sh dice perche' non ha caricato (auth, loader non caricabile): la sua
+  # diagnostica si conserva per il messaggio qui sotto invece di buttarla.
+  _rc_log="$(mktemp "${TMPDIR:-/tmp}/gh-nanako-rc.XXXXXX" 2>/dev/null || true)"
   # shellcheck source=/dev/null
-  . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/rc-env.sh" >/dev/null 2>&1
+  . "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/rc-env.sh" >/dev/null 2>"${_rc_log:-/dev/null}"
 fi
 
 if [ -z "${GITHUB_PAT_NANAKO:-}" ]; then
-  echo "✖ GITHUB_PAT_NANAKO non disponibile — Remote Config non ha risposto." >&2
-  echo "  Prova: source bin/rc-env.sh" >&2
+  echo "✖ GITHUB_PAT_NANAKO non disponibile." >&2
+  if [ -n "$_rc_log" ] && grep -q '^✖' "$_rc_log" 2>/dev/null; then
+    # L'errore di node, quando c'e', e la causa detta da rc-env.sh: niente del
+    # resto del suo output.
+    {
+      grep -E '^[A-Za-z]*Error( \[[A-Z_]+\])?:' "$_rc_log" | head -n 3
+      sed -n '/^✖/,$p' "$_rc_log"
+    } | sed 's/^/  /' >&2
+  else
+    echo "  Remote Config non ha risposto. Prova: source bin/rc-env.sh" >&2
+  fi
+  if [ -n "$_rc_log" ]; then rm -f "$_rc_log"; fi
   exit 1
 fi
+if [ -n "$_rc_log" ]; then rm -f "$_rc_log"; fi
+unset _rc_log
 
 exec env FRONTALIERE_GH_IDENTITY=nanako GH_TOKEN="$GITHUB_PAT_NANAKO" GH_HOST=github.com \
   "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/gh" "$@"
