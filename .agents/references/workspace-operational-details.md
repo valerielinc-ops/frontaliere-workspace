@@ -178,6 +178,16 @@ Due comportamenti che confondono se non li conosci:
 - Il loader **esce 0 anche quando non carica niente** — non deve mai rompere un
   workflow. In locale un fallimento di auth e' quindi indistinguibile da un
   successo. `bin/rc-env.sh` aggiunge il controllo che manca.
+- Il checkout principale del corpus e' **sparse** e il suo elenco si allunga a
+  mano: un import nuovo del loader resta fuori dal disco e node muore prima di
+  leggere Remote Config (il 2026-09-17 mancava il loader stesso, il 2026-10-08
+  `lib/source-copy-guard.mjs`, nascosto per un giorno dalla cache del
+  portachiavi). `bin/rc-env.sh` lo ripara con `bin/rc-loader-closure.mjs`, che
+  segue gli import relativi del loader e aggiunge al checkout sparse i moduli
+  tracciati mancanti; con `--check` li elenca senza toccare nulla. Un modulo
+  cancellato dal disco non viene ripristinato: viene nominato, con il comando.
+  Uno stato d'uscita del loader diverso da 0 e' node che non l'ha caricato, e
+  `rc-env.sh` lo dice invece di parlare di auth.
 
 Il file `.env.example` del sito contiene solo la config Firebase pubblica
 (`VITE_FIREBASE_*`). Nessun secret li' dentro, per design.

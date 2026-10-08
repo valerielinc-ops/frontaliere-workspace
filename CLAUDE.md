@@ -62,6 +62,12 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 - Una variabile gia' presente non viene sovrascritta dal loader; `bin/rc-env.sh`
   aggiunge il controllo di successo che il loader, deliberatamente fail-open,
   non esegue.
+- `bin/rc-env.sh` controlla prima che il loader e i moduli che importa siano
+  sul disco: nel checkout sparse del corpus aggiunge da solo quelli tracciati
+  che mancano (`git sparse-checkout add`, nessun contenuto cambia) e nomina
+  quelli che non riesce a riportare. Ogni suo fallimento esce con una riga `✖`
+  che dice la causa; `bin/gh-nanako` e il launcher del coordinator riportano
+  quelle righe.
 - Il launcher del coordinator conserva token e webhook secret caricati da Remote
   Config nel portachiavi di macOS (servizio
   `ch.frontaliere.github-coordinator.rc-cache`): per 24 ore un riavvio non
