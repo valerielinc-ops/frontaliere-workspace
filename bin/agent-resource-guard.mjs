@@ -212,8 +212,10 @@ export function parsePayload(raw) {
     const sessionId = String(
       payload.session_id ?? payload.sessionId ?? input.session_id ?? input.sessionId ?? 'unknown-session',
     );
+    // Claude Code lo chiama `tool_use_id`, Codex `tool_call_id`.
     const toolCallId = String(
-      payload.tool_call_id ?? payload.toolCallId ?? input.tool_call_id ?? input.toolCallId ?? '',
+      payload.tool_call_id ?? payload.toolCallId ?? payload.tool_use_id ?? payload.toolUseId
+        ?? input.tool_call_id ?? input.toolCallId ?? input.tool_use_id ?? input.toolUseId ?? '',
     );
     return { payload, command, cwd, sessionId, toolCallId };
   } catch {
@@ -439,7 +441,17 @@ export function pressureDecision(snapshot, options = {}) {
   return { blocked: false };
 }
 
+/**
+ * L'id deve essere lo stesso nel PreToolUse e nel PostToolUse della stessa
+ * chiamata. La directory corrente non lo e': un comando che fa `cd` la cambia
+ * fra i due hook. Quando l'harness passa l'id della chiamata basta quello;
+ * senza, command e cwd restano l'unica chiave e `guardPost` ritrova il pending
+ * anche da un'altra directory (vedi `pendingOfMovedCommand`).
+ */
 export function invocationId(info) {
+  if (info.toolCallId) {
+    return sha256(JSON.stringify({ sessionId: info.sessionId, toolCallId: info.toolCallId })).slice(0, 32);
+  }
   return sha256(JSON.stringify({
     sessionId: info.sessionId,
     toolCallId: info.toolCallId,
@@ -603,6 +615,28 @@ function readPending(runtimeDir, id) {
 
 function removePending(runtimeDir, id) {
   try { unlinkSync(pendingPath(runtimeDir, id)); } catch { /* already gone */ }
+}
+
+/**
+ * Il pending di un comando che ha cambiato directory: stessa sessione, stesso
+ * comando, nessun id di chiamata, partito da un'altra cwd. Senza questo il
+ * PostToolUse non trova niente da chiudere, e il lease di un comando pesante
+ * resta appeso fino al TTL dei lease non osservati (15 minuti di coda ferma
+ * per tutte le sessioni). Il piu' recente vince: e' quello che sta finendo.
+ */
+function pendingOfMovedCommand(runtimeDir, info) {
+  if (info.toolCallId) return undefined;
+  const command = redactCommand(info.command);
+  let names = [];
+  try { names = readdirSync(path.join(runtimeDir, PENDING_DIR)).filter((name) => name.endsWith('.json')); } catch { return undefined; }
+  let found;
+  for (const name of names) {
+    const pending = readJson(path.join(runtimeDir, PENDING_DIR, name));
+    if (!pending || pending.toolCallId || pending.sessionId !== info.sessionId) continue;
+    if (pending.command !== command || pending.cwd === info.cwd) continue;
+    if (!found || Number(pending.startedAt || 0) > Number(found.startedAt || 0)) found = pending;
+  }
+  return found;
 }
 
 function extractExitCode(payload) {
@@ -842,8 +876,9 @@ function removeOwnLease(runtimeDir, id) {
 
 export function guardPost(info, workspace = findWorkspace(info.cwd)) {
   const runtimeDir = runtimeDirectory(workspace);
-  const id = invocationId(info);
-  const pending = readPending(runtimeDir, id);
+  const computedId = invocationId(info);
+  const pending = readPending(runtimeDir, computedId) ?? pendingOfMovedCommand(runtimeDir, info);
+  const id = pending?.id ?? computedId;
   const classification = classifyCommand(info.command);
   const endedAt = now();
   const snapshot = pending && classification.heavy ? readHostSnapshot() : undefined;
