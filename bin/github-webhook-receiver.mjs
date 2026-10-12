@@ -25,6 +25,12 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const DEFAULT_PATH = '/github/webhook';
+// Cloudflare Tunnel keeps idle origin connections for 90s by default, while
+// Node's HTTP server default is 5s. Keep the receiver socket open slightly
+// longer than the tunnel's pool entry so cloudflared expires it first instead
+// of reusing a socket Node has already closed (502 write_tcp/broken_pipe).
+// https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/
+export const WEBHOOK_ORIGIN_KEEP_ALIVE_TIMEOUT_MS = 100_000;
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 export const RELAY_HEADER = 'x-frontaliere-webhook-relay';
 export const RELAY_TIMEOUT_MS = 10_000;
@@ -436,7 +442,7 @@ export function createGitHubWebhookReceiver({
   now = Date.now,
   relay = null,
 } = {}) {
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     onRequestStart();
     const startedAt = now();
     // Which step failed: a client/tunnel abort while the body is read and a
@@ -500,6 +506,8 @@ export function createGitHubWebhookReceiver({
       }
     }
   });
+  server.keepAliveTimeout = WEBHOOK_ORIGIN_KEEP_ALIVE_TIMEOUT_MS;
+  return server;
 }
 
 function optionValues(args, name) {
