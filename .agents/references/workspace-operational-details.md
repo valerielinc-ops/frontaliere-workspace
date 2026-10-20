@@ -192,6 +192,21 @@ Due comportamenti che confondono se non li conosci:
 Il file `.env.example` del sito contiene solo la config Firebase pubblica
 (`VITE_FIREBASE_*`). Nessun secret li' dentro, per design.
 
+## Candidature assistite: retry e deploy
+
+- Una correzione del runner dell'Action, una volta su `main`, si può rilanciare
+  subito: non occorre attendere il deploy del sito. Il runner viene eseguito da
+  GitHub Actions; il deploy del sito non ne pubblica né ne sblocca il codice.
+  Se cambia anche la Cloud Function owner, il suo deploy resta separato e non
+  viene sostituito da quello del sito.
+- Per riprovare un invio in `owner_takeover` o `candidate_handoff`, usare
+  l'azione owner `automationRetrySubmit` tramite
+  `manageAssistedApplicationAdmin`: registra la transizione a `submitting` e
+  poi avvia l'Action. Un dispatch grezzo `mode=submit` mentre il flow non è già
+  `submitting` viene ignorato dal runner.
+- Un run verde non prova che la candidatura sia stata inviata: verificare lo
+  stato finale del flow e `submittedAt` sull'ordine.
+
 ## Comandi
 
 ```bash
