@@ -46,6 +46,10 @@ import {
   shaMatches,
 } from './github-event-broker.mjs';
 import { assertEventIdentity, hasEventRoute } from './github-event-routing.mjs';
+import {
+  deployDispatchBlockedResponse,
+  deployDispatchDetails,
+} from './deploy-dispatch-policy.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const COORDINATOR_PROTOCOL_VERSION = 6;
@@ -2968,6 +2972,10 @@ export class GitHubCoordinator {
   }
 
   submit(request) {
+    const deployDispatch = deployDispatchDetails(request);
+    if (deployDispatch && request.ownerDeployDispatchOverride !== true) {
+      return Promise.resolve(deployDispatchBlockedResponse(deployDispatch));
+    }
     const cancellation = cancellationRequestDetails(request);
     if (cancellation && request[OWNER_CONFIRMATION] !== undefined) {
       // The symbol is added only by confirmCancellation inside this process;
