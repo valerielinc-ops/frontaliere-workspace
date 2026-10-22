@@ -31,6 +31,11 @@ test('blocca il dispatch REST POST sia via protocollo sia via gh api', () => {
     type: 'exec',
     args: ['api', path, '-f', 'ref=main'],
   })?.workflow, 'deploy.yml');
+  assert.equal(deployDispatchDetails({
+    type: 'api',
+    method: 'POST',
+    path: `https://api.github.com${path}`,
+  })?.workflow, 'deploy.yml');
 });
 
 test('non-dispatch e letture REST non sono bloccati', () => {
