@@ -109,8 +109,10 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   Actions dispatch dalla UI o polling HTML, nemmeno come workaround per timeout
   o rate limit. Il REST interno al coordinatore e' consentito: l'agent deve
   invocare solo `gh ...` tramite lo shim oppure `bin/gh-frontaliere ...`.
-- Per Actions usa `gh workflow run`, `gh run list` e `gh run view` attraverso il
-  coordinatore; non trasferire dispatch o polling nel browser e non usare
+- Per Actions non auto-rilanciate usa `gh workflow run`, `gh run list` e
+  `gh run view` attraverso il coordinatore; `deploy.yml` e
+  `deploy-publish.yml` sono esclusi dalla regola e seguono la guardia dedicata
+  più sotto. Non trasferire dispatch o polling nel browser e non usare
   `gh pr checks --watch` o `gh run watch`. Se una richiesta va in timeout o
   quota, controlla
   `bin/gh-frontaliere status`, lascia applicare backoff/coda e ritenta tramite
@@ -132,6 +134,13 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   riceve `event_subscription_expired` e il goal va marcato `timed-out` con la
   prossima azione esplicita; una sola riconciliazione è ammessa solo se il
   coordinatore segnala un webhook mancante.
+- I workflow `deploy.yml` e `deploy-publish.yml` del sito sono auto-rilanciati
+  dal loro ciclo: il coordinatore rifiuta agli agenti sia `gh workflow run`
+  sia il POST REST equivalente, per evitare una seconda run nella coda. Per una
+  recovery manuale del proprietario, dopo avere verificato repo, ref e motivo,
+  è ammesso soltanto l'override esplicito
+  `FRONTALIERE_OWNER_DEPLOY_DISPATCH=I_UNDERSTAND_DEPLOY_DISPATCH gh workflow run ...`;
+  il valore non va mai aggiunto a uno script agentico o a un workflow.
 - Usa `bin/gh-frontaliere events summary` o `events status` (compatto di
   default; `--full` solo per diagnosi) per un controllo sintetico di pending,
   listener orfani, duplicati ed ETA. Anche `bin/gh-frontaliere status` è

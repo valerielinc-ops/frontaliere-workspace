@@ -22,6 +22,7 @@ import {
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { ownerDeployDispatchOverrideFromEnvironment } from './deploy-dispatch-policy.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(THIS_DIR, 'github-coordinator-launcher');
@@ -473,10 +474,12 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
   }
   const timeoutMs = requestTimeoutMilliseconds(request);
   const client = request?.client || schedulingClientKey();
+  const ownerDeployDispatchOverride = ownerDeployDispatchOverrideFromEnvironment();
   const response = await connectWithTransientRetry(
     {
       ...request,
       identity: normalized,
+      ...(ownerDeployDispatchOverride ? { ownerDeployDispatchOverride: true } : {}),
       ...((request?.type === 'exec' || request?.type === 'api') && client ? { client } : {}),
     },
     {

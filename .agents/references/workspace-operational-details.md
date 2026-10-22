@@ -221,6 +221,16 @@ Sito: comandi npm standard (`install`/`dev`/`test`/`build:fast`), vedi `scripts`
 `tsx` e non `node` per il corpus: i sorgenti usano specificatori relativi senza
 estensione, che Node ESM puro non risolve.
 
+### Coda deploy del sito
+
+`deploy.yml` e `deploy-publish.yml` si rilanciano dal proprio ciclo e dal
+workflow di riconciliazione: gli agenti non devono accodarli con
+`gh workflow run` né con il POST REST a `actions/workflows/*/dispatches`. Il
+coordinatore root rifiuta entrambi i formati. Solo il proprietario può fare una
+recovery verificata usando l'override esplicito
+`FRONTALIERE_OWNER_DEPLOY_DISPATCH=I_UNDERSTAND_DEPLOY_DISPATCH`, mai inserito
+in script o workflow agentici.
+
 ## Pushare e aprire PR: i due repo NON si comportano allo stesso modo
 
 Sono di **due account diversi**, e questo cambia i comandi. `gh` e' autenticato come
