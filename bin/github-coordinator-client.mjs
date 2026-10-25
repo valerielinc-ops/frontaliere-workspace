@@ -43,6 +43,7 @@ const NETWORK_REQUEST_TYPES = new Set([
   'events-subscribe',
   'events-reconcile',
   'confirm-cancellation',
+  'confirm-workflow-enable',
 ]);
 const START_TIMEOUT_MS = 15_000;
 const START_LOCK_STALE_MS = 30_000;
@@ -51,6 +52,7 @@ const RETRYABLE_LOCAL_REQUEST_TYPES = new Set([
   'ping',
   'status',
   'cancellation-details',
+  'workflow-enable-details',
   'events-status',
   'events-summary',
   'events-audit',
@@ -509,6 +511,24 @@ export async function confirmCancellation(requestId, confirmation, { identity } 
   }
   return sendRequest({
     type: 'confirm-cancellation',
+    requestId,
+    confirmation,
+  }, { identity });
+}
+
+export async function getPendingWorkflowEnable(requestId, { identity } = {}) {
+  if (typeof requestId !== 'string' || requestId.length === 0) {
+    throw new TypeError('workflow_enable_request_id_required');
+  }
+  return sendRequest({ type: 'workflow-enable-details', requestId }, { identity });
+}
+
+export async function confirmWorkflowEnable(requestId, confirmation, { identity } = {}) {
+  if (typeof requestId !== 'string' || requestId.length === 0) {
+    throw new TypeError('workflow_enable_request_id_required');
+  }
+  return sendRequest({
+    type: 'confirm-workflow-enable',
     requestId,
     confirmation,
   }, { identity });

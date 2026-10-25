@@ -50,6 +50,7 @@ import {
   deployDispatchBlockedResponse,
   deployDispatchDetails,
 } from './deploy-dispatch-policy.mjs';
+import { dailyBriefWorkflowEnableDetails } from './daily-brief-owner-policy.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const COORDINATOR_PROTOCOL_VERSION = 6;
@@ -1666,6 +1667,7 @@ export class GitHubCoordinator {
     this.bucketPausedUntil = new Map();
     this.buckets = new Map();
     this.pendingCancellations = new Map();
+    this.pendingWorkflowEnables = new Map();
     this.anonymousWindowStartedAt = Date.now();
     this.anonymousUsed = 0;
     this.anonymousPausedUntil = 0;
@@ -1686,6 +1688,9 @@ export class GitHubCoordinator {
       cancellationRequests: 0,
       cancellationConfirmed: 0,
       cancellationExpired: 0,
+      workflowEnableRequests: 0,
+      workflowEnableConfirmed: 0,
+      workflowEnableExpired: 0,
       socketConnections: 0,
       socketErrors: 0,
       socketDisconnects: 0,
@@ -1753,6 +1758,7 @@ export class GitHubCoordinator {
   status({ compact = false } = {}) {
     this.resetAnonymousBudget();
     this.prunePendingCancellations();
+    this.prunePendingWorkflowEnables();
     if (compact) {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
@@ -1774,6 +1780,7 @@ export class GitHubCoordinator {
         // RPCs; neither this path nor the socket preflight scans the backlog.
         events: this.eventLivenessStatus(),
         pendingCancellations: this.pendingCancellations.size,
+        pendingWorkflowEnables: this.pendingWorkflowEnables.size,
         anonymous: {
           budget: ANONYMOUS_BUDGET,
           used: this.anonymousUsed,
@@ -1821,6 +1828,8 @@ export class GitHubCoordinator {
         },
       pendingCancellations: [...this.pendingCancellations.values()]
         .map((pending) => this.publicCancellationDetails(pending)),
+      pendingWorkflowEnables: [...this.pendingWorkflowEnables.values()]
+        .map((pending) => this.publicWorkflowEnableDetails(pending)),
       anonymous: {
         budget: ANONYMOUS_BUDGET,
         used: this.anonymousUsed,
@@ -2891,6 +2900,112 @@ export class GitHubCoordinator {
     }
   }
 
+  publicWorkflowEnableDetails(pending) {
+    return {
+      id: pending.id,
+      kind: pending.details.kind,
+      repo: pending.details.repo,
+      workflow: pending.details.workflow,
+      workflowId: pending.details.workflowId,
+      workflowName: pending.details.workflowName,
+      selector: pending.details.selector,
+      target: pending.details.target,
+      source: pending.request.type === 'exec' ? 'gh-cli' : 'coordinator-api',
+      command: pending.command,
+      requestedAt: pending.requestedAt,
+      expiresAt: pending.expiresAt,
+    };
+  }
+
+  prunePendingWorkflowEnables() {
+    const now = Date.now();
+    for (const [requestId, pending] of this.pendingWorkflowEnables.entries()) {
+      if (pending.expiresAtMs <= now) {
+        this.pendingWorkflowEnables.delete(requestId);
+        this.metrics.workflowEnableExpired += 1;
+      }
+    }
+  }
+
+  workflowEnableConfirmationRequired(request, details) {
+    this.prunePendingWorkflowEnables();
+    const id = `enable-daily-brief-${randomUUID()}`;
+    const requestedAt = new Date().toISOString();
+    const expiresAtMs = Date.now() + CANCELLATION_CONFIRMATION_TTL_MS;
+    const pending = {
+      id,
+      request: { ...request, anonymous: false },
+      details,
+      command: request.type === 'exec'
+        ? ['gh', ...(request.args || []).map(String)]
+        : ['gh', 'api', '-X', 'PUT', request.path],
+      requestedAt,
+      expiresAtMs,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    };
+    this.pendingWorkflowEnables.set(id, pending);
+    this.metrics.workflowEnableRequests += 1;
+    const publicDetails = this.publicWorkflowEnableDetails(pending);
+    const message = [
+      'owner_confirmation_required: riattivazione della daily-brief bloccata dal proprietario.',
+      `request_id=${id}`,
+      `target=${publicDetails.target}`,
+      `repo=${publicDetails.repo || '(risolto dal comando gh)'}`,
+      `owner_command=bin/gh-frontaliere confirm-workflow-enable ${id}`,
+      `expires_at=${publicDetails.expiresAt}`,
+    ].join('\n');
+    return {
+      ok: false,
+      exitCode: 2,
+      stdout: '',
+      stderr: `${message}\n`,
+      error: {
+        code: 'daily_brief_workflow_enable_owner_confirmation_required',
+        message,
+        requestId: id,
+        workflowEnable: publicDetails,
+        exitCode: 2,
+      },
+    };
+  }
+
+  getPendingWorkflowEnable(requestId) {
+    this.prunePendingWorkflowEnables();
+    const pending = this.pendingWorkflowEnables.get(String(requestId || ''));
+    if (!pending) {
+      return {
+        ok: false,
+        error: {
+          code: 'workflow_enable_confirmation_not_found',
+          message: 'richiesta di riattivazione della daily-brief inesistente o scaduta',
+        },
+      };
+    }
+    return { ok: true, workflowEnable: this.publicWorkflowEnableDetails(pending) };
+  }
+
+  async confirmWorkflowEnable(requestId, confirmation) {
+    this.prunePendingWorkflowEnables();
+    const normalizedId = String(requestId || '');
+    const pending = this.pendingWorkflowEnables.get(normalizedId);
+    if (!pending) return this.getPendingWorkflowEnable(normalizedId);
+    if (String(confirmation || '').trim() !== ownerConfirmationPhrase(normalizedId)) {
+      return {
+        ok: false,
+        error: {
+          code: 'owner_confirmation_invalid',
+          message: 'conferma proprietario non valida; nessuna riattivazione eseguita',
+        },
+      };
+    }
+
+    this.pendingWorkflowEnables.delete(normalizedId);
+    this.metrics.workflowEnableConfirmed += 1;
+    const confirmedRequest = { ...pending.request };
+    confirmedRequest[OWNER_CONFIRMATION] = normalizedId;
+    return this.submit(confirmedRequest);
+  }
+
   ownerConfirmationRequired(request, details) {
     this.prunePendingCancellations();
     const id = `cancel-${randomUUID()}`;
@@ -2972,6 +3087,10 @@ export class GitHubCoordinator {
   }
 
   submit(request) {
+    const dailyBriefWorkflowEnable = dailyBriefWorkflowEnableDetails(request);
+    if (dailyBriefWorkflowEnable && request[OWNER_CONFIRMATION] === undefined) {
+      return Promise.resolve(this.workflowEnableConfirmationRequired(request, dailyBriefWorkflowEnable));
+    }
     const deployDispatch = deployDispatchDetails(request);
     if (deployDispatch && request.ownerDeployDispatchOverride !== true) {
       return Promise.resolve(deployDispatchBlockedResponse(deployDispatch));
@@ -4593,6 +4712,10 @@ function startWithOwnerLock(identity, socket, ownerLock) {
           result = Promise.resolve(coordinator.getPendingCancellation(request.requestId));
         } else if (request.type === 'confirm-cancellation') {
           result = coordinator.confirmCancellation(request.requestId, request.confirmation);
+        } else if (request.type === 'workflow-enable-details') {
+          result = Promise.resolve(coordinator.getPendingWorkflowEnable(request.requestId));
+        } else if (request.type === 'confirm-workflow-enable') {
+          result = coordinator.confirmWorkflowEnable(request.requestId, request.confirmation);
         } else if (request.type === 'events-subscribe') {
           result = eventBrokerReady.then(() => coordinator.eventSubscription(request.spec));
         } else if (request.type === 'events-status') {

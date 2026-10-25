@@ -244,6 +244,9 @@ Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
   REST o UI GitHub. Il token GitHub non distingue agent e proprietario: il
   terminale interattivo e la verifica esplicita sono quindi il confine operativo
   della seconda approvazione.
+- Daily-brief bloccata dal proprietario dal 25/10/2026: non riattivare
+  `send-daily-brief.yml`, non cambiare `ENABLE_DAILY_BRIEF` né il file di blocco
+  senza istruzione esplicita del proprietario nella conversazione.
 - In caso estremo il daemon puo' usare una corsia anonima separata, solo per
   letture REST pubbliche e solo dopo `x-ratelimit-remaining: 0` autenticato.
   Ha un budget locale conservativo di 45 richieste/ora; non vale per GraphQL,
