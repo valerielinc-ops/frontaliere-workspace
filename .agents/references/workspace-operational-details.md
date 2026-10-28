@@ -8,6 +8,33 @@ motivo di una regola.
 Due repo che si parlano via HTTP, non via import. Tutto quello che segue e' stato
 verificato leggendo i repo, non dedotto dai nomi.
 
+## Decisione operativa: invio email senza cap artificiale (2026-10-28)
+
+Il sender dei job alert deve considerare tutti gli alert eleggibili in ordine di
+engagement e inviare tutto l'inviabile fino alla quota reale del cascade/provider.
+`JOB_ALERT_MAX_EMAILS_PER_RUN` e il vecchio cap fisso di 1.000 non sono una
+soluzione di memoria e non vanno reintrodotti: i candidati non si tagliano prima
+del matching, perché zero-match, deduplica e live-link scaduti non consumano una
+email. La memoria si protegge con batch di pianificazione bounded, rilascio di
+match/render dopo ogni batch e code/cache di preflight compattate; quota e
+memoria sono due problemi distinti.
+
+Il conteggio dei documenti grezzi non equivale all'audience newsletter. La
+misurazione di produzione del 2026-10-28 ha contato 15.967 documenti
+`newsletter_subscribers` e 10.631 destinatari eleggibili: 5.064 esclusi per
+stato newsletter (`unsubscribed` 2.652, `expired` 1.474, `inactive` 744,
+`bounced` 175, `complained` 18, `suppressed` 1), 30 per stop globale/cross-channel
+e 242 senza base di iscrizione (documenti profilo-only; quattro con il solo
+ancoraggio saved-jobs). Queste esclusioni sono regole di consenso/soppressione,
+non un difetto tecnico da aggirare per aumentare la revenue. L'obiettivo è
+raggiungere ogni destinatario eleggibile, non spedire a tutti i documenti grezzi.
+Il sender deve mantenere il breakdown per fase nei log, così un calo futuro si
+può distinguere tra policy, quota provider, matching, deduplica e errore tecnico.
+Un conteggio giornaliero di circa 900 newsletter può essere soltanto il residuo
+non ancora inviato della campagna in resume (o un'altra superficie di invio): non
+va usato come proxy dell'audience eleggibile totale. Job alert generici e
+CompanyAlert hanno sender e partizioni distinti.
+
 ## Da dove si apre la sessione
 
 La root del workspace e' **`~/Projects/frontaliere`**, ed e' da li' che vanno
