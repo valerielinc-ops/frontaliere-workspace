@@ -297,6 +297,32 @@ al loro interno. L'assenza di `public/` o `data/` in un worktree sparse non
 prova che il file non esista nel repository; usa `git show`, `git ls-tree` o
 materializza soltanto il path necessario.
 
+Per verificare una patch contro un base senza toccare checkout, indice o file
+stranieri usa l'indice privato di `bin/verify-patch-index.mjs`:
+
+```bash
+node bin/verify-patch-index.mjs \
+  --repo /percorso/al/repo \
+  --base origin/main \
+  --patch /tmp/modifica.patch \
+  --expected /tmp/hashes.json
+```
+
+`hashes.json` è un oggetto semplice `{"path/relativo":"<SHA-256 esadecimale>"}`;
+può includere anche path invariati. L'output JSON contiene `actualBase`, il
+`tree` risultante dall'indice temporaneo, `changedPaths` con stato e modalità,
+gli SHA-256 in `hashes` (`null` per i delete) e gli scostamenti in
+`expectedMismatch`. Il comando risolve il commit, esegue
+`git read-tree`, `git apply --cached --check` e `git apply --cached`, poi legge
+`git show :path` in streaming: non fa checkout e non materializza `public/` o
+`data/`.
+
+Per questo roundtrip di verifica è vietato usare `git archive` dell'intero
+repository o ricostruire un clone: oltre a essere inutile, può consumare
+spazio con repository grandi. Il divieto è circoscritto alla verifica delle
+patch e non cambia le procedure di build esistenti che usano legittimamente
+archivi completi.
+
 ## Git, PR e merge
 
 - `gh` e' autenticato come `valerielinc-ops`. Per il corpus specifica sempre
