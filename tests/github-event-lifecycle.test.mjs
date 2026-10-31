@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createConnection } from 'node:net';
+import { createInterface } from 'node:readline';
 
 import {
   GitHubCoordinator,
@@ -16,6 +21,7 @@ import {
   eventSubscription,
   listenForEvent,
   sendRequest,
+  socketPath,
   waitForCoordinatorStop,
 } from '../bin/github-coordinator-client.mjs';
 import {
@@ -58,6 +64,128 @@ function mergedEvent(number, deliveryId, receivedAt) {
 function signed(body, secret) {
   return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
 }
+
+test('la durata del listener non termina subscription keep, shared o one-shot non terminali', { timeout: 20_000 }, async (t) => {
+  const stateDirectory = mkdtempSync('/tmp/frontaliere-event-keep-');
+  const identity = 'event-keep-lifetime';
+  const previousDirectory = process.env.FRONTALIERE_GH_STATE_DIR;
+  process.env.FRONTALIERE_GH_STATE_DIR = stateDirectory;
+  const secret = 'keep-lifetime-secret';
+  let child;
+  let childExit;
+  let stderr = '';
+  const stop = async () => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill('SIGTERM');
+    await childExit;
+  };
+  t.after(async () => {
+    await stop();
+    if (previousDirectory === undefined) delete process.env.FRONTALIERE_GH_STATE_DIR;
+    else process.env.FRONTALIERE_GH_STATE_DIR = previousDirectory;
+    rmSync(stateDirectory, { recursive: true, force: true });
+  });
+  const start = async () => {
+    // Run the daemon directly: no launcher, launchd, Remote Config or GitHub.
+    // Fail closed if any unexpected recovery attempts to use the network.
+    const offline = `globalThis.fetch = async () => { process.stderr.write('unexpected network in lifetime test\\n'); throw new Error('network disabled'); };`;
+    child = spawn(process.execPath, [
+      '--import', `data:text/javascript,${encodeURIComponent(offline)}`,
+      fileURLToPath(new URL('../bin/github-coordinator.mjs', import.meta.url)),
+      'serve', '--identity', identity,
+    ], {
+      env: {
+        ...process.env,
+        FRONTALIERE_GH_TOKEN: 'test-token-not-real',
+        FRONTALIERE_REAL_GH: '/bin/echo',
+        FRONTALIERE_GH_WEBHOOK_SECRET: secret,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    childExit = once(child, 'exit');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    // Only wait for the local socket, never poll GitHub or start a service.
+    for (let attempt = 0; attempt < 100 && !existsSync(socketPath(identity)); attempt += 1) {
+      assert.equal(child.exitCode, null, stderr);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    assert.ok(existsSync(socketPath(identity)), stderr);
+  };
+
+  const seed = new GitHubEventBroker({ stateFile: join(stateDirectory, `github-events-${identity}.json`), webhookSecret: secret });
+  const cases = [
+    { name: 'keep', number: 51, once: false },
+    { name: 'once', number: 52, once: true },
+    { name: 'shared', number: 53, once: true, shared: true },
+  ].map((spec) => ({ ...spec, subscription: seed.subscribe({
+    ...spec, repo: 'owner/repo', resource: 'pull_request', waitFor: ['merged'], ttlSeconds: 600,
+  }) }));
+  for (const entry of cases) {
+    const event = mergedEvent(entry.number, `${entry.name}-first`, new Date().toISOString());
+    if (entry.once && !entry.shared) {
+      // Conflict is non-terminal: even a one-shot subscription must survive it.
+      seed.recordEvent({ ...event, id: 'once-conflict', state: 'conflict', states: ['conflict'] });
+    }
+    seed.recordEvent(event);
+    if (!entry.once || entry.shared) {
+      seed.recordEvent({ ...event, id: `${entry.name}-second` });
+    }
+  }
+  await start();
+  const openListener = async (id) => {
+    const socket = createConnection(socketPath(identity));
+    t.after(() => socket.destroy());
+    const lines = createInterface({ input: socket })[Symbol.asyncIterator]();
+    const next = async () => JSON.parse((await lines.next()).value);
+    await once(socket, 'connect');
+    socket.write(`${JSON.stringify({ type: 'event-listen', subscriptionId: id, once: true })}\n`);
+    assert.equal((await next()).type, 'listening');
+    return { socket, next, event: (await next()).event };
+  };
+  const keepId = cases[0].subscription.id;
+  const interrupted = await openListener(keepId);
+  assert.equal(interrupted.event.id, 'keep-first');
+  interrupted.socket.destroy();
+  await stop();
+  await start();
+  const listen = (id) => listenForEvent(id, {
+    identity, timeoutMs: 5_000, heartbeatIntervalMs: 50, reconcileAfterMs: 0,
+  });
+  for (const entry of cases) {
+    const id = entry.subscription.id;
+    if (entry.shared) {
+      // Both observers receive the same event before either acknowledges it.
+      const observers = [await openListener(id), await openListener(id)];
+      for (const observer of observers) {
+        assert.equal(observer.event.id, 'shared-first');
+        observer.socket.write(`${JSON.stringify({ type: 'event-ack', eventId: observer.event.id })}\n`);
+      }
+      const acknowledgements = await Promise.all(observers.map((observer) => observer.next()));
+      assert.ok(acknowledgements.every((message) => message.type === 'acked'));
+      for (const observer of observers) observer.socket.destroy();
+    } else {
+      assert.equal((await listen(id)).id, entry.name === 'once' ? 'once-conflict' : `${entry.name}-first`);
+    }
+    const details = await eventSubscription(id, { identity });
+    assert.equal(details.subscription.once, entry.once);
+    assert.equal(details.subscription.pendingEvents, 1, `${entry.name}: ack removes only the delivered event`);
+  }
+
+  // The ack cursor and the next event both survive process restart.
+  await stop();
+  await start();
+  for (const entry of cases) {
+    const id = entry.subscription.id;
+    assert.equal((await listen(id)).id, entry.name === 'once' ? 'once-first' : `${entry.name}-second`);
+    if (entry.once && !entry.shared) {
+      await assert.rejects(eventSubscription(id, { identity }), { code: 'event_subscription_not_found' });
+    } else {
+      assert.equal((await eventSubscription(id, { identity })).subscription.pendingEvents, 0);
+      assert.equal((await sendRequest({ type: 'events-unsubscribe', subscriptionId: id }, { identity })).removed, true);
+    }
+  }
+  assert.doesNotMatch(stderr, /unexpected network/);
+});
 
 test('una delivery non abbinata non riscrive subito lo stato, un evento pending si', async () => {
   const { broker, stateFile, cleanup } = tempBroker({ nowMs: Date.now() });
