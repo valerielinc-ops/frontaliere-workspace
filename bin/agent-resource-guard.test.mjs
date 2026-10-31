@@ -68,6 +68,38 @@ test('il lease di un comando finito senza PostToolUse non blocca il successivo',
   assert.equal(next.acquired, true);
 }));
 
+test('recupera un avvio mai osservato solo con identita e assenza nativa provate', () => withRuntime((runtime) => {
+  const at = Date.now();
+  const lease = oldLease({ startedAt: at - 120_000, hookPid: 41, observerPid: 42, command: 'node scripts/ci/check-sibling-patterns.mjs', commandHash: 'command-hash' });
+  const status = { version: 2, id: lease.id, hookPid: 41, observerPid: 42, leaseStartedAt: lease.startedAt, commandHash: lease.commandHash, seen: false, startupComplete: true, ownerAbsentAtEnd: true, endedAt: at - 40_000, pids: [] };
+  const writeStatus = (value) => {
+    mkdirSync(path.join(runtime, 'observer-status'), { recursive: true });
+    writeFileSync(path.join(runtime, 'observer-status', `${lease.id}.json`), JSON.stringify(value));
+  };
+  const options = { now: at, observerAlive: () => false, processAlive: () => false, processRows: () => [] };
+  writeStatus(status);
+  assert.equal(leaseStaleReason(lease, runtime, options), 'avvio terminato senza processi attivi');
+  for (const field of ['id', 'hookPid', 'observerPid', 'leaseStartedAt', 'commandHash']) {
+    writeStatus({ ...status, [field]: 'different-invocation' });
+    assert.equal(leaseStaleReason(lease, runtime, options), undefined, field);
+  }
+  for (const change of [{ startupComplete: false }, { ownerAbsentAtEnd: false }, { pids: null }, { endedAt: at - 1_000 }, { version: 1 }]) {
+    writeStatus({ ...status, ...change });
+    assert.equal(leaseStaleReason(lease, runtime, options), undefined);
+  }
+  writeStatus(status);
+  for (const pid of [41, 42]) {
+    assert.equal(leaseStaleReason(lease, runtime, { ...options, processAlive: (candidate) => candidate === pid }), undefined, 'un PID vivo o riusato resta protetto');
+  }
+  for (const rows of [null, [{ pid: 99, ppid: 1, elapsed: '01:00:00', command: lease.command }], [{ pid: 100, ppid: 1, elapsed: '01:30', command: '/usr/bin/worker-child' }], [{ pid: 100, ppid: 1, command: '/usr/bin/worker-child' }]]) {
+    assert.equal(leaseStaleReason(lease, runtime, { ...options, processRows: () => rows }), undefined, 'processo vivo/adottato o scan incompleto');
+  }
+  writeStatus({ ...status, pids: [101] });
+  assert.equal(leaseStaleReason(lease, runtime, { ...options, processRows: () => [{ pid: 101, ppid: 1, elapsed: '01:00:00', command: '/usr/bin/worker-child' }] }), undefined, 'figlio attestato ancora vivo');
+  writeStatus(status);
+  assert.equal(leaseStaleReason(lease, runtime, { ...options, processRows: () => [{ pid: 102, ppid: 1, elapsed: '01:00:00', command: '/usr/bin/existing-daemon' }] }), 'avvio terminato senza processi attivi');
+}));
+
 test('la coda e\' FIFO e scarta i biglietti degli hook morti', () => withRuntime((runtime) => {
   const now = Date.now();
   writeTicket(runtime, now - 3000, DEAD_PID, 'morto');
