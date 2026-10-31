@@ -4581,7 +4581,9 @@ function startWithOwnerLock(identity, socket, ownerLock) {
       if (listener.once) {
         detachEventListener(listener);
         endConnection(listener.connection);
-        if (!listener.shared) coordinator.eventUnsubscribe(listener.subscriptionId);
+        // A one-event listener closes its socket, not the subscription.
+        // acknowledgeEvent already removes private once subscriptions only
+        // after a terminal event; keep/shared observers retain their cursor.
       } else {
         deliverEvent(listener);
       }
