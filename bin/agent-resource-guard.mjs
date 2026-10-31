@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { matchesObservedProcess } from './agent-command-observer.mjs';
+import { commandRows, matchesObservedProcess } from './agent-command-observer.mjs';
 import { shellExecutableText } from './shell-command-scanner.mjs';
 
 export const GUARD_VERSION = 1;
@@ -492,6 +492,37 @@ function defaultObserverAlive(pid) {
   return pidAlive(pid) && observerIsOurs(pid);
 }
 
+function unobservedStartupEnded(lease, status, at, options) {
+  if (status?.version !== 2 || status.seen !== false || status.startupComplete !== true || status.ownerAbsentAtEnd !== true
+    || status.id !== lease.id || status.hookPid !== lease.hookPid
+    || status.observerPid !== lease.observerPid || status.leaseStartedAt !== lease.startedAt
+    || !lease.commandHash || status.commandHash !== lease.commandHash
+    || !Number.isFinite(status.endedAt) || status.endedAt < lease.startedAt
+    || at - status.endedAt < LEASE_START_GRACE_MS || !Array.isArray(status.pids)) return false;
+  const alive = options.processAlive ?? pidAlive;
+  // Reused PIDs also remain blocking: absence, not a different command name,
+  // is required before an unseen invocation can be reclaimed early.
+  if (!(lease.hookPid > 0) || alive(lease.hookPid) || alive(lease.observerPid)) return false;
+  const rows = (options.processRows ?? commandRows)();
+  if (!Array.isArray(rows)) return false;
+  const classification = classifyCommand(lease.command);
+  const knownPids = new Set(status.pids || []);
+  const ageSeconds = (at - lease.startedAt) / 1000;
+  return !rows.some((row) => {
+    if (knownPids.has(row.pid)) return true;
+    if (row.pid === process.pid || row.ppid === process.pid) return false;
+    if (matchesObservedProcess(row, classification.kind, classification.matchNeedle || '', lease.command, new Set())) return true;
+    // An unseen wrapper might have exited between samples, leaving an adopted
+    // child with another executable name. Any younger/unknown process keeps
+    // the lease, except the hook dispatchers which are only waiting in FIFO.
+    if (/(?:^|\s)\S*node\s+\S*\/bin\/hook-dispatch\.mjs\s+(?:pre|post)-bash\s*$/.test(row.command)) return false;
+    const elapsed = String(row.elapsed || '').match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+    if (!elapsed) return true;
+    const seconds = Number(elapsed[1] || 0) * 86400 + Number(elapsed[2] || 0) * 3600 + Number(elapsed[3]) * 60 + Number(elapsed[4]);
+    return seconds <= ageSeconds + 2;
+  });
+}
+
 /**
  * Perche' un lease non vale piu', o undefined se e' ancora valido. Un lease e'
  * libero quando scade, quando il suo observer e' morto dopo aver visto il
@@ -509,7 +540,9 @@ export function leaseStaleReason(lease, runtimeDir, options = {}) {
   const observerPid = Number(lease.observerPid);
   if (observerPid > 0) {
     if (observerAlive(observerPid)) return undefined;
-    if (readJson(observerStatusPath(runtimeDir, lease.id))?.seen) return 'comando terminato';
+    const status = readJson(observerStatusPath(runtimeDir, lease.id));
+    if (status?.seen) return 'comando terminato';
+    if (unobservedStartupEnded(lease, status, at, options)) return 'avvio terminato senza processi attivi';
   }
   const unobservedMs = numberFromEnv('FRONTALIERE_RESOURCE_UNOBSERVED_LEASE_MS', DEFAULT_UNOBSERVED_LEASE_MS);
   if (age >= unobservedMs) return `nessun processo osservato da ${Math.round(age / 1000)}s`;
@@ -695,6 +728,9 @@ function startObserver(runtimeDir, record, classification) {
       '--baseline-pids', baselinePids.join(','),
       '--session', record.sessionId,
       '--status', observerStatusPath(runtimeDir, record.id),
+      '--hook-pid', String(record.hookPid),
+      '--lease-started-at', String(record.leaseStartedAt),
+      '--command-hash', record.commandHash,
     ], { detached: true, stdio: 'ignore' });
     child.unref();
     appendRegistry(runtimeDir, {
@@ -856,7 +892,7 @@ export function guardPre(info, workspace = findWorkspace(info.cwd), options = {}
     return { allowed: false, id, classification, runtimeDir, reason: fullReason };
   }
 
-  const record = { ...baseRecord, snapshot, leaseExpiresAt: lease.expiresAt, waitedMs: waited.waitedMs };
+  const record = { ...baseRecord, snapshot, leaseStartedAt: lease.startedAt, commandHash: lease.commandHash, leaseExpiresAt: lease.expiresAt, waitedMs: waited.waitedMs };
   appendJson(runtimeDir, { type: 'command_start', ...record });
   writePending(runtimeDir, id, record);
   const observerPid = startObserver(runtimeDir, record, classification);

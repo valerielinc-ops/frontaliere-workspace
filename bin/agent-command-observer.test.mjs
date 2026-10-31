@@ -7,7 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyCommand, leaseStaleReason, LEASE_START_GRACE_MS } from './agent-resource-guard.mjs';
-import { matchesObservedProcess } from './agent-command-observer.mjs';
+import { commandRows, matchesObservedProcess } from './agent-command-observer.mjs';
+
+test('un errore o snapshot ps incompleto resta unknown, non assenza di processi', () => {
+  assert.equal(commandRows(() => { throw new Error('ps unavailable'); }), null);
+  assert.equal(commandRows(() => 'invalid snapshot'), null);
+  assert.equal(commandRows(() => ''), null);
+  assert.deepEqual(commandRows(() => ' 42 1 0.0 128 01:02 node example.mjs\n'), [{ pid: 42, ppid: 1, cpuPct: 0, rssKb: 128, elapsed: '01:02', command: 'node example.mjs' }]);
+});
 
 for (const command of [
   'npx vitest run src/example.test.ts',

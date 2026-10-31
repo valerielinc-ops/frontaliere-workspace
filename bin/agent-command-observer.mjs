@@ -30,27 +30,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function commandRows() {
+export function commandRows(exec = execFileSync) {
   try {
-    const raw = execFileSync('ps', ['-axo', 'pid=,ppid=,%cpu=,rss=,etime=,command='], {
+    const raw = exec('ps', ['-axo', 'pid=,ppid=,%cpu=,rss=,etime=,command='], {
       encoding: 'utf8',
       timeout: 1500,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return raw.split('\n').flatMap((line) => {
+    return raw.trim().split('\n').map((line) => {
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.,]+)\s+(\d+)\s+(\S+)\s+(.+)$/);
-      if (!match) return [];
-      return [{
+      if (!match) throw new Error('incomplete process snapshot');
+      return {
         pid: Number(match[1]),
         ppid: Number(match[2]),
         cpuPct: Number(match[3].replace(',', '.')),
         rssKb: Number(match[4]),
         elapsed: match[5],
         command: match[6],
-      }];
+      };
     });
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -100,6 +100,8 @@ async function main() {
   let maxCpuPct = 0;
   let maxRssKb = 0;
   let stopRequested = false;
+  let startupComplete = false;
+  let ownerAbsentAtEnd = false;
   const pids = new Set();
   const primaryPids = new Set();
 
@@ -108,7 +110,12 @@ async function main() {
   append(runtimeDir, { type: 'observer_attached', version: VERSION, id, observerPid: process.pid, category, at: startedAt });
 
   while (!stopRequested && Date.now() < maxDeadline) {
-    const rows = commandRows().filter((row) => matchesObservedProcess(row, category, needle, sourceCommand, baselinePids));
+    const snapshot = commandRows();
+    if (!snapshot) {
+      await sleep(SAMPLE_INTERVAL_MS);
+      continue;
+    }
+    const rows = snapshot.filter((row) => matchesObservedProcess(row, category, needle, sourceCommand, baselinePids));
     if (rows.length) {
       if (!seen) {
         seen = true;
@@ -143,6 +150,8 @@ async function main() {
       missingSamples += 1;
       if (missingSamples >= 3) break;
     } else if (Date.now() - startedAt >= STARTUP_GRACE_MS) {
+      startupComplete = true;
+      ownerAbsentAtEnd = Number(options['hook-pid']) > 0 && !snapshot.some((row) => row.pid === Number(options['hook-pid']));
       break;
     }
     await sleep(SAMPLE_INTERVAL_MS);
@@ -167,7 +176,12 @@ async function main() {
   if (options.status) {
     try {
       mkdirSync(path.dirname(options.status), { recursive: true, mode: 0o700 });
-      writeFileSync(options.status, `${JSON.stringify({ id, seen, endedAt: Date.now() })}\n`, { mode: 0o600 });
+      writeFileSync(options.status, `${JSON.stringify({
+        version: 2, id, seen, endedAt: Date.now(), startupComplete, ownerAbsentAtEnd,
+        observerPid: process.pid, hookPid: Number(options['hook-pid']),
+        leaseStartedAt: Number(options['lease-started-at']), commandHash: options['command-hash'],
+        pids: [...pids],
+      })}\n`, { mode: 0o600 });
     } catch {
       // best effort
     }
