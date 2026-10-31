@@ -24,7 +24,16 @@ const p = JSON.parse(readFileSync(0, 'utf8'));
 if (p.tool_input.command.includes('BLOCK-FD0')) { process.stderr.write('fd0 bloccato\\n'); process.exit(2); }`,
   // /dev/stdin e default import.
   'devstdin.mjs': `import fs from 'node:fs';
-const p = JSON.parse(fs.readFileSync('/dev/stdin').toString());
+import { isMainThread } from 'node:worker_threads';
+let input;
+try { input = fs.readFileSync('/dev/stdin'); }
+catch (error) {
+  // Linux cannot reopen the socket used by spawnSync(input) as /dev/stdin.
+  // The worker must still exercise its explicit /dev/stdin adapter above.
+  if (!isMainThread || process.platform !== 'linux' || error.code !== 'ENXIO') throw error;
+  input = fs.readFileSync(0);
+}
+const p = JSON.parse(input.toString());
 if (p.tool_input.command.includes('BLOCK-DEV')) { console.error('devstdin bloccato'); process.exit(2); }`,
   // Guardia "se eseguito direttamente" su argv[1], come pii-blocklist-policy.
   'maincheck.mjs': `import { readFileSync } from 'node:fs';
@@ -75,11 +84,25 @@ describe('hook-dispatch con fixture', () => {
   });
   writeFileSync(join(dir, 'hang.mjs'), FIXTURES['hang.mjs']);
 
+  test('il fallback Linux non maschera la perdita dell adapter /dev/stdin nel worker', async () => {
+    const script = join(dir, 'missing-devstdin-adapter.mjs');
+    writeFileSync(script, FIXTURES['devstdin.mjs'].replace("import fs from 'node:fs';", `import fs from 'node:fs';
+Object.defineProperty(process, 'platform', { value: 'linux' });
+const read = fs.readFileSync;
+fs.readFileSync = (file, ...rest) => {
+  if (file === '/dev/stdin') throw Object.assign(new Error('missing devstdin adapter'), { code: 'ENXIO' });
+  return read(file, ...rest);
+};`));
+    const [result] = await runHooks([{ name: 'missing-devstdin-adapter', script }], payload('echo ok'));
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /missing devstdin adapter/);
+  });
+
   for (const command of COMMANDS) {
     test(`stesso esito per hook in worker e in processi separati: ${command}`, async () => {
       const inWorkers = await runHooks(hooks, payload(command));
       const inProcesses = await runHooks(hooks, payload(command), process.env, { processes: true });
-      assert.deepEqual(summary(inWorkers), summary(inProcesses));
+      assert.deepEqual(summary(inWorkers), summary(inProcesses), inProcesses.find((r) => r.hook.name === 'devstdin')?.stderr);
       assert.deepEqual(aggregate(inWorkers).code, aggregate(inProcesses).code);
     });
   }
