@@ -80,6 +80,20 @@ Per ispezionarli usa GitHub API o la superficie pubblicata.
 Per dettagli su ruoli, autenticazione o recupero della chiave, leggi la sezione
 `Credenziali` del riferimento prima di agire.
 
+## Candidature automatizzate
+
+Quando un blocco impedisce una candidatura automatizzata, correggi la causa
+condivisa per tutti gli utenti e i portali interessati, senza eccezioni per ID
+o interventi validi solo sul caso osservato. Verifica il contratto sulla fonte
+nativa e conserva `unknown` quando fatti o conferma d'invio non sono dimostrati:
+non inventare fatti personali né dichiarare invii senza prova. Ogni recovery
+deve avere tentativi limitati e backoff coerente con la causa, essere idempotente
+e impedire invii duplicati, rispettando approvazioni e fatti richiesti al
+candidato. La fix è completa dopo merge, pubblicazione dei componenti coinvolti
+e prova reale del caso originario compatibile con lo stato corrente, senza
+reinviare candidature già inviate o dall'esito incerto. Un blocco esterno o una
+risposta ancora necessaria restano espliciti, senza promettere autonomia totale.
+
 ## Esperimenti e feature flag
 
 - Gli esperimenti futuri degli agenti devono passare sempre da Firebase,
