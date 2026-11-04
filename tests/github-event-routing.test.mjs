@@ -50,10 +50,17 @@ function coordinatorFixture({ identity, stateDirectory, fetchImpl, webhookSecret
 test('la configurazione versionata espone solo le route production attese', () => {
   const routing = loadEventRouting();
   assert.equal(routing.version, 1);
-  assert.equal(routing.routes.get(SITE_REPO), 'default');
-  assert.equal(routing.routes.get(CORPUS_REPO), 'nanako');
-  assert.equal(routing.routes.get(WORKSPACE_REPO), 'default');
-  assert.equal(routing.routes.size, 3);
+  assert.deepEqual(Object.fromEntries(routing.routes), {
+    [SITE_REPO]: 'default',
+    [CORPUS_REPO]: 'nanako',
+    'nanakokyobashi-rgb/frontaliere-articolifrontaliere-it': 'nanako',
+    'nanakokyobashi-rgb/frontaliere-articolifrontaliere-en': 'nanako',
+    'nanakokyobashi-rgb/frontaliere-articolifrontaliere-de': 'nanako',
+    'nanakokyobashi-rgb/frontaliere-articolifrontaliere-fr': 'nanako',
+    [WORKSPACE_REPO]: 'default',
+    'anthropics/oss-scanner': 'default',
+    'valerielinc-ops/villacomo': 'default',
+  });
 });
 
 test('canonicalizza le identità prima della selezione del coordinatore', () => {
@@ -70,6 +77,25 @@ test('canonicalizza le identità prima della selezione del coordinatore', () => 
       && error.actualIdentity === 'worker-test'
       && error.expectedIdentity === 'default'
       && error.exitCode === 2,
+  );
+});
+
+test('gli shard articolo dichiarati si osservano solo tramite nanako, senza wildcard', () => {
+  for (const locale of ['it', 'en', 'de', 'fr']) {
+    const repo = `nanakokyobashi-rgb/frontaliere-articolifrontaliere-${locale}`;
+    const spec = { repo, resource: 'workflow_run', runId: '1595', waitFor: ['success'] };
+    assert.equal(assertEventIdentity({ spec, actualIdentity: 'nanako' }).expectedIdentity, 'nanako');
+    assert.throws(
+      () => assertEventIdentity({ spec, actualIdentity: 'default' }),
+      (error) => error.code === 'event_identity_mismatch' && error.expectedIdentity === 'nanako',
+    );
+  }
+  assert.throws(
+    () => assertEventIdentity({
+      spec: { repo: 'nanakokyobashi-rgb/frontaliere-articolifrontaliere-es' },
+      actualIdentity: 'nanako',
+    }),
+    (error) => error.code === 'event_identity_route_missing',
   );
 });
 

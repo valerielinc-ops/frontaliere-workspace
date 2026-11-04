@@ -3,6 +3,10 @@
   "routes": {
     "valerielinc-ops/frontaliere-si-o-no": "default",
     "nanakokyobashi-rgb/frontaliere-articles": "nanako",
+    "nanakokyobashi-rgb/frontaliere-articolifrontaliere-it": "nanako",
+    "nanakokyobashi-rgb/frontaliere-articolifrontaliere-en": "nanako",
+    "nanakokyobashi-rgb/frontaliere-articolifrontaliere-de": "nanako",
+    "nanakokyobashi-rgb/frontaliere-articolifrontaliere-fr": "nanako",
     "valerielinc-ops/frontaliere-workspace": "default",
     "anthropics/oss-scanner": "default",
     "valerielinc-ops/villacomo": "default"
