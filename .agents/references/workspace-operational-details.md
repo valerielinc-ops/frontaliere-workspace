@@ -176,13 +176,28 @@ source bin/rc-env.sh     # → 92 variabili su 113 parametri RC (misurato 2026-0
 ```
 
 `GOOGLE_APPLICATION_CREDENTIALS` **non** e' esportata nel profilo della shell,
-come invece era sul laptop vecchio (`.bash_profile`). Sta nell'`env` di
-`.claude/settings.json` della root, quindi vale nelle sessioni aperte qui e
-**non** negli altri progetti sotto `~/Projects`. E' deliberato: quella variabile
-punta a una chiave equivalente a un owner di produzione, e un export globale la
-rende attiva anche dove non c'entra niente. Per le shell manuali non serve
-comunque — `bin/rc-env.sh` mette lo stesso default da solo se la variabile non
-c'e'.
+come invece era sul laptop vecchio (`.bash_profile`). Vale solo nelle sessioni
+aperte da questa root e **non** negli altri progetti sotto `~/Projects`. E'
+deliberato: quella variabile punta a una chiave equivalente a un owner di
+produzione, e un export globale la rende attiva anche dove non c'entra niente.
+Per le shell manuali non serve comunque — `bin/rc-env.sh` mette lo stesso
+default da solo se la variabile non c'e'.
+
+Come arriva alle sessioni, senza path legati a un utente (i Mac del proprietario
+hanno utenti diversi: `saggesel` sul laptop principale, `luigisaggese` sull'host
+agenti; il blocco `env` di Claude e la tabella `set` di Codex non espandono
+`$HOME`):
+
+- **Claude Code**: l'hook `SessionStart` esegue `bin/session-env.sh`, che scrive
+  in `$CLAUDE_ENV_FILE` `GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/frontaliere/sa-frontaliere-ticino.json`
+  (se il file esiste) e `WORKSPACE` ricavato dalla posizione dello script. Un
+  valore gia' presente, per esempio da `.claude/settings.local.json`, vince.
+- **Codex**: i due valori stanno in `[shell_environment_policy.set]` del
+  `~/.codex/config.toml` di ciascuna macchina. Il `.codex/config.toml` del
+  progetto non li contiene: e' il layer piu' specifico e un path assoluto li'
+  sovrascriverebbe quello giusto della macchina.
+- `tests/session-env.test.mjs` (job `sanity`) fallisce se in
+  `.claude/settings.json` o in `.codex/` ricompare un `/Users/<utente>`.
 
 (La shell dell'utente qui e' **zsh**, non bash: il `.bash_profile` del bundle di
 migrazione non verrebbe nemmeno letto. `gcloud` arriva gia' dal `brew shellenv`

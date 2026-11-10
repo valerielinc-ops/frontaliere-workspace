@@ -53,7 +53,7 @@ jobs:
         run: node --test tests/github-follow-latest-activity.test.mjs tests/github-event-lifecycle.test.mjs tests/github-event-sweep.test.mjs tests/github-coordinator-node-runtime.test.mjs tests/github-webhook-ingress-health.test.mjs tests/github-webhook-receiver-log.test.mjs tests/github-webhook-relay.test.mjs tests/github-coordinator-graphql.test.mjs tests/github-coordinator-rc-cache.test.mjs tests/rc-env-loader-closure.test.mjs .codex/repo-pr-gate-dispatch.test.mjs bin/pr-gate-cache.test.mjs bin/where-to-fix-manifest-source.test.mjs bin/daily-brief-owner-policy.test.mjs
 
       - name: Test shared resource guard and hook lifecycle
-        run: node --test bin/agent-resource-guard.test.mjs bin/agent-command-observer.test.mjs tests/hook-dispatch.test.mjs
+        run: node --test bin/agent-resource-guard.test.mjs bin/agent-command-observer.test.mjs tests/hook-dispatch.test.mjs tests/session-env.test.mjs tests/resource-governor-config.test.mjs
 
       - name: Validate PR body contract
         shell: bash --noprofile --norc -eo pipefail {0}
