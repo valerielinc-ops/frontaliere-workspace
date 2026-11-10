@@ -18,7 +18,10 @@ max_concurrent_threads_per_session = 15
 inherit = "core"
 
 [shell_environment_policy.set]
-WORKSPACE = "/Users/saggesel/Projects/frontaliere"
+# Solo valori uguali su ogni Mac. WORKSPACE e GOOGLE_APPLICATION_CREDENTIALS
+# dipendono dall'utente: stanno nel ~/.codex/config.toml di ciascuna macchina
+# (stessa tabella), perche' qui un path assoluto vale per un solo utente e,
+# essendo il layer di progetto, sovrascriverebbe quello giusto della macchina.
 SKIP_FUEL_DAILY = "1"
 SKIP_WEEKLY_EMPLOYERS = "1"
 SKIP_JOB_MARKET_SNAPSHOT = "1"
@@ -28,7 +31,6 @@ SKIP_BORDER_WAIT = "1"
 SKIP_CI_CHECK = "1"
 FAST_BUILD = "1"
 NODE_OPTIONS = "--max-old-space-size=12288"
-GOOGLE_APPLICATION_CREDENTIALS = "/Users/saggesel/.config/frontaliere/sa-frontaliere-ticino.json"
 FRONTALIERE_GH_COORDINATOR = "1"
 
 [analytics]
