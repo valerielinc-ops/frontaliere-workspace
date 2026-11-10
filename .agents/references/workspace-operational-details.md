@@ -35,6 +35,17 @@ non ancora inviato della campagna in resume (o un'altra superficie di invio): no
 va usato come proxy dell'audience eleggibile totale. Job alert generici e
 CompanyAlert hanno sender e partizioni distinti.
 
+## Incidente da ricordare: statico scaduto vs hydration SPA (2026-10-28)
+
+Una pagina offerta scaduta puo' servire HTML/CSS SSG corretti (`ft-expired-*`) e
+poi tornare alla vecchia vista attiva appena React fa hydration: `JobBoard` trova
+lo stesso slug nel dataset live e il ramo `if (selectedJob)` prevale sul ramo
+`JobExpiredView`. Un `curl` dei marker statici quindi non basta. Per ogni fix di
+questa classe verificare anche con Chromium dopo hydration che esistano
+`.ft-expired-page`/`.ft-expired-shell` e che la vista attiva non abbia preso il
+controllo; il runtime deve dare priorita' a `isSeededExpiredDetail` e lasciare
+`selectedJob` nullo. La causa e' di precedenza runtime, non di cache CSS.
+
 ## Da dove si apre la sessione
 
 La root del workspace e' **`~/Projects/frontaliere`**, ed e' da li' che vanno
