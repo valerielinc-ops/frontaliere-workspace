@@ -15,13 +15,12 @@ install_dir="$HOME/Library/Application Support/frontaliere/git-maintenance"
 backup_dir="$install_dir/original-launch-agents"
 wrapper="$install_dir/git-maintenance-wrapper"
 uid=$(/usr/bin/id -u)
+plutil_bin=${FRONTALIERE_PLUTIL_BIN:-/usr/bin/plutil}
+launchctl_bin=${FRONTALIERE_LAUNCHCTL_BIN:-/bin/launchctl}
 
 set_plist_string() {
-  key=$1
-  value=$2
-  plist=$3
-  if ! /usr/bin/plutil -replace "$key" -string "$value" "$plist" 2>/dev/null; then
-    /usr/bin/plutil -insert "$key" -string "$value" "$plist"
+  if ! "$plutil_bin" -replace "$1" -string "$2" "$3" 2>/dev/null; then
+    "$plutil_bin" -insert "$1" -string "$2" "$3"
   fi
 }
 
@@ -59,14 +58,29 @@ case "$action" in
       [ -f "$plist" ] || continue
       backup="$backup_dir/$label.plist"
       [ -e "$backup" ] || /bin/cp "$plist" "$backup"
-      /bin/launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
-      set_plist_string ProgramArguments.0 "$wrapper" "$plist"
-      set_plist_string EnvironmentVariables.HOME "$HOME" "$plist"
-      set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$plist"
-      set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$plist"
-      set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$plist"
-      /usr/bin/plutil -lint "$plist" >/dev/null
-      /bin/launchctl bootstrap "gui/$uid" "$plist"
+      job_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$backup") || {
+        printf '%s cannot read schedule from %s\n' "install-git-maintenance-wrapper:" "$backup" >&2
+        exit 78
+      }
+      case "$job_schedule" in
+        hourly|daily|weekly) ;;
+        *)
+          printf '%s invalid saved schedule in %s: %s\n' "install-git-maintenance-wrapper:" "$backup" "$job_schedule" >&2
+          exit 78
+          ;;
+      esac
+
+      temporary_plist="$plist.$$"
+      /bin/cp "$plist" "$temporary_plist"
+      "$plutil_bin" -replace ProgramArguments -json "[\"$wrapper\",\"$job_schedule\"]" "$temporary_plist"
+      set_plist_string EnvironmentVariables.HOME "$HOME" "$temporary_plist"
+      set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$temporary_plist"
+      set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$temporary_plist"
+      set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$temporary_plist"
+      "$plutil_bin" -lint "$temporary_plist" >/dev/null
+      "$launchctl_bin" bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      /bin/mv -f "$temporary_plist" "$plist"
+      "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
     printf 'Wrapper Git con limiti installato; LaunchAgent custom ricaricati. Ripristina con: %s --restore\n' "$0"
     ;;
@@ -76,10 +90,10 @@ case "$action" in
       plist="$launch_agents/$label.plist"
       backup="$backup_dir/$label.plist"
       [ -f "$backup" ] || continue
-      /bin/launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      "$launchctl_bin" bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
       /bin/cp "$backup" "$plist"
-      /usr/bin/plutil -lint "$plist" >/dev/null
-      /bin/launchctl bootstrap "gui/$uid" "$plist"
+      "$plutil_bin" -lint "$plist" >/dev/null
+      "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
     /bin/rm -f "$wrapper"
     printf 'LaunchAgent Git originali ripristinati.\n'
