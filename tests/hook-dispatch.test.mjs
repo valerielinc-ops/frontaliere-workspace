@@ -10,7 +10,7 @@
 // dove il worktree hooks-main del sito non c'e' (CI del repo root).
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MANIFEST, aggregate, refreshSiteHooksIfStale, resolveHooks, runHooks } from '../bin/hook-dispatch.mjs';
@@ -69,6 +69,29 @@ const COMMANDS = ['echo ok', 'BLOCK-FD0', 'BLOCK-DEV', 'BLOCK-MAIN', 'BLOCK-STRE
 function payload(command, event = 'PreToolUse') {
   return JSON.stringify({ session_id: 'test-hook-dispatch', cwd: ROOT, hook_event_name: event, tool_name: 'Bash', tool_input: { command } });
 }
+
+test('gli hook SessionStart limitano gli sweep completi e SessionEnd resta orphans-only', () => {
+  const claude = JSON.parse(readFileSync(join(ROOT, '.claude', 'settings.json'), 'utf8'));
+  const codex = JSON.parse(readFileSync(join(ROOT, '.codex', 'hooks.json'), 'utf8'));
+  const commandsFor = (settings, event) => settings.hooks?.[event]
+    ?.flatMap((entry) => entry.hooks || [])
+    .map((hook) => hook.command)
+    .filter(Boolean) || [];
+  const startSweepCommands = [
+    ...commandsFor(claude, 'SessionStart'),
+    ...commandsFor(codex, 'SessionStart'),
+  ].filter((command) => command.includes('scripts/prune-merged-worktrees.mjs --apply'));
+  const endSweepCommands = [
+    ...commandsFor(claude, 'SessionEnd'),
+    ...commandsFor(codex, 'SessionEnd'),
+  ].filter((command) => command.includes('scripts/prune-merged-worktrees.mjs --apply --orphans-only'));
+
+  assert.equal(startSweepCommands.length, 2);
+  assert.ok(startSweepCommands.every((command) => command.includes('FRONTALIERE_PRUNE_SESSION_START=1')));
+  assert.ok(startSweepCommands.every((command) => command.includes('scripts/prune-merged-worktrees.mjs --apply')));
+  assert.equal(endSweepCommands.length, 2);
+  assert.ok(endSweepCommands.every((command) => !command.includes('--session-start')));
+});
 
 // Lo stderr conta quando blocca (e' il messaggio che l'agente legge); per un
 // crash il worker stampa lo stack senza la riga di sorgente che stampa node.
