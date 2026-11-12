@@ -41,7 +41,9 @@ import {
 } from './github-coordinator-client.mjs';
 import {
   GitHubEventBroker,
+  eventMatchesSubscription,
   normalizeReconciliationEvent,
+  normalizeWebhookEvent,
   pullRequestMergeability,
   shaMatches,
 } from './github-event-broker.mjs';
@@ -2223,15 +2225,80 @@ export class GitHubCoordinator {
         }
         verifiedPayload = payload;
       },
+      beforeRecord: (payload) => {
+        if (String(request.eventName || '').toLowerCase() !== 'workflow_run'
+          || String(payload?.action || '').toLowerCase() !== 'completed') return;
+        const event = normalizeWebhookEvent({
+          eventName: request.eventName,
+          deliveryId: request.deliveryId,
+          payload,
+          receivedAt: request.receivedAt,
+        });
+        if (!event?.states?.includes('completed')) return;
+        const nowMs = Date.now();
+        const hasActiveObserver = this.eventBroker.state.subscriptions.some((subscription) => (
+          subscription.expiresAtMs > nowMs && eventMatchesSubscription(event, subscription)
+        ));
+        if (!hasActiveObserver) return;
+        return this.reconcileCurrentWorkflowRun(payload);
+      },
     });
-    for (const subscriptionId of result.matchedSubscriptionIds || []) {
-      this.eventNotifier?.(subscriptionId);
+    const finish = (webhookResult) => {
+      for (const subscriptionId of webhookResult.matchedSubscriptionIds || []) {
+        this.eventNotifier?.(subscriptionId);
+      }
+      if (!webhookResult.duplicate) {
+        const movement = baseBranchMovement(request.eventName, verifiedPayload);
+        if (movement) this.scheduleMergeabilityRecheck(movement);
+      }
+      return webhookResult;
+    };
+    return result && typeof result.then === 'function' ? result.then(finish) : finish(result);
+  }
+
+  async reconcileCurrentWorkflowRun(payload) {
+    const run = payload?.workflow_run || {};
+    const repo = payload?.repository?.full_name;
+    const runId = String(run.id ?? '');
+    if (!repo || !/^\d+$/.test(runId)) return;
+    let response;
+    try {
+      response = await this.submit({
+        type: 'api',
+        identity: this.identity,
+        client: EVENT_CLIENT_KEY,
+        method: 'GET',
+        path: `/repos/${repo}/actions/runs/${runId}`,
+        cacheTtlMs: 0,
+      });
+    } catch (error) {
+      logStructuredError('event_workflow_run_reconcile_failed', error, { repo, runId });
+      return;
     }
-    if (!result.duplicate) {
-      const movement = baseBranchMovement(request.eventName, verifiedPayload);
-      if (movement) this.scheduleMergeabilityRecheck(movement);
-    }
-    return result;
+    if (!response?.ok) return;
+    let current;
+    try { current = JSON.parse(response.body || 'null'); } catch { return; }
+    if (!current || String(current.id ?? '') !== runId || !current.status) return;
+
+    const webhookAttempt = Number(run.run_attempt);
+    const currentAttempt = Number(current.run_attempt);
+    const hasWebhookAttempt = Number.isInteger(webhookAttempt) && webhookAttempt > 0;
+    const hasCurrentAttempt = Number.isInteger(currentAttempt) && currentAttempt > 0;
+    if (hasWebhookAttempt && hasCurrentAttempt && currentAttempt < webhookAttempt) return;
+
+    const webhookUpdatedAt = Date.parse(run.updated_at || '');
+    const currentUpdatedAt = Date.parse(current.updated_at || '');
+    const sameOrUnknownAttempt = !hasWebhookAttempt || !hasCurrentAttempt || webhookAttempt === currentAttempt;
+    if (sameOrUnknownAttempt
+      && Number.isFinite(webhookUpdatedAt)
+      && Number.isFinite(currentUpdatedAt)
+      && currentUpdatedAt < webhookUpdatedAt) return;
+
+    // A run can be re-run without changing its run ID. Do not deliver a
+    // completed webhook from an earlier attempt when REST already reports a
+    // newer in-progress or completed attempt for the same run.
+    payload.workflow_run = { ...run, ...current };
+    payload.action = String(current.status).toLowerCase();
   }
 
   // Debounced per repo and branch: a merge produces a pull_request webhook

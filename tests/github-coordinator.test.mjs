@@ -2343,6 +2343,113 @@ test('collega il fallimento di un workflow alla PR associata senza polling dell 
   assert.equal(neutralEvent.state, 'neutral');
 });
 
+test('un webhook terminale superato non chiude l observer quando la run è già al tentativo successivo', async () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-workflow-attempt-reconcile-'));
+  const broker = new GitHubEventBroker({
+    stateFile: join(stateDirectory, 'events.json'),
+    webhookSecret: 'workflow-attempt-secret',
+  });
+  const subscription = broker.subscribe({
+    repo: 'owner/repo',
+    resource: 'workflow_run',
+    runId: '9003',
+    waitFor: ['completed'],
+    ttlSeconds: 300,
+  });
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: '/bin/echo',
+    socket: join(stateDirectory, 'coordinator.sock'),
+    eventBroker: broker,
+  });
+  const apiCalls = [];
+  coordinator.submit = async (request) => {
+    apiCalls.push(request);
+    return {
+      ok: true,
+      status: 200,
+      body: JSON.stringify(apiCalls.length === 1 ? {
+        id: 9003,
+        run_attempt: 2,
+        status: 'in_progress',
+        conclusion: null,
+        head_branch: 'feature',
+        head_sha: 'abc1234',
+        updated_at: '2026-11-12T20:32:08Z',
+      } : {
+        id: 9003,
+        run_attempt: 2,
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'feature',
+        head_sha: 'abc1234',
+        updated_at: '2026-11-12T20:40:00Z',
+      }),
+    };
+  };
+
+  try {
+    const firstPayload = {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: {
+        id: 9003,
+        run_attempt: 1,
+        status: 'completed',
+        conclusion: 'cancelled',
+        head_branch: 'feature',
+        head_sha: 'abc1234',
+        updated_at: '2026-11-12T20:31:46Z',
+      },
+    };
+    const firstBody = JSON.stringify(firstPayload);
+    const firstRequest = {
+      eventName: 'workflow_run',
+      deliveryId: 'workflow-attempt-1-completed',
+      signature: signedWebhook(firstBody, 'workflow-attempt-secret'),
+      rawBody: firstBody,
+    };
+    const [first, duplicate] = await Promise.all([
+      coordinator.ingestWebhook(firstRequest),
+      coordinator.ingestWebhook(firstRequest),
+    ]);
+    assert.deepEqual(first.matchedSubscriptionIds, []);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(apiCalls.length, 1, 'concurrent redelivery must share the attempt check');
+    assert.equal(broker.pendingEvent(subscription.id), null);
+    assert.equal(broker.getSubscription(subscription.id).lastActivityState, 'in_progress');
+    assert.equal(broker.getSubscription(subscription.id).pendingEvents, 0);
+
+    const secondPayload = {
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      workflow_run: {
+        id: 9003,
+        run_attempt: 2,
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'feature',
+        head_sha: 'abc1234',
+        updated_at: '2026-11-12T20:40:00Z',
+      },
+    };
+    const secondBody = JSON.stringify(secondPayload);
+    const second = await coordinator.ingestWebhook({
+      eventName: 'workflow_run',
+      deliveryId: 'workflow-attempt-2-completed',
+      signature: signedWebhook(secondBody, 'workflow-attempt-secret'),
+      rawBody: secondBody,
+    });
+    assert.deepEqual(second.matchedSubscriptionIds, [subscription.id]);
+    assert.equal(broker.pendingEvent(subscription.id).state, 'success');
+    assert.equal(apiCalls.length, 2);
+    assert.ok(apiCalls.every(({ path }) => path === '/repos/owner/repo/actions/runs/9003'));
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test('la riconciliazione resta nel coordinatore e recupera uno stato workflow senza listener polling', async () => {
   const stateDirectory = mkdtempSync(join(tmpdir(), 'frontaliere-reconcile-'));
   const originalFetch = globalThis.fetch;

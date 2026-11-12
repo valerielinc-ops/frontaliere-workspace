@@ -1255,6 +1255,9 @@ export class GitHubEventBroker {
     };
     this.persistTimer = null;
     this.lastDeferredPersistError = null;
+    // Network-backed pre-record checks can be async. Coalesce a relay or
+    // webhook retry that arrives before the first verified delivery persists.
+    this.inFlightWebhookDeliveries = new Map();
     this.nextPruneAtMs = 0;
     this.subscriptionIndex = null;
     this.seenDeliveryIndex = null;
@@ -2207,7 +2210,7 @@ export class GitHubEventBroker {
 
   ingestWebhook(
     { eventName, deliveryId, signature, rawBody, payload, receivedAt = new Date(this.now()).toISOString() },
-    { beforePersist = null } = {},
+    { beforePersist = null, beforeRecord = null } = {},
   ) {
     if (!this.webhookSecret) {
       throw brokerError('event_webhook_secret_unconfigured', 'webhook secret is not configured');
@@ -2242,32 +2245,56 @@ export class GitHubEventBroker {
       this.metrics.webhookDuplicates += 1;
       return { ok: true, duplicate: true, matchedSubscriptionIds: [] };
     }
-    this.state.seenDeliveries.push({ id: normalizedDeliveryId, seenAtMs: this.now() });
-    seenIds.add(normalizedDeliveryId);
-    this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
-    if (this.state.seenDeliveries.length > MAX_SEEN_DELIVERIES) {
-      const [dropped] = this.state.seenDeliveries.splice(0, 1);
-      if (dropped) seenIds.delete(dropped.id);
-      this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
+    const inFlightDelivery = this.inFlightWebhookDeliveries.get(normalizedDeliveryId);
+    if (inFlightDelivery) {
+      this.metrics.webhookDuplicates += 1;
+      return inFlightDelivery.then(() => ({ ok: true, duplicate: true, matchedSubscriptionIds: [] }));
     }
-    this.metrics.webhookEvents += 1;
-    const event = normalizeWebhookEvent({
-      eventName,
-      deliveryId: normalizedDeliveryId,
-      payload: webhookPayload,
-      receivedAt,
-    });
-    if (!event) {
-      this.metrics.webhookIgnored += 1;
-      this.appendEventAudit({
+    const persistEvent = () => {
+      this.state.seenDeliveries.push({ id: normalizedDeliveryId, seenAtMs: this.now() });
+      seenIds.add(normalizedDeliveryId);
+      this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
+      if (this.state.seenDeliveries.length > MAX_SEEN_DELIVERIES) {
+        const [dropped] = this.state.seenDeliveries.splice(0, 1);
+        if (dropped) seenIds.delete(dropped.id);
+        this.seenDeliveryIndex.length = this.state.seenDeliveries.length;
+      }
+      this.metrics.webhookEvents += 1;
+      const event = normalizeWebhookEvent({
         eventName,
         deliveryId: normalizedDeliveryId,
-        ignoredReason: 'unsupported_event',
+        payload: webhookPayload,
+        receivedAt,
       });
-      this.persist({ deferred: true });
-      return { ok: true, ignored: true, matchedSubscriptionIds: [] };
+      if (!event) {
+        this.metrics.webhookIgnored += 1;
+        this.appendEventAudit({
+          eventName,
+          deliveryId: normalizedDeliveryId,
+          ignoredReason: 'unsupported_event',
+        });
+        this.persist({ deferred: true });
+        return { ok: true, ignored: true, matchedSubscriptionIds: [] };
+      }
+      const result = this.recordEvent(event);
+      return { ...result, duplicate: false };
+    };
+
+    if (beforeRecord !== null) {
+      if (typeof beforeRecord !== 'function') throw brokerError('event_webhook_preflight_invalid', 'webhook preflight must be a function');
+      // This hook runs only for a new delivery and before it becomes visible to
+      // listeners, so callers can refresh state without duplicate API reads.
+      const result = beforeRecord(webhookPayload);
+      if (result && typeof result.then === 'function') {
+        const inFlight = Promise.resolve(result).then(persistEvent);
+        this.inFlightWebhookDeliveries.set(normalizedDeliveryId, inFlight);
+        return inFlight.finally(() => {
+          if (this.inFlightWebhookDeliveries.get(normalizedDeliveryId) === inFlight) {
+            this.inFlightWebhookDeliveries.delete(normalizedDeliveryId);
+          }
+        });
+      }
     }
-    const result = this.recordEvent(event);
-    return { ...result, duplicate: false };
+    return persistEvent();
   }
 }
