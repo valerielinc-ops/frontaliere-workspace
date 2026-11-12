@@ -9,10 +9,10 @@ hooks = true
 multi_agent = true
 
 [agents]
-# Fan-out richiesto dal proprietario: 15 thread per sessione. Il coordinatore
-# GitHub ha una concorrenza separata; i comandi pesanti restano serializzati
-# dal lease di bin/agent-resource-guard.mjs.
-max_concurrent_threads_per_session = 15
+# Limite di progetto per contenere memoria, swap e fetch concorrenti in questo
+# workspace. La configurazione personale resta indipendente per gli altri repo.
+# Il coordinatore GitHub ha concorrenza separata; i comandi pesanti usano il lease.
+max_concurrent_threads_per_session = 4
 
 [shell_environment_policy]
 inherit = "core"
