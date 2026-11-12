@@ -6,8 +6,14 @@ solo la sezione pertinente quando una regola qui sotto non basta.
 
 ## Avvio e confini
 
-- Apri Claude Code o Codex da `~/Projects/frontaliere`, non da un repo figlio e
-  non da `~/Projects`. I path in questo file sono relativi a questa root.
+- Apri Codex, Claude Code, Gemini, Grok, Copilot o Antigravity da
+  `~/Projects/frontaliere`, non da un repo figlio e non da `~/Projects`. I path
+  in questo file sono relativi a questa root.
+- Per una diagnosi in sola lettura puoi usare i checkout esistenti. Prima di
+  modificare un repo, crea o riusa un worktree dedicato basato sul suo
+  `origin/main` aggiornato e avvia l'agente dentro quel percorso. Non partire
+  da un branch locale sporco/stale né dal worktree nativo del provider quando
+  materializza un checkout completo del sito o del corpus.
 - I repo figli restano indipendenti: ciascuno ha `.git`, branch e PR propri; la
   root li esclude dal proprio git.
 - Prima di lavorare dentro un repo figlio, leggi anche le sue istruzioni locali.
@@ -291,6 +297,11 @@ e `data/` in ogni worktree. Crea worktree sparse con:
 ```bash
 frontaliere-si-o-no/scripts/dev/fast-worktree.sh <nome> [--add <path>]
 ```
+
+L'helper è indipendente dal provider: dopo averlo eseguito, apri Codex,
+Claude, Gemini, Grok, Copilot o Antigravity nel percorso stampato. Per il
+corpus usa il suo helper sparse `frontaliere-articles/scripts/dev/fast-worktree.sh`;
+per il piccolo repo Reddit basta un linked worktree da `origin/main`.
 
 I worktree condividono il `node_modules` principale: non eseguire `npm install`
 al loro interno. L'assenza di `public/` o `data/` in un worktree sparse non
