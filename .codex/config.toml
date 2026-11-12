@@ -9,10 +9,11 @@ hooks = true
 multi_agent = true
 
 [agents]
-# Limite di progetto per contenere memoria, swap e fetch concorrenti in questo
-# workspace. La configurazione personale resta indipendente per gli altri repo.
+# Limite per-sessione allineato al profilo personale (2) per contenere memoria,
+# swap e fetch concorrenti in questo workspace. La configurazione personale
+# resta indipendente per gli altri repo.
 # Il coordinatore GitHub ha concorrenza separata; i comandi pesanti usano il lease.
-max_concurrent_threads_per_session = 4
+max_concurrent_threads_per_session = 2
 
 [shell_environment_policy]
 inherit = "core"
