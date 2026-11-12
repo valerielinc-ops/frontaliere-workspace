@@ -38,3 +38,9 @@ privato/
 # in preparazione, misure intermedie. Come .backlog/ resta sul disco e non si
 # pubblica, perche' questo repo e' pubblico e quel materiale non e' rivisto.
 .scratch/
+
+# Worktree locali creati dagli agenti: restano sul disco, ma non sono sorgenti
+# della root. I pattern sono ancorati qui; i repository figli gestiscono i propri.
+/.claude/worktrees/
+/.codex/worktrees/
+/.gemini/worktrees/
