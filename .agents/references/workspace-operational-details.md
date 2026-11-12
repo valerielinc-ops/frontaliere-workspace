@@ -895,10 +895,11 @@ Recovery, con accesso fisico.
 **Concorrenza.** I comandi pesanti passano uno alla volta dal lease del guard
 (con coda FIFO e liveness dal 2026-10-02), quindi il default di vitest (thread
 logici meno uno, 3 qui) va bene. `npm run build` chiede 18 GB di heap e su 16
-GB non e' praticabile: le build passano dalla CI. Nella copia locale di
-`.codex/config.toml` `max_concurrent_threads_per_session` e' 15 (4 nel repo),
-per scelta del proprietario: se il carico resta alto e' il primo parametro da
-abbassare.
+GB non e' praticabile: le build passano dalla CI. Dal 2026-11-12 il progetto
+imposta `max_concurrent_threads_per_session = 4` per questo workspace; il valore
+personale in `~/.codex/config.toml` resta indipendente per gli altri repo. La
+configurazione di progetto ha precedenza quando il workspace e' trusted. Questo
+limite riguarda gli agenti spawned e non il thread principale.
 
 **Calore.** Il limite termico all'80% costa piu' di qualunque servizio:
 coperchio aperto (la ventilazione passa dalla cerniera, e a coperchio chiuso
