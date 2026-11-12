@@ -1,0 +1,91 @@
+#!/bin/sh
+
+# Installs the wrapper outside the repository so launchd can use it while the
+# shared workspace checkout remains dirty. Existing custom plists are backed
+# up before their executable path is changed.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
+workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
+site_repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
+action=${1:-install}
+launch_agents=${HOME:?HOME is required}/Library/LaunchAgents
+install_dir="$HOME/Library/Application Support/frontaliere/git-maintenance"
+backup_dir="$install_dir/original-launch-agents"
+wrapper="$install_dir/git-maintenance-wrapper"
+uid=$(/usr/bin/id -u)
+
+set_plist_string() {
+  key=$1
+  value=$2
+  plist=$3
+  if ! /usr/bin/plutil -replace "$key" -string "$value" "$plist" 2>/dev/null; then
+    /usr/bin/plutil -insert "$key" -string "$value" "$plist"
+  fi
+}
+
+case "$action" in
+  install)
+    [ -d "$site_repo/.git" ] || {
+      printf '%s missing site repository: %s\n' "install-git-maintenance-wrapper:" "$site_repo" >&2
+      exit 78
+    }
+    site_repo=$(CDPATH= cd -- "$site_repo" && pwd -P)
+    [ -f "$script_dir/git-maintenance-wrapper" ] || {
+      printf '%s missing source wrapper\n' "install-git-maintenance-wrapper:" >&2
+      exit 78
+    }
+    found=0
+    for schedule in hourly daily weekly sunday; do
+      [ -f "$launch_agents/ch.frontaliere.git-maintenance-$schedule.plist" ] || continue
+      found=1
+    done
+    [ "$found" -eq 1 ] || {
+      printf '%s no custom Git maintenance LaunchAgents found\n' "install-git-maintenance-wrapper:" >&2
+      exit 78
+    }
+    git -C "$site_repo" config --local maintenance.strategy none
+    git config --global --fixed-value --unset-all maintenance.repo "$site_repo" 2>/dev/null || true
+    /bin/mkdir -p "$install_dir" "$backup_dir" "$launch_agents" "$HOME/Library/Logs/frontaliere"
+    temporary_wrapper="$install_dir/git-maintenance-wrapper.$$"
+    /bin/cp "$script_dir/git-maintenance-wrapper" "$temporary_wrapper"
+    /bin/chmod 755 "$temporary_wrapper"
+    /bin/mv -f "$temporary_wrapper" "$wrapper"
+
+    for schedule in hourly daily weekly sunday; do
+      label="ch.frontaliere.git-maintenance-$schedule"
+      plist="$launch_agents/$label.plist"
+      [ -f "$plist" ] || continue
+      backup="$backup_dir/$label.plist"
+      [ -e "$backup" ] || /bin/cp "$plist" "$backup"
+      /bin/launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      set_plist_string ProgramArguments.0 "$wrapper" "$plist"
+      set_plist_string EnvironmentVariables.HOME "$HOME" "$plist"
+      set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$plist"
+      set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$plist"
+      set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$plist"
+      /usr/bin/plutil -lint "$plist" >/dev/null
+      /bin/launchctl bootstrap "gui/$uid" "$plist"
+    done
+    printf 'Wrapper Git con limiti installato; LaunchAgent custom ricaricati. Ripristina con: %s --restore\n' "$0"
+    ;;
+  --restore)
+    for schedule in hourly daily weekly sunday; do
+      label="ch.frontaliere.git-maintenance-$schedule"
+      plist="$launch_agents/$label.plist"
+      backup="$backup_dir/$label.plist"
+      [ -f "$backup" ] || continue
+      /bin/launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      /bin/cp "$backup" "$plist"
+      /usr/bin/plutil -lint "$plist" >/dev/null
+      /bin/launchctl bootstrap "gui/$uid" "$plist"
+    done
+    /bin/rm -f "$wrapper"
+    printf 'LaunchAgent Git originali ripristinati.\n'
+    ;;
+  *)
+    printf '%s uso: %s [--restore]\n' "install-git-maintenance-wrapper:" "$0" >&2
+    exit 64
+    ;;
+esac
