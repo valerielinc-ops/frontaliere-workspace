@@ -567,6 +567,14 @@ Nota: con la risoluzione storica `pr-collision-precheck` cerca lo script nel
 checkout del sito, che sul Mac host e' sparse e non lo contiene, quindi li'
 l'avviso non gira; il dispatcher riproduce la stessa risoluzione.
 
+**Sync del checkout base.** Il `SessionStart` della root esegue
+`sync-main-checkout.mjs` tramite `bin/site-hook` dal worktree `hooks-main` e
+passa il path del checkout principale con
+`FRONTALIERE_SYNC_MAIN_CHECKOUT_TARGET`. Lo script accetta solo un target dello
+stesso repository che sia il checkout base, non un altro worktree, e lo
+sincronizza solo se e' gia' su `main` e pulito. Un branch diverso o modifiche
+locali restano intatti.
+
 ## Stato del mirror (aggiornato il 2026-08-05)
 
 **I due mirror ora sono due, e si comportano in modo diverso** — e' la cosa da
@@ -620,8 +628,8 @@ diff -rq frontaliere-si-o-no/packages/articles/engine  frontaliere-articles/engi
 
 ## Stato macchina (rimisurata il 2026-08-18, laptop nuovo)
 
-Le cifre di questa sezione **sono cambiate tutte** con il cambio di laptop. Se una
-riga altrove nel documento contraddice quelle qui sotto, vince questa sezione.
+La tabella conserva la baseline misurata il 2026-08-18. Per le misure piu'
+recenti di disco e manutenzione Git, vedi l'aggiornamento 2026-11-12 piu' sotto.
 
 | | laptop vecchio (2026-08-05) | **qui** |
 |---|---|---|
@@ -701,6 +709,30 @@ Il corpus non ha `node_modules`: builda con `npx -y tsx@4`. Senza
 ed e' previsto dal design.
 
 Non clonare altri shard.
+
+### Aggiornamento 2026-11-12: oggetti Git e manutenzione
+
+Il clone completo del sito aveva 15.033 pack per 94,77 GiB. Dopo
+`multi-pack-index expire` e la verifica del MIDX, il conteggio e' sceso a
+12.668 pack e 76,84 GiB, con 17,9 GiB recuperati. Un repack unico e' stato
+fermato al 5% quando la pressione memoria del kernel era al livello 2.
+
+Il wrapper `bin/git-maintenance-wrapper` ora usa task espliciti: `commit-graph`
+ogni ora, `loose-objects` ogni giorno, e `pack-refs` piu' un batch MIDX da 1 GiB
+ogni settimana. Ogni processo ha un tetto di 2 GiB; la manutenzione parte solo
+con almeno 20 GiB liberi e con pressione memoria sotto 2 leggibile. Il repack
+MIDX scrive solo i pack selezionati nel batch; la
+soglia da 1 GiB puo' essere superata dal pack che porta il batch alla soglia.
+`expire` elimina al giro successivo i pack sostituiti. Non viene usato il repack
+incrementale senza limite.
+
+Per distribuire il wrapper senza modificare il checkout principale, esegui
+`bin/install-git-maintenance-wrapper` dalla root del workspace; salva una copia
+dei LaunchAgent esistenti, aggiorna quelli custom (compreso l'eventuale job
+domenicale locale), imposta `maintenance.strategy=none` nel clone del sito e
+rimuove la registrazione globale del clone. Le attivita' esplicite del wrapper
+restano abilitate. `bin/install-git-maintenance-wrapper --restore` ripristina i
+plist originali.
 
 ## Leak kernel da script annidati (macOS 26.x)
 
