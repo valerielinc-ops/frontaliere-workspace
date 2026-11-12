@@ -729,8 +729,11 @@ incrementale senza limite.
 Per distribuire il wrapper senza modificare il checkout principale, esegui
 `bin/install-git-maintenance-wrapper` dalla root del workspace; salva una copia
 dei LaunchAgent esistenti, aggiorna quelli custom (compreso l'eventuale job
-domenicale locale), imposta `maintenance.strategy=none` nel clone del sito e
-rimuove la registrazione globale del clone. Le attivita' esplicite del wrapper
+domenicale locale), imposta l'intero `ProgramArguments` a wrapper piu' schedule
+letto dal plist originale, imposta `maintenance.strategy=none` nel clone del
+sito e rimuove la registrazione globale del clone. Sostituire l'intero array
+evita di lasciare il vecchio percorso dello script come argomento, che il
+wrapper interpreta come schedule non valido. Le attivita' esplicite del wrapper
 restano abilitate. `bin/install-git-maintenance-wrapper --restore` ripristina i
 plist originali.
 
