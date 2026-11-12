@@ -40,7 +40,7 @@ privato/
 .scratch/
 
 # Worktree locali creati dagli agenti: restano sul disco, ma non sono sorgenti
-# della root. I repository figli gestiscono i propri worktree nei loro .gitignore.
+# della root. I pattern sono ancorati qui; i repository figli gestiscono i propri.
 /.claude/worktrees/
 /.codex/worktrees/
 /.gemini/worktrees/
