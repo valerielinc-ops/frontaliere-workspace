@@ -719,8 +719,10 @@ fermato al 5% quando la pressione memoria del kernel era al livello 2.
 
 Il wrapper `bin/git-maintenance-wrapper` ora usa task espliciti: `commit-graph`
 ogni ora, `loose-objects` ogni giorno, e `pack-refs` piu' un batch MIDX da 1 GiB
-ogni settimana. Ogni processo ha un tetto di 2 GiB; la manutenzione parte solo
-con almeno 20 GiB liberi e con pressione memoria sotto 2 leggibile. Il repack
+ogni settimana. Dove supportato, `taskpolicy` limita ogni processo a 2 GiB; su
+macOS 13 abbassa la priorita' e Git usa un pack window da 256 MiB con un thread.
+La manutenzione parte solo con almeno 20 GiB liberi e con pressione memoria
+sotto 2 leggibile. Il repack
 MIDX scrive solo i pack selezionati nel batch; la
 soglia da 1 GiB puo' essere superata dal pack che porta il batch alla soglia.
 `expire` elimina i pack sostituiti nello stesso tentativo, prima e dopo il
