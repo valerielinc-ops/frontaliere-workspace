@@ -21,8 +21,11 @@ sysctl_bin=/usr/sbin/sysctl
 min_free_gib=20
 min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
 memory_limit_mib=2048
+repack_retry_base_seconds=3600
+repack_retry_max_seconds=86400
 
 schedule=${1:-}
+locked_run=${2:-}
 case "$schedule" in
   hourly|daily|weekly) ;;
   *)
@@ -34,6 +37,9 @@ esac
 home_dir=${HOME:-/Users/saggesel}
 log_dir=${FRONTALIERE_LOG_DIR:-$home_dir/Library/Logs/frontaliere}
 log_file=${FRONTALIERE_MAINTENANCE_LOG:-$log_dir/git-maintenance.log}
+state_file=${FRONTALIERE_MAINTENANCE_STATE:-$log_dir/git-maintenance-state}
+pending_marker="$state_file.pending"
+lock_file=${FRONTALIERE_MAINTENANCE_LOCK:-$log_dir/git-maintenance.lock}
 
 if ! /bin/mkdir -p "$log_dir"; then
   printf '%s cannot create log directory: %s\n' "git-maintenance-wrapper:" "$log_dir" >&2
@@ -53,6 +59,57 @@ log() {
   printf '%s git-maintenance-wrapper %s\n' "$(timestamp)" "$*"
 }
 
+state_pending_since=0
+state_attempt_count=0
+state_last_attempt=0
+state_last_success=0
+state_needs_save=0
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+load_state() {
+  [ -f "$state_file" ] || return 0
+  if ! IFS=' ' read -r state_pending_since state_attempt_count state_last_attempt state_last_success <"$state_file" \
+    || ! is_uint "$state_pending_since" || ! is_uint "$state_attempt_count" \
+    || ! is_uint "$state_last_attempt" || ! is_uint "$state_last_success"; then
+    log "action=state_reset reason=invalid_state repo=$repo state_file=$state_file"
+    state_pending_since=$(/bin/date +%s)
+    state_attempt_count=0
+    state_last_attempt=0
+    state_last_success=0
+    state_needs_save=1
+  fi
+}
+
+save_state() {
+  temporary_state="$state_file.$$"
+  if ! printf '%s %s %s %s\n' "$state_pending_since" "$state_attempt_count" "$state_last_attempt" "$state_last_success" >"$temporary_state"; then
+    /bin/rm -f "$temporary_state"
+    return 1
+  fi
+  /bin/chmod 600 "$temporary_state" || {
+    /bin/rm -f "$temporary_state"
+    return 1
+  }
+  /bin/mv -f "$temporary_state" "$state_file"
+}
+
+queue_pending_repack() {
+  if [ "$state_pending_since" -eq 0 ]; then
+    state_pending_since=$(/bin/date +%s)
+    state_attempt_count=0
+    state_last_attempt=0
+    save_state || return 1
+    log "action=repack_queued repo=$repo reason=weekly_maintenance pending_since=$state_pending_since"
+  fi
+  /bin/rm -f "$pending_marker"
+}
+
 repo=${FRONTALIERE_SITE_REPO:-$repo}
 
 if [ ! -d "$repo/.git" ]; then
@@ -60,9 +117,36 @@ if [ ! -d "$repo/.git" ]; then
   exit 78
 fi
 
-if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ]; then
-  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin exit_code=69"
+if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ] || [ ! -x /usr/bin/lockf ]; then
+  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin lockf=/usr/bin/lockf exit_code=69"
   exit 69
+fi
+
+if [ "$locked_run" != --locked ]; then
+  if [ "$schedule" = weekly ] && ! : >"$pending_marker"; then
+    log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
+    exit 74
+  fi
+  /usr/bin/lockf -s -t 0 -k "$lock_file" "$0" "$schedule" --locked
+  lock_status=$?
+  if [ "$lock_status" -eq 75 ]; then
+    log "action=skip reason=maintenance_lock_busy repo=$repo schedule=$schedule pending_marker=$([ -f "$pending_marker" ] && printf yes || printf no) exit_code=0"
+    exit 0
+  fi
+  [ "$lock_status" -eq 174 ] && exit 75
+  exit "$lock_status"
+fi
+
+load_state
+if [ "$state_needs_save" -eq 1 ] && ! save_state; then
+  log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+  exit 74
+fi
+if [ -f "$pending_marker" ] || [ "$schedule" = weekly ]; then
+  queue_pending_repack || {
+    log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+    exit 74
+  }
 fi
 
 pressure_level=$($sysctl_bin -n kern.memorystatus_vm_pressure_level 2>/dev/null)
@@ -117,17 +201,83 @@ run_schedule() {
       ;;
     weekly)
       run_limited pack-refs maintenance run --task=pack-refs || return $?
-      run_limited midx-expire multi-pack-index expire --no-progress || return $?
-      run_limited midx-write multi-pack-index write --no-progress || return $?
-      run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size=1g --no-progress || return $?
       ;;
   esac
+}
+
+repack_retry_delay() {
+  delay=$repack_retry_base_seconds
+  attempt=1
+  while [ "$attempt" -lt "$state_attempt_count" ] && [ "$delay" -lt "$repack_retry_max_seconds" ]; do
+    delay=$((delay * 2))
+    [ "$delay" -le "$repack_retry_max_seconds" ] || delay=$repack_retry_max_seconds
+    attempt=$((attempt + 1))
+  done
+  printf '%s\n' "$delay"
+}
+
+run_pending_repack() {
+  [ "$state_pending_since" -gt 0 ] || return 0
+
+  current_epoch=$(/bin/date +%s)
+  retry_delay=$repack_retry_base_seconds
+  if [ "$state_attempt_count" -gt 0 ]; then
+    retry_delay=$(repack_retry_delay)
+    elapsed=$((current_epoch - state_last_attempt))
+    if [ "$elapsed" -lt "$retry_delay" ]; then
+      log "action=skip reason=repack_cooldown repo=$repo schedule=$schedule attempts=$state_attempt_count retry_in_seconds=$((retry_delay - elapsed))"
+      return 0
+    fi
+  fi
+
+  state_attempt_count=$((state_attempt_count + 1))
+  state_last_attempt=$current_epoch
+  save_state || {
+    log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+    return 74
+  }
+  pending_age=$((current_epoch - state_pending_since))
+  log "action=repack_attempt repo=$repo schedule=$schedule batch_size=1g attempts=$state_attempt_count pending_age_seconds=$pending_age retry_delay_seconds=$retry_delay"
+
+  run_limited midx-expire multi-pack-index expire --no-progress
+  task_status=$?
+  [ "$task_status" -eq 0 ] || return "$task_status"
+  run_limited midx-write multi-pack-index write --no-progress
+  task_status=$?
+  [ "$task_status" -eq 0 ] || return "$task_status"
+  run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size=1g --no-progress
+  task_status=$?
+  [ "$task_status" -eq 0 ] || return "$task_status"
+  run_limited midx-expire multi-pack-index expire --no-progress
+  task_status=$?
+  [ "$task_status" -eq 0 ] || return "$task_status"
+
+  completed_attempts=$state_attempt_count
+  finished_repack_epoch=$(/bin/date +%s)
+  completed_pending_age=$((finished_repack_epoch - state_pending_since))
+  state_pending_since=0
+  state_attempt_count=0
+  state_last_attempt=0
+  state_last_success=$finished_repack_epoch
+  save_state || {
+    log "action=abort reason=state_write_failed_after_repack repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+    return 74
+  }
+  log "action=repack_complete repo=$repo schedule=$schedule attempts=$completed_attempts pending_age_seconds=$completed_pending_age last_success=$state_last_success"
 }
 
 run_schedule
 exit_code=$?
 
+if [ "$exit_code" -eq 0 ]; then
+  run_pending_repack
+  exit_code=$?
+fi
+
 finished_at=$(timestamp)
 finished_epoch=$(/bin/date +%s)
 log "action=finish repo=$repo schedule=$schedule exit_code=$exit_code duration_seconds=$((finished_epoch - started_epoch)) finished_at=$finished_at"
+if [ "$locked_run" = --locked ] && [ "$exit_code" -eq 75 ]; then
+  exit 174
+fi
 exit "$exit_code"
