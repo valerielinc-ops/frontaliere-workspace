@@ -729,7 +729,8 @@ settimanale registra il batch come
 pendente prima dei controlli di memoria e spazio: se viene saltata, il primo
 giro orario o giornaliero che supera entrambe le guardie lo riprova. I fallimenti
 usano un backoff persistente di 1, 2, 4, 8, 16 e poi 24 ore; un lock kernel
-`lockf` serializza i quattro LaunchAgent e si libera anche dopo un crash. Lo
+`fcntl.flock` via Python serializza i quattro LaunchAgent e si libera anche
+dopo un crash. Lo
 stato e' in `~/Library/Logs/frontaliere/git-maintenance-state`, gli eventi nel
 log `git-maintenance.log`.
 
