@@ -110,7 +110,9 @@ case "$action" in
       esac
 
       temporary_plist="$plist.$$"
-      /bin/cp "$plist" "$temporary_plist"
+      # Rebuild from the saved LaunchAgent dictionary. A prior partial or
+      # malformed install may have replaced the plist root with just argv.
+      /bin/cp "$backup" "$temporary_plist"
       "$plutil_bin" -replace ProgramArguments -json "[\"$wrapper\",\"$job_schedule\"]" "$temporary_plist"
       set_plist_string EnvironmentVariables.HOME "$HOME" "$temporary_plist"
       set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$temporary_plist"
