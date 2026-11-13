@@ -105,7 +105,7 @@ queue_pending_repack() {
     state_attempt_count=0
     state_last_attempt=0
     save_state || return 1
-    log "action=repack_queued repo=$repo reason=weekly_maintenance pending_since=$state_pending_since"
+    log "action=repack_queued repo=$repo reason=scheduled_maintenance pending_since=$state_pending_since"
   fi
   /bin/rm -f "$pending_marker"
 }
@@ -208,7 +208,7 @@ log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes mini
 
 # Use the memory cap where this OS supports it. Older taskpolicy releases still
 # lower maintenance priority, and Git receives bounded single-thread pack
-# settings for every task. The weekly repack selects one bounded MIDX batch.
+# settings for every task. Scheduled repacks select one bounded MIDX batch.
 run_limited() {
   task_name=$1
   shift
