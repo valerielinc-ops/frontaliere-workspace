@@ -79,6 +79,7 @@ case "$action" in
         && [ "$installed_stdout" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" ] \
         && [ "$installed_stderr" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" ] \
         || already_current=0
+      "$launchctl_bin" print "gui/$uid/$label" >/dev/null 2>&1 || already_current=0
     done
     if [ "$already_current" -eq 1 ]; then
       printf 'Wrapper Git gia aggiornato; LaunchAgent invariati.\n'
@@ -123,7 +124,7 @@ case "$action" in
       set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$temporary_plist"
       set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$temporary_plist"
       "$plutil_bin" -lint "$temporary_plist" >/dev/null
-      "$launchctl_bin" bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      "$launchctl_bin" bootout "gui/$uid/$label" >/dev/null 2>&1 || true
       /bin/mv -f "$temporary_plist" "$plist"
       "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
@@ -135,7 +136,7 @@ case "$action" in
       plist="$launch_agents/$label.plist"
       backup="$backup_dir/$label.plist"
       [ -f "$backup" ] || continue
-      "$launchctl_bin" bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      "$launchctl_bin" bootout "gui/$uid/$label" >/dev/null 2>&1 || true
       /bin/cp "$backup" "$plist"
       "$plutil_bin" -lint "$plist" >/dev/null
       "$launchctl_bin" bootstrap "gui/$uid" "$plist"
