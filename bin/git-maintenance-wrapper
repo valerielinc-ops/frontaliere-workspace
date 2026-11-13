@@ -166,7 +166,10 @@ if [ "$state_needs_save" -eq 1 ] && ! save_state; then
   log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
   exit 74
 fi
-if [ -f "$pending_marker" ] || [ "$schedule" = weekly ]; then
+# The Mac agent host runs its Sunday LaunchAgent with the daily schedule.
+# Queue on daily so both the laptop's daily job and that weekly Sunday job
+# perform one bounded MIDX batch.
+if [ -f "$pending_marker" ] || [ "$schedule" = daily ]; then
   queue_pending_repack || {
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
     exit 74
