@@ -2,10 +2,9 @@
 
 # Guarded background maintenance for the workspace's large site repository.
 #
-# On this macOS, `ulimit -v` rejects a finite address-space limit
-# (setrlimit: invalid argument), so it is deliberately not used here. The
-# macOS taskpolicy memory limit is enforced for the git process tree instead;
-# /usr/bin/time -l records the observed peak RSS in the same log entry stream.
+# `ulimit -v` rejects a finite address-space limit on macOS. Newer taskpolicy
+# versions can cap the Git process tree; older macOS versions use background
+# priority and a bounded pack window. /usr/bin/time -l records observed RSS.
 
 set -u
 
@@ -123,6 +122,14 @@ if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "
   exit 69
 fi
 
+taskpolicy_memory_cap=0
+if "$taskpolicy_bin" -m "$memory_limit_mib" /usr/bin/true >/dev/null 2>&1; then
+  taskpolicy_memory_cap=1
+  memory_mode="taskpolicy-cap-${memory_limit_mib}m"
+else
+  memory_mode=background-priority-pack-window
+fi
+
 if [ "$locked_run" != --locked ]; then
   if [ "$schedule" = weekly ] && ! : >"$pending_marker"; then
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
@@ -194,15 +201,20 @@ fi
 
 started_at=$(timestamp)
 started_epoch=$(/bin/date +%s)
-log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes pressure_level=$pressure_level memory_limit_mib=$memory_limit_mib runner=taskpolicy started_at=$started_at"
+log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes pressure_level=$pressure_level memory_mode=$memory_mode pack_threads=1 pack_window_memory=256m runner=taskpolicy started_at=$started_at"
 
-# Apply the cap to each Git process tree. The weekly repack selects one bounded
-# MIDX batch; it never asks Git for an all-packs repack (batch size zero).
+# Use the memory cap where this OS supports it. Older taskpolicy releases still
+# lower maintenance priority, and Git receives bounded single-thread pack
+# settings for every task. The weekly repack selects one bounded MIDX batch.
 run_limited() {
   task_name=$1
   shift
   log "action=task_start repo=$repo schedule=$schedule task=$task_name"
-  "$taskpolicy_bin" -m "$memory_limit_mib" "$time_bin" -l "$git_bin" -C "$repo" "$@"
+  if [ "$taskpolicy_memory_cap" -eq 1 ]; then
+    "$taskpolicy_bin" -m "$memory_limit_mib" "$time_bin" -l "$git_bin" -c pack.threads=1 -c pack.windowMemory=256m -C "$repo" "$@"
+  else
+    "$taskpolicy_bin" -b "$time_bin" -l "$git_bin" -c pack.threads=1 -c pack.windowMemory=256m -C "$repo" "$@"
+  fi
   task_exit_code=$?
   log "action=task_finish repo=$repo schedule=$schedule task=$task_name exit_code=$task_exit_code"
   return "$task_exit_code"
