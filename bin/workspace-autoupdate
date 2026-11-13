@@ -95,6 +95,40 @@ update_coordinator() { # sha di destinazione
   fi
 }
 
+update_git_maintenance_wrapper() { # sha di destinazione
+  target=$1
+  installer="$ws/bin/install-git-maintenance-wrapper"
+  source_wrapper="$ws/bin/git-maintenance-wrapper"
+  disabled_marker="$home_dir/Library/Application Support/frontaliere/git-maintenance/disabled"
+  [ -f "$disabled_marker" ] && return 0
+  [ -x "$installer" ] && [ -f "$source_wrapper" ] || return 0
+
+  branch=$(g symbolic-ref --short -q HEAD) || branch=''
+  [ "$branch" = main ] || return 0
+  head=$(g rev-parse HEAD 2>/dev/null) || return 0
+  [ "$head" = "$target" ] || return 0
+  if ! g diff --quiet "$target" -- bin/install-git-maintenance-wrapper bin/git-maintenance-wrapper; then
+    log "manutenzione Git non distribuita: script locali diversi da origin/main"
+    return 0
+  fi
+
+  launch_agents=${AU_LAUNCH_AGENTS_DIR:-$home_dir/Library/LaunchAgents}
+  found=0
+  for schedule in hourly daily weekly sunday; do
+    [ -f "$launch_agents/ch.frontaliere.git-maintenance-$schedule.plist" ] && found=1
+  done
+  [ "$found" -eq 1 ] || return 0
+
+  if out=$(FRONTALIERE_SITE_REPO="$ws/frontaliere-si-o-no" "$installer" 2>&1); then
+    case "$out" in
+      *"gia aggiornato"*) return 0 ;;
+    esac
+    log "wrapper manutenzione Git aggiornato: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-240)"
+  else
+    log "wrapper manutenzione Git non distribuito; tentativo al prossimo giro: $(printf '%s' "$out" | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-240)"
+  fi
+}
+
 cmd_run() {
   /bin/mkdir -p "$log_dir" 2>/dev/null
   lock="$log_dir/workspace-autoupdate.lock"
@@ -113,6 +147,7 @@ cmd_run() {
   fi
   target=$(g rev-parse --verify -q origin/main) || return 0
   update_checkout "$target"
+  update_git_maintenance_wrapper "$target"
   update_coordinator "$target"
   trim_log
 }

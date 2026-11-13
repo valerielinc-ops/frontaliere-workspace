@@ -14,6 +14,7 @@ launch_agents=${HOME:?HOME is required}/Library/LaunchAgents
 install_dir="$HOME/Library/Application Support/frontaliere/git-maintenance"
 backup_dir="$install_dir/original-launch-agents"
 wrapper="$install_dir/git-maintenance-wrapper"
+disabled_marker="$install_dir/disabled"
 uid=$(/usr/bin/id -u)
 plutil_bin=${FRONTALIERE_PLUTIL_BIN:-/usr/bin/plutil}
 launchctl_bin=${FRONTALIERE_LAUNCHCTL_BIN:-/bin/launchctl}
@@ -35,6 +36,7 @@ case "$action" in
       printf '%s missing source wrapper\n' "install-git-maintenance-wrapper:" >&2
       exit 78
     }
+    /bin/rm -f "$disabled_marker"
     found=0
     for schedule in hourly daily weekly sunday; do
       [ -f "$launch_agents/ch.frontaliere.git-maintenance-$schedule.plist" ] || continue
@@ -46,6 +48,43 @@ case "$action" in
     }
     git -C "$site_repo" config --local maintenance.strategy none
     git config --global --fixed-value --unset-all maintenance.repo "$site_repo" 2>/dev/null || true
+
+    already_current=1
+    /usr/bin/cmp -s "$script_dir/git-maintenance-wrapper" "$wrapper" || already_current=0
+    for schedule in hourly daily weekly sunday; do
+      label="ch.frontaliere.git-maintenance-$schedule"
+      plist="$launch_agents/$label.plist"
+      [ -f "$plist" ] || continue
+      backup="$backup_dir/$label.plist"
+      if [ -f "$backup" ]; then
+        saved_plist=$backup
+      else
+        already_current=0
+        saved_plist=$plist
+      fi
+      job_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$saved_plist") || {
+        printf '%s cannot read schedule from %s\n' "install-git-maintenance-wrapper:" "$saved_plist" >&2
+        exit 78
+      }
+      installed_wrapper=$("$plutil_bin" -extract ProgramArguments.0 raw "$plist" 2>/dev/null) || installed_wrapper=''
+      installed_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$plist" 2>/dev/null) || installed_schedule=''
+      installed_home=$("$plutil_bin" -extract EnvironmentVariables.HOME raw "$plist" 2>/dev/null) || installed_home=''
+      installed_repo=$("$plutil_bin" -extract EnvironmentVariables.FRONTALIERE_SITE_REPO raw "$plist" 2>/dev/null) || installed_repo=''
+      installed_stdout=$("$plutil_bin" -extract StandardOutPath raw "$plist" 2>/dev/null) || installed_stdout=''
+      installed_stderr=$("$plutil_bin" -extract StandardErrorPath raw "$plist" 2>/dev/null) || installed_stderr=''
+      [ "$installed_wrapper" = "$wrapper" ] \
+        && [ "$installed_schedule" = "$job_schedule" ] \
+        && [ "$installed_home" = "$HOME" ] \
+        && [ "$installed_repo" = "$site_repo" ] \
+        && [ "$installed_stdout" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" ] \
+        && [ "$installed_stderr" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" ] \
+        || already_current=0
+    done
+    if [ "$already_current" -eq 1 ]; then
+      printf 'Wrapper Git gia aggiornato; LaunchAgent invariati.\n'
+      exit 0
+    fi
+
     /bin/mkdir -p "$install_dir" "$backup_dir" "$launch_agents" "$HOME/Library/Logs/frontaliere"
     temporary_wrapper="$install_dir/git-maintenance-wrapper.$$"
     /bin/cp "$script_dir/git-maintenance-wrapper" "$temporary_wrapper"
@@ -96,6 +135,9 @@ case "$action" in
       "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
     /bin/rm -f "$wrapper"
+    /bin/mkdir -p "$install_dir"
+    : >"$disabled_marker"
+    /bin/chmod 600 "$disabled_marker"
     printf 'LaunchAgent Git originali ripristinati.\n'
     ;;
   *)

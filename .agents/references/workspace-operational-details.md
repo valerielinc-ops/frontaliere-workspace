@@ -723,8 +723,22 @@ ogni settimana. Ogni processo ha un tetto di 2 GiB; la manutenzione parte solo
 con almeno 20 GiB liberi e con pressione memoria sotto 2 leggibile. Il repack
 MIDX scrive solo i pack selezionati nel batch; la
 soglia da 1 GiB puo' essere superata dal pack che porta il batch alla soglia.
-`expire` elimina al giro successivo i pack sostituiti. Non viene usato il repack
-incrementale senza limite.
+`expire` elimina i pack sostituiti nello stesso tentativo, prima e dopo il
+repack. Non viene usato il repack incrementale senza limite. La finestra
+settimanale registra il batch come
+pendente prima dei controlli di memoria e spazio: se viene saltata, il primo
+giro orario o giornaliero che supera entrambe le guardie lo riprova. I fallimenti
+usano un backoff persistente di 1, 2, 4, 8, 16 e poi 24 ore; un lock kernel
+`lockf` serializza i quattro LaunchAgent e si libera anche dopo un crash. Lo
+stato e' in `~/Library/Logs/frontaliere/git-maintenance-state`, gli eventi nel
+log `git-maintenance.log`.
+
+`bin/workspace-autoupdate` riconcilia anche l'installazione locale del wrapper
+con la versione tracciata su `main`: l'installer e' no-op quando file e
+LaunchAgent sono gia' aggiornati, e ricarica i plist solo quando serve. Cosi'
+un fast-forward del checkout root aggiorna il wrapper sia sul Mac principale
+sia sul Mac remoto che esegue lo stesso autoupdater. `--restore` crea un opt-out
+locale; una successiva invocazione manuale di `install` rimuove il marker.
 
 Per distribuire il wrapper senza modificare il checkout principale, esegui
 `bin/install-git-maintenance-wrapper` dalla root del workspace; salva una copia
@@ -735,7 +749,7 @@ sito e rimuove la registrazione globale del clone. Sostituire l'intero array
 evita di lasciare il vecchio percorso dello script come argomento, che il
 wrapper interpreta come schedule non valido. Le attivita' esplicite del wrapper
 restano abilitate. `bin/install-git-maintenance-wrapper --restore` ripristina i
-plist originali.
+plist originali e ferma il riallineamento automatico su quella macchina.
 
 ## Leak kernel da script annidati (macOS 26.x)
 
@@ -864,7 +878,9 @@ launch agent `ch.frontaliere.workspace-autoupdate` (ogni 15 minuti, a priorita'
 background): `fetch` di `main`, fast-forward del checkout root solo su `main` e
 solo se git non deve toccare modifiche locali, e `github-coordinator-release
 deploy` solo se sono cambiati `bin/` o `config/` rispetto alla release attiva.
-Un deploy rifiutato (coordinator occupato oltre 180 s) si ritenta al giro dopo.
+La versione del wrapper Git si riallinea nello stesso giro, ma solo se checkout
+e script corrispondono a `origin/main`. Un deploy rifiutato (coordinator
+occupato oltre 180 s) si ritenta al giro dopo.
 Log in `~/Library/Logs/frontaliere/workspace-autoupdate.log`; `status` mostra
 le ultime righe. Il plist si genera alla `install` con HOME e workspace della
 macchina, per questo non sta in `config/launchd/`.
@@ -931,7 +947,7 @@ Recovery, con accesso fisico.
 (con coda FIFO e liveness dal 2026-10-02), quindi il default di vitest (thread
 logici meno uno, 3 qui) va bene. `npm run build` chiede 18 GB di heap e su 16
 GB non e' praticabile: le build passano dalla CI. Dal 2026-11-12 il progetto
-imposta `max_concurrent_threads_per_session = 4` per questo workspace; il valore
+imposta `max_concurrent_threads_per_session = 2` per questo workspace; il valore
 personale in `~/.codex/config.toml` resta indipendente per gli altri repo. La
 configurazione di progetto ha precedenza quando il workspace e' trusted. Questo
 limite riguarda gli agenti spawned e non il thread principale.
