@@ -18,6 +18,7 @@ df_bin=/bin/df
 time_bin=/usr/bin/time
 taskpolicy_bin=/usr/sbin/taskpolicy
 sysctl_bin=/usr/sbin/sysctl
+python_bin=${FRONTALIERE_PYTHON_BIN:-/usr/bin/python3}
 min_free_gib=20
 min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
 memory_limit_mib=2048
@@ -117,8 +118,8 @@ if [ ! -d "$repo/.git" ]; then
   exit 78
 fi
 
-if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ] || [ ! -x /usr/bin/lockf ]; then
-  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin lockf=/usr/bin/lockf exit_code=69"
+if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ] || [ ! -x "$python_bin" ]; then
+  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin python=$python_bin exit_code=69"
   exit 69
 fi
 
@@ -127,7 +128,23 @@ if [ "$locked_run" != --locked ]; then
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
     exit 74
   fi
-  /usr/bin/lockf -s -t 0 -k "$lock_file" "$0" "$schedule" --locked
+  # Python's fcntl.flock is a kernel lock on macOS too. Unlike the `lockf`
+  # utility, it is available on the Mac agent host's older OS and is released
+  # automatically if the wrapper crashes or is killed.
+  "$python_bin" - "$lock_file" "$0" "$schedule" <<'PY'
+import fcntl
+import os
+import sys
+
+lock_path, wrapper, schedule = sys.argv[1:]
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(75)
+os.set_inheritable(lock_fd, True)
+os.execv(wrapper, [wrapper, schedule, "--locked"])
+PY
   lock_status=$?
   if [ "$lock_status" -eq 75 ]; then
     log "action=skip reason=maintenance_lock_busy repo=$repo schedule=$schedule pending_marker=$([ -f "$pending_marker" ] && printf yes || printf no) exit_code=0"

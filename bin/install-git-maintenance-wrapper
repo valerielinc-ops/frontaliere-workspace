@@ -25,6 +25,48 @@ set_plist_string() {
   fi
 }
 
+# LaunchAgents from Git's built-in scheduler use argv such as
+# `git -C <repo> maintenance run --schedule=daily`; in those plists argv[1]
+# is `-C`, not the schedule. Keep compatibility with wrapper plists, where
+# argv[1] is already the schedule, and otherwise scan the argument array.
+read_saved_schedule() {
+  _schedule_file=$1
+  _schedule_candidate=$("$plutil_bin" -extract ProgramArguments.1 raw "$_schedule_file" 2>/dev/null) || _schedule_candidate=''
+  case "$_schedule_candidate" in
+    hourly|daily|weekly)
+      printf '%s\n' "$_schedule_candidate"
+      return 0
+      ;;
+  esac
+
+  _schedule_index=0
+  _expect_schedule_value=0
+  while [ "$_schedule_index" -lt 32 ]; do
+    _schedule_argument=$("$plutil_bin" -extract "ProgramArguments.$_schedule_index" raw "$_schedule_file" 2>/dev/null) || break
+    case "$_schedule_argument" in
+      --schedule=hourly|--schedule=daily|--schedule=weekly)
+        printf '%s\n' "${_schedule_argument#--schedule=}"
+        return 0
+        ;;
+      --schedule)
+        _expect_schedule_value=1
+        ;;
+      hourly|daily|weekly)
+        if [ "$_expect_schedule_value" -eq 1 ]; then
+          printf '%s\n' "$_schedule_argument"
+          return 0
+        fi
+        _expect_schedule_value=0
+        ;;
+      *)
+        _expect_schedule_value=0
+        ;;
+    esac
+    _schedule_index=$((_schedule_index + 1))
+  done
+  return 1
+}
+
 case "$action" in
   install)
     [ -d "$site_repo/.git" ] || {
@@ -62,8 +104,8 @@ case "$action" in
         already_current=0
         saved_plist=$plist
       fi
-      job_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$saved_plist") || {
-        printf '%s cannot read schedule from %s\n' "install-git-maintenance-wrapper:" "$saved_plist" >&2
+      job_schedule=$(read_saved_schedule "$saved_plist") || {
+        printf '%s cannot determine schedule from %s\n' "install-git-maintenance-wrapper:" "$saved_plist" >&2
         exit 78
       }
       installed_wrapper=$("$plutil_bin" -extract ProgramArguments.0 raw "$plist" 2>/dev/null) || installed_wrapper=''
@@ -98,8 +140,8 @@ case "$action" in
       [ -f "$plist" ] || continue
       backup="$backup_dir/$label.plist"
       [ -e "$backup" ] || /bin/cp "$plist" "$backup"
-      job_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$backup") || {
-        printf '%s cannot read schedule from %s\n' "install-git-maintenance-wrapper:" "$backup" >&2
+      job_schedule=$(read_saved_schedule "$backup") || {
+        printf '%s cannot determine schedule from %s\n' "install-git-maintenance-wrapper:" "$backup" >&2
         exit 78
       }
       case "$job_schedule" in
