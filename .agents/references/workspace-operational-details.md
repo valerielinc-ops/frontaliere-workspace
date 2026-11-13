@@ -718,18 +718,21 @@ Il clone completo del sito aveva 15.033 pack per 94,77 GiB. Dopo
 fermato al 5% quando la pressione memoria del kernel era al livello 2.
 
 Il wrapper `bin/git-maintenance-wrapper` ora usa task espliciti: `commit-graph`
-ogni ora, `loose-objects` ogni giorno, e `pack-refs` piu' un batch MIDX da 1 GiB
-ogni settimana. Dove supportato, `taskpolicy` limita ogni processo a 2 GiB; su
-macOS 13 abbassa la priorita' e Git usa un pack window da 256 MiB con un thread.
+ogni ora, `loose-objects` ogni giorno, `pack-refs` ogni settimana e un batch
+MIDX da 1 GiB a ogni esecuzione con schedule `daily`. Sul laptop questo significa
+ogni giorno; il Mac agenti usa un LaunchAgent domenicale che invoca lo schedule
+`daily`, quindi consolida un batch alla settimana. Dove supportato, `taskpolicy`
+limita ogni processo a 2 GiB; su macOS 13 abbassa la priorita' e Git usa un pack
+window da 256 MiB con un thread.
 La manutenzione parte solo con almeno 20 GiB liberi e con pressione memoria
 sotto 2 leggibile. Il repack
 MIDX scrive solo i pack selezionati nel batch; la
 soglia da 1 GiB puo' essere superata dal pack che porta il batch alla soglia.
 `expire` elimina i pack sostituiti nello stesso tentativo, prima e dopo il
-repack. Non viene usato il repack incrementale senza limite. La finestra
-settimanale registra il batch come
-pendente prima dei controlli di memoria e spazio: se viene saltata, il primo
-giro orario o giornaliero che supera entrambe le guardie lo riprova. I fallimenti
+repack. Non viene usato il repack incrementale senza limite. Ogni esecuzione
+`daily` registra il batch come pendente prima dei controlli di memoria e spazio:
+se viene saltata, il primo giro orario o giornaliero che supera entrambe le
+guardie lo riprova. I fallimenti
 usano un backoff persistente di 1, 2, 4, 8, 16 e poi 24 ore; un lock kernel
 `fcntl.flock` via Python serializza i quattro LaunchAgent e si libera anche
 dopo un crash. Lo
