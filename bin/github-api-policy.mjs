@@ -12,6 +12,11 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { shellExecutableText } from './shell-command-scanner.mjs';
+import {
+  ownerUpdateBranchOverrideFromEnvironment,
+  updateBranchInCommand,
+  updateBranchMessage,
+} from './update-branch-policy.mjs';
 
 function commandFromStdin() {
   try {
@@ -113,6 +118,17 @@ export function containsDirectCall(command) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const command = commandFromStdin();
+  // Feedback anticipato del guard del coordinatore: update-branch via API
+  // produce merge di profilassi (AGENTS.md:71) anche passando dallo shim.
+  const updateBranch = command ? updateBranchInCommand(command) : null;
+  if (
+    updateBranch
+    && !updateBranch.inlineOverride
+    && !ownerUpdateBranchOverrideFromEnvironment()
+  ) {
+    process.stderr.write(`${updateBranchMessage(updateBranch)}\n`);
+    process.exit(2);
+  }
   if (!command || isAllowed(command) || !containsDirectCall(command)) process.exit(0);
 
   if (ghWatchInvocation(command)) {

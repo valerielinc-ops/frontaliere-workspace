@@ -27,6 +27,11 @@ export const DEFAULT_SUBSCRIPTION_TTL_MS = 6 * 60 * 60 * 1_000;
 export const MAX_SUBSCRIPTION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const DEFAULT_ORPHAN_GRACE_MS = 60 * 60 * 1_000;
 export const DEFAULT_STALLED_AFTER_MS = 4 * 60 * 60 * 1_000;
+// A listener started with timeoutMs=0 renews its lease for as long as it lives.
+// Thirteen of them (ppid=1, 2.5-9.7 days) kept subscriptions on targets that
+// never moved again. Past this age a stalled target is no longer renewed: the
+// listener gets `event_subscription_expired` and exits.
+export const STALLED_RENEWAL_MAX_AGE_MS = 48 * 60 * 60 * 1_000;
 // An expired subscription keeps its pending events so that a listener which
 // reconnects late still receives them. A listener of a dead session never
 // comes back: past this grace the record and its events are retired, or they
@@ -1235,6 +1240,7 @@ export class GitHubEventBroker {
       subscriptionsExpired: 0,
       subscriptionsAcknowledged: 0,
       subscriptionsRenewed: 0,
+      subscriptionRenewalsRefused: 0,
       webhookEvents: 0,
       webhookDuplicates: 0,
       webhookIgnored: 0,
@@ -1916,6 +1922,22 @@ export class GitHubEventBroker {
       return {
         ok: false,
         error: { code: 'event_subscription_not_found', message: 'event subscription not found' },
+      };
+    }
+    const renewalNowMs = this.now();
+    const createdAtMs = Date.parse(subscription.createdAt || '');
+    if (Number.isFinite(createdAtMs)
+      && renewalNowMs - createdAtMs > STALLED_RENEWAL_MAX_AGE_MS
+      && subscriptionIsStalled(subscription, renewalNowMs)) {
+      this.metrics.subscriptionRenewalsRefused += 1;
+      return {
+        ok: false,
+        error: {
+          code: 'event_subscription_expired',
+          message: 'event subscription is older than 48h and its target is stalled; not renewed',
+          waitState: 'timed_out',
+          nextAction: 'reconcile_once_or_escalate',
+        },
       };
     }
     const requestedTtl = Number(ttlMs ?? (

@@ -161,6 +161,14 @@ risposta ancora necessaria restano espliciti, senza promettere autonomia totale.
   è ammesso soltanto l'override esplicito
   `FRONTALIERE_OWNER_DEPLOY_DISPATCH=I_UNDERSTAND_DEPLOY_DISPATCH gh workflow run ...`;
   il valore non va mai aggiunto a uno script agentico o a un workflow.
+- Il coordinatore (e l'hook `bin/github-api-policy.mjs`) rifiuta
+  `gh pr update-branch`, `gh api -X PUT repos/<o>/<r>/pulls/<n>/update-branch`
+  e la mutation GraphQL `updatePullRequestBranch` su sito e corpus: producono un
+  merge web-flow che cambia la HEAD, cancella le run e invalida le review
+  (`frontaliere-si-o-no/AGENTS.md:71`, niente merge di main per profilassi). Con
+  un conflitto reale usa `git merge-tree` e un merge locale. Override solo del
+  proprietario: `FRONTALIERE_OWNER_UPDATE_BRANCH=I_UNDERSTAND_UPDATE_BRANCH`;
+  non va aggiunto a script agentici o workflow.
 - Usa `bin/gh-frontaliere events summary` o `events status` (compatto di
   default; `--full` solo per diagnosi) per un controllo sintetico di pending,
   listener orfani, duplicati ed ETA. Anche `bin/gh-frontaliere status` è

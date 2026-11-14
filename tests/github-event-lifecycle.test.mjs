@@ -28,6 +28,7 @@ import {
   DEFERRED_PERSIST_DELAY_MS,
   GitHubEventBroker,
   REVIVED_SUBSCRIPTION_TTL_MS,
+  STALLED_RENEWAL_MAX_AGE_MS,
   normalizeWebhookEvent,
 } from '../bin/github-event-broker.mjs';
 
@@ -486,5 +487,44 @@ test('events listen ripristina dal daemon una subscription archiviata e consegna
       else process.env[name] = value;
     }
     rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test('B3: oltre 48h un target fermo non viene piu rinnovato, uno attivo si', () => {
+  const { broker, clock, cleanup } = tempBroker({ nowMs: Date.now() });
+  try {
+    assert.equal(STALLED_RENEWAL_MAX_AGE_MS, 48 * HOUR);
+    const stalled = broker.subscribe({ repo: 'owner/repo', resource: 'pull_request', number: 11, waitFor: ['merged'] });
+    const active = broker.subscribe({ repo: 'owner/repo', resource: 'pull_request', number: 12, waitFor: ['merged'] });
+
+    // Dentro le 48h il rinnovo funziona anche se il target e fermo da tempo
+    // (un listener vivo rinnova ogni ~4h, prima che la lease da 6h scada).
+    for (let elapsed = 0; elapsed < 44; elapsed += 4) {
+      clock.nowMs += 4 * HOUR;
+      assert.equal(broker.renew(stalled.id, { ttlMs: 6 * HOUR }).ok, true, `rinnovo a ${elapsed + 4}h`);
+      assert.equal(broker.renew(active.id, { ttlMs: 6 * HOUR }).ok, true);
+    }
+    clock.nowMs += 3 * HOUR;
+    assert.equal(broker.renew(stalled.id, { ttlMs: 6 * HOUR }).ok, true, 'a 47h');
+
+    // Il target 12 riceve attivita: non e fermo, quindi continua a rinnovarsi.
+    const progress = JSON.stringify({ action: 'synchronize', repository: { full_name: 'owner/repo' }, pull_request: { number: 12 } });
+    broker.ingestWebhook({ eventName: 'pull_request', deliveryId: 'd-active', signature: signed(progress, 'lifecycle-secret'), rawBody: progress });
+    clock.nowMs += 2 * HOUR;
+    assert.equal(broker.renew(active.id, { ttlMs: 6 * HOUR }).ok, true);
+
+    // Oltre le 48h dalla creazione: il fermo viene rifiutato con la scadenza.
+    const refused = broker.renew(stalled.id, { ttlMs: 6 * HOUR });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, 'event_subscription_expired');
+    assert.equal(broker.metrics.subscriptionRenewalsRefused, 1);
+    assert.equal(broker.renew(active.id, { ttlMs: 6 * HOUR }).ok, true);
+
+    // Con un evento pending (il target si e mosso) il rinnovo resta consentito.
+    const merged = JSON.stringify({ action: 'closed', repository: { full_name: 'owner/repo' }, pull_request: { number: 11, merged: true } });
+    broker.ingestWebhook({ eventName: 'pull_request', deliveryId: 'd-m', signature: signed(merged, 'lifecycle-secret'), rawBody: merged });
+    assert.equal(broker.renew(stalled.id, { ttlMs: 6 * HOUR }).ok, true);
+  } finally {
+    cleanup();
   }
 });
