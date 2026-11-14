@@ -1626,6 +1626,16 @@ export function latencySummary(samples) {
   return { samples: sorted.length, p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] };
 }
 
+const MAX_CLIENTS_PER_KIND = 50;
+
+function topClientOf(clients) {
+  let best = null;
+  for (const [client, count] of clients || []) {
+    if (!best || count > best.count) best = { client, count };
+  }
+  return best ? { client: String(best.client).slice(0, 80), count: best.count } : null;
+}
+
 const RATIO_EXEMPT_BUCKETS = new Set(['search', 'code_search']);
 
 function hasRateLimitValue(value) {
@@ -3405,7 +3415,16 @@ export class GitHubCoordinator {
     this.pruneSecondaryWindow(now);
     let bestIndex = -1;
     let bestLoad = Infinity;
+    let bestQueued = Infinity;
     let deferredBySecondaryLimit = false;
+    // Among clients with the same jobs in flight, the one with fewer jobs
+    // waiting goes first: a burst from one agent (a retry loop of fifty
+    // mutations) no longer sits ahead of an agent with a single request.
+    const queuedByClient = new Map();
+    for (const queued of this.queue) {
+      const client = this.jobMeta(queued).client;
+      queuedByClient.set(client, (queuedByClient.get(client) || 0) + 1);
+    }
     for (let index = 0; index < this.queue.length; index += 1) {
       const job = this.queue[index];
       const blockedUntil = this.jobBlockedUntil(job, now);
@@ -3417,10 +3436,11 @@ export class GitHubCoordinator {
         continue;
       }
       const load = this.activeByClient.get(job.meta.client) || 0;
-      if (load < bestLoad) {
+      const queued = queuedByClient.get(job.meta.client) || 0;
+      if (load < bestLoad || (load === bestLoad && queued < bestQueued)) {
         bestIndex = index;
         bestLoad = load;
-        if (load === 0) break;
+        bestQueued = queued;
       }
     }
     if (bestIndex < 0) {
@@ -3473,7 +3493,10 @@ export class GitHubCoordinator {
           this.invalidateCaches(meta.scope);
         }
         this.recordLatencySample(meta.lane, 'run', finishedAt - startedAt);
-        this.recordRequestKind(meta.kind, finishedAt - startedAt, job.failed === true);
+        this.recordRequestKind(meta.kind, finishedAt - startedAt, job.failed === true, {
+          client: meta.client,
+          status: job.lastStatus ?? null,
+        });
         this.pump();
       });
     });
@@ -3510,12 +3533,21 @@ export class GitHubCoordinator {
     if (samples.length > LATENCY_SAMPLE_LIMIT) samples.splice(0, samples.length - LATENCY_SAMPLE_LIMIT);
   }
 
-  recordRequestKind(kind, milliseconds, failed) {
+  recordRequestKind(kind, milliseconds, failed, { client = null, status = null } = {}) {
     let name = kind || 'other';
     if (!this.requestKinds.has(name) && this.requestKinds.size >= MAX_REQUEST_KINDS) name = 'other';
-    const entry = this.requestKinds.get(name) || { count: 0, failed: 0, totalMs: 0, maxMs: 0 };
+    const entry = this.requestKinds.get(name)
+      || { count: 0, failed: 0, totalMs: 0, maxMs: 0, clients: new Map(), lastStatus: null };
     entry.count += 1;
     if (failed) entry.failed += 1;
+    // Who sends this kind of command and how the last one ended: a kind that
+    // fails 483 times out of 485 is one agent retrying, not 485 agents.
+    if (client) {
+      if (entry.clients.has(client) || entry.clients.size < MAX_CLIENTS_PER_KIND) {
+        entry.clients.set(client, (entry.clients.get(client) || 0) + 1);
+      }
+    }
+    entry.lastStatus = status ?? (failed ? 'failed' : 'ok');
     entry.totalMs += Math.max(0, milliseconds);
     entry.maxMs = Math.max(entry.maxMs, milliseconds);
     this.requestKinds.set(name, entry);
@@ -3558,6 +3590,8 @@ export class GitHubCoordinator {
         kind,
         count: entry.count,
         failed: entry.failed,
+        topClient: topClientOf(entry.clients),
+        lastStatus: entry.lastStatus,
         avgMs: Math.round(entry.totalMs / Math.max(1, entry.count)),
         maxMs: Math.round(entry.maxMs),
       }));
@@ -3593,9 +3627,11 @@ export class GitHubCoordinator {
         }
       }
       job.failed = response?.ok === false;
+      job.lastStatus = response?.status ?? response?.error?.code ?? response?.exitCode ?? null;
       job.resolve(response);
     } catch (error) {
       job.failed = true;
+      job.lastStatus = 'exception';
       job.reject(error);
     }
   }
@@ -3988,10 +4024,10 @@ export class GitHubCoordinator {
   }
 }
 
-function classifyCliBucket(args) {
+function classifyCliBucket(args, cwd = null) {
   if (args[0] === 'graphql') return 'graphql';
   if (args[0] === 'api') {
-    const invocation = cliApiInvocation(args);
+    const invocation = cliApiInvocation(args, cwd);
     return invocation.parsed
       ? classifyBucket(invocation.parsed.path, invocation.parsed.method)
       : invocation.graphql ? 'graphql' : classifyBucket(invocation.path, invocation.method);
@@ -4039,7 +4075,33 @@ export function apiRequestIsRead(request) {
 // native parser rejects (templates, --input, …). With fields and no explicit
 // --method the real gh sends a POST: calling that a read cached and deduped
 // writes.
-function cliApiInvocation(args) {
+const GRAPHQL_FILE_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * The GraphQL document held in a file given to `gh api graphql`
+ * (`-F query=@file`, `--input file`). `--input` carries the whole JSON body,
+ * so its `query` member is the document. Null when it cannot be read (stdin,
+ * missing file, too large): the caller then keeps the conservative answer.
+ */
+function graphqlDocumentFromFile(file, cwd, { json = false } = {}) {
+  if (typeof file !== 'string' || file === '' || file === '-') return null;
+  try {
+    const path = resolve(typeof cwd === 'string' && cwd ? cwd : process.cwd(), file);
+    if (statSync(path).size > GRAPHQL_FILE_LIMIT_BYTES) return null;
+    const text = readFileSync(path, 'utf8');
+    if (!json) return text;
+    try {
+      const body = JSON.parse(text);
+      return typeof body?.query === 'string' ? body.query : null;
+    } catch {
+      return text;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function cliApiInvocation(args, cwd = null) {
   const parsed = parseGhApiArguments(args);
   if (parsed) {
     const graphql = parsed.path === '/graphql';
@@ -4048,6 +4110,7 @@ function cliApiInvocation(args) {
   let method = null;
   let endpoint = null;
   let query = null;
+  let inputFile = null;
   let sendsBody = false;
   const optionsWithValue = new Set([
     '--cache', '--header', '--hostname', '--jq', '--preview', '--repo', '--template', '-H', '-t', '-q', '-p',
@@ -4069,9 +4132,11 @@ function cliApiInvocation(args) {
       if (field.startsWith('query=')) query = field.slice('query='.length);
       sendsBody = true;
     } else if (value === '--input') {
+      inputFile = String(args[index + 1] || '');
       sendsBody = true;
       index += 1;
     } else if (value.startsWith('--input=')) {
+      inputFile = value.slice('--input='.length);
       sendsBody = true;
     } else if (optionsWithValue.has(value)) {
       index += 1;
@@ -4082,8 +4147,18 @@ function cliApiInvocation(args) {
   const path = endpoint === null ? '' : endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const graphql = endpoint === 'graphql' || path === '/graphql';
   const normalizedMethod = String(method || (sendsBody || graphql ? 'POST' : 'GET')).toUpperCase();
-  // A document read from a file (`query=@file.graphql`) cannot be inspected.
-  const inspectableQuery = typeof query === 'string' && !query.startsWith('@') ? query : null;
+  // A document kept in a file (`query=@file.graphql`, `--input file`) is read
+  // from the caller's cwd: a `query` file is no mutation just because it is a
+  // file (483 of 485 `gh api graphql` jobs queued behind the write lane). A
+  // source that cannot be read (stdin, missing file) stays a mutation.
+  let inspectableQuery = null;
+  if (typeof query === 'string' && query.startsWith('@')) {
+    inspectableQuery = graphqlDocumentFromFile(query.slice(1), cwd);
+  } else if (typeof query === 'string') {
+    inspectableQuery = query;
+  } else if (inputFile !== null) {
+    inspectableQuery = graphqlDocumentFromFile(inputFile, cwd, { json: true });
+  }
   return { parsed: null, graphql, method: normalizedMethod, path, query: inspectableQuery };
 }
 
@@ -4092,10 +4167,10 @@ function cliApiInvocation(args) {
 const CLI_READ_VERBS = new Set(['list', 'view', 'status', 'diff', 'checks', 'log', 'get']);
 const CLI_READ_COMMANDS = new Set(['search', 'status', 'version', '--version', 'help', '--help']);
 
-function cliCommandIsMutation(args) {
+function cliCommandIsMutation(args, cwd = null) {
   if (cancellationRequestDetails({ type: 'exec', args })) return true;
   if (args[0] === 'api') {
-    const invocation = cliApiInvocation(args);
+    const invocation = cliApiInvocation(args, cwd);
     if (invocation.graphql) return invocation.method !== 'POST' || graphqlOperationIsMutation(invocation.query);
     return !isSafeRead(invocation.method);
   }
@@ -4219,7 +4294,7 @@ function requestKindFor(request, lane) {
   }
   const args = Array.isArray(request.args) ? request.args.map(String) : [];
   if (args[0] === 'api') {
-    const invocation = cliApiInvocation(args);
+    const invocation = cliApiInvocation(args, request.cwd);
     return invocation.graphql
       ? `gh api graphql ${lane === 'mutation' ? 'mutation' : 'query'}`
       : `gh api ${invocation.method}`;
@@ -4249,9 +4324,9 @@ export function classifyJob(request) {
     scope = repoScopeFromPath(request.path);
     family = isGraphqlPath(request.path) ? 'graphql' : 'rest';
   } else {
-    mutation = cliCommandIsMutation(args);
-    bucket = classifyCliBucket(args);
-    const invocation = args[0] === 'api' ? cliApiInvocation(args) : null;
+    mutation = cliCommandIsMutation(args, request?.cwd);
+    bucket = classifyCliBucket(args, request?.cwd);
+    const invocation = args[0] === 'api' ? cliApiInvocation(args, request?.cwd) : null;
     if (mutation) lane = 'mutation';
     else if (cliCommandIsBulk(args)) lane = 'bulk';
     else lane = invocation?.parsed ? 'api' : 'cli';

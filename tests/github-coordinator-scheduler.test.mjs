@@ -428,3 +428,64 @@ test('riassume le latenze con percentili', () => {
   assert.equal(summary.p95, 96);
   assert.equal(summary.max, 100);
 });
+
+test('B2: una query GraphQL in un file (query=@file, --input) non va nella corsia mutation', () => {
+  const root = mkdtempSync(join(tmpdir(), 'graphql-file-'));
+  try {
+    writeFileSync(join(root, 'read.graphql'), 'query { viewer { login } }');
+    writeFileSync(join(root, 'write.graphql'), 'mutation { addComment(input: {}) { clientMutationId } }');
+    writeFileSync(join(root, 'read.json'), JSON.stringify({ query: 'query { viewer { login } }' }));
+    writeFileSync(join(root, 'write.json'), JSON.stringify({ query: 'mutation { x }' }));
+    const lane = (args) => classifyJob({ type: 'exec', cwd: root, args }).lane;
+    assert.notEqual(lane(['api', 'graphql', '-F', 'query=@read.graphql']), 'mutation');
+    assert.equal(lane(['api', 'graphql', '-F', 'query=@write.graphql']), 'mutation');
+    assert.notEqual(lane(['api', 'graphql', '--input', 'read.json']), 'mutation');
+    assert.equal(lane(['api', 'graphql', '--input', 'write.json']), 'mutation');
+    assert.equal(lane(['api', 'graphql', '-F', 'query=@missing.graphql']), 'mutation', 'file illeggibile: prudente');
+    assert.equal(lane(['api', 'graphql', '--input', '-']), 'mutation', 'stdin: prudente');
+    assert.equal(
+      classifyJob({ type: 'exec', cwd: root, args: ['api', 'graphql', '-F', 'query=@read.graphql'] }).kind,
+      'gh api graphql query',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('B2: a pari carico passa il client con meno job in coda', async () => {
+  const coordinator = newCoordinator();
+  const api = gate(coordinator, 'api');
+  const capacity = Math.min(MAX_IN_FLIGHT, LANE_LIMITS.api);
+  const read = (path, client) => coordinator.submit({ type: 'api', method: 'GET', path, client, cacheTtlMs: 0 });
+  const promises = [];
+  // Riempie la corsia con un client terzo, poi accoda 5 job di "burst" e 1 di "single".
+  for (let index = 0; index < capacity; index += 1) promises.push(read(`/repos/o/r/f${index}`, 'filler'));
+  for (let index = 0; index < 5; index += 1) promises.push(read(`/repos/o/r/b${index}`, 'burst'));
+  promises.push(read('/repos/o/r/s0', 'single'));
+  await settle();
+  api.release('/repos/o/r/f0');
+  await settle();
+  assert.equal(api.started.at(-1).name, '/repos/o/r/s0', 'FIFO avrebbe avviato b0');
+  for (let round = 0; round < 12; round += 1) { api.releaseAll(); await settle(); }
+  await Promise.all(promises);
+});
+
+test('B2: lo stato per tipo di comando riporta client principale e ultimo esito', async () => {
+  const coordinator = newCoordinator();
+  const cli = gate(coordinator, 'cli');
+  const promises = [
+    coordinator.submit({ type: 'exec', args: ['pr', 'view', '1', '--repo', 'o/r'], client: 'agent-a' }),
+    coordinator.submit({ type: 'exec', args: ['pr', 'view', '2', '--repo', 'o/r'], client: 'agent-a' }),
+    coordinator.submit({ type: 'exec', args: ['pr', 'view', '3', '--repo', 'o/r'], client: 'agent-b' }),
+  ];
+  await settle();
+  cli.release('pr view 1 --repo o/r');
+  cli.release('pr view 2 --repo o/r');
+  cli.release('pr view 3 --repo o/r', { ok: false, exitCode: 1, stdout: '', stderr: 'boom' });
+  await Promise.all(promises);
+  await settle();
+  const entry = coordinator.status().scheduler.requestKinds.find(({ kind }) => kind === 'gh pr view');
+  assert.deepEqual(entry.topClient, { client: 'agent-a', count: 2 });
+  assert.equal(entry.failed, 1);
+  assert.equal(entry.lastStatus, 1);
+});
