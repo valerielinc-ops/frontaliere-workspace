@@ -52,6 +52,10 @@ import {
   deployDispatchBlockedResponse,
   deployDispatchDetails,
 } from './deploy-dispatch-policy.mjs';
+import {
+  updateBranchBlockedResponse,
+  updateBranchDetails,
+} from './update-branch-policy.mjs';
 import { dailyBriefWorkflowEnableDetails } from './daily-brief-owner-policy.mjs';
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -3161,6 +3165,10 @@ export class GitHubCoordinator {
     const deployDispatch = deployDispatchDetails(request);
     if (deployDispatch && request.ownerDeployDispatchOverride !== true) {
       return Promise.resolve(deployDispatchBlockedResponse(deployDispatch));
+    }
+    const updateBranch = updateBranchDetails(request);
+    if (updateBranch && request.ownerUpdateBranchOverride !== true) {
+      return Promise.resolve(updateBranchBlockedResponse(updateBranch));
     }
     const cancellation = cancellationRequestDetails(request);
     if (cancellation && request[OWNER_CONFIRMATION] !== undefined) {
