@@ -1626,6 +1626,12 @@ export function latencySummary(samples) {
   return { samples: sorted.length, p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] };
 }
 
+const RATIO_EXEMPT_BUCKETS = new Set(['search', 'code_search']);
+
+function hasRateLimitValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
 function isPastRateLimitReset(observed, now = Date.now()) {
   const reset = observed?.reset;
   if (reset === null || reset === undefined) return false;
@@ -1893,6 +1899,11 @@ export class GitHubCoordinator {
     const now = Date.now();
     for (const [bucket, observed] of this.buckets.entries()) {
       if (bucket.endsWith('-anonymous')) continue;
+      // A bucket registered from a response without rate-limit headers (the
+      // `search` bucket was seen with limit/remaining/reset all null) carries
+      // no information: Number(null) is 0 and used to read as "exhausted",
+      // pinning the whole queue to 1 with core at 2734/5000.
+      if (!hasRateLimitValue(observed?.remaining) || !hasRateLimitValue(observed?.limit)) continue;
       const remaining = Number(observed.remaining);
       if (!Number.isFinite(remaining)) continue;
       if (remaining <= 0) {
@@ -1900,6 +1911,10 @@ export class GitHubCoordinator {
         return 1;
       }
 
+      // The ratio steps guard the shared hourly budgets.  `search` and
+      // `code_search` are per-minute buckets already paced by
+      // bucketPausedUntil, and an observation past its reset is stale.
+      if (RATIO_EXEMPT_BUCKETS.has(bucket) || isPastRateLimitReset(observed, now)) continue;
       const limit = Number(observed.limit);
       if (!Number.isFinite(limit) || limit <= 0) continue;
       const ratio = remaining / limit;

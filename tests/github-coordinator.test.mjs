@@ -3032,6 +3032,32 @@ test('adatta la concorrenza delle letture al margine del rate limit', () => {
   assert.equal(coordinator.effectiveMaxInFlight(), 1);
 });
 
+test('un bucket senza header di rate limit non strozza la concorrenza (B1)', () => {
+  const coordinator = new GitHubCoordinator({
+    identity: 'test',
+    token: 'secret-for-test',
+    realGh: process.execPath,
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  coordinator.buckets.set('core', { remaining: '2734', limit: '5000', reset: String(nowSeconds + 1800) });
+  coordinator.buckets.set('search', { limit: null, remaining: null, reset: null });
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
+  coordinator.buckets.set('search', { limit: '', remaining: '', reset: '' });
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
+  // Le soglie a rapporto saltano search/code_search e le osservazioni scadute.
+  coordinator.buckets.set('search', { limit: '30', remaining: '3', reset: String(nowSeconds + 30) });
+  coordinator.buckets.set('code_search', { limit: '10', remaining: '1', reset: String(nowSeconds + 30) });
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
+  coordinator.buckets.set('graphql', { limit: '5000', remaining: '100', reset: String(nowSeconds - 5) });
+  assert.equal(coordinator.effectiveMaxInFlight(), MAX_IN_FLIGHT);
+  // Un bucket condiviso davvero basso continua a ridurre la concorrenza.
+  coordinator.buckets.set('graphql', { limit: '5000', remaining: '100', reset: String(nowSeconds + 60) });
+  assert.equal(coordinator.effectiveMaxInFlight(), 2);
+  coordinator.buckets.set('core', { remaining: '0', limit: '5000', reset: String(nowSeconds + 60) });
+  assert.equal(coordinator.effectiveMaxInFlight(), 1);
+});
+
 test('ignora un remaining azzerato solo dopo la scadenza del reset', () => {
   const coordinator = new GitHubCoordinator({
     identity: 'test',
