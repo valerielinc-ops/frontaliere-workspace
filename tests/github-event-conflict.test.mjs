@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { baseBranchMovement, GitHubCoordinator } from '../bin/github-coordinator.mjs';
+import { baseBranchMovement, GitHubCoordinator, MERGEABILITY_RECHECK_DELAY_MS } from '../bin/github-coordinator.mjs';
 import {
   eventMatchesSubscription,
   GitHubEventBroker,
@@ -116,6 +116,32 @@ test('riconosce lo spostamento della base dai webhook che arrivano davvero', () 
   assert.equal(baseBranchMovement('pull_request', {
     action: 'closed', repository: { full_name: SITE }, pull_request: { number: 1, merged: false, base: { ref: 'main' } },
   }), null);
+});
+
+test('B4: lo spostamento della base conta solo sul default branch', () => {
+  const repository = { full_name: SITE, default_branch: 'main' };
+  assert.equal(baseBranchMovement('pull_request', {
+    action: 'closed', repository, pull_request: { number: 1, merged: true, base: { ref: 'feature/stacked' } },
+  }), null);
+  assert.equal(baseBranchMovement('workflow_run', {
+    action: 'requested', repository, workflow_run: { event: 'push', head_branch: 'checkpoint/issue-9' },
+  }), null);
+  assert.equal(baseBranchMovement('push', { ref: 'refs/heads/some-branch', repository }), null);
+  assert.deepEqual(baseBranchMovement('push', { ref: 'refs/heads/main', repository }), { repo: SITE, branch: 'main' });
+  // Un repo con default branch diverso da main segue il proprio default.
+  assert.deepEqual(baseBranchMovement('push', {
+    ref: 'refs/heads/trunk', repository: { full_name: SITE, default_branch: 'trunk' },
+  }), { repo: SITE, branch: 'trunk' });
+  assert.equal(baseBranchMovement('push', {
+    ref: 'refs/heads/main', repository: { full_name: SITE, default_branch: 'trunk' },
+  }), null);
+});
+
+test('B4: il primo controllo di mergeability parte dopo 30 s', () => {
+  assert.equal(MERGEABILITY_RECHECK_DELAY_MS, 30_000);
+  assert.equal(new GitHubCoordinator({
+    identity: 'delay-test', token: 't', realGh: 'gh', socket: '/tmp/delay-test.sock',
+  }).mergeabilityRecheckDelayMs, 30_000);
 });
 
 test('replay 28-09: il merge di #10232 su main produce conflict per l observer di #10233', async () => {

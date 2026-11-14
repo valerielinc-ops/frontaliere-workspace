@@ -272,6 +272,9 @@ test('il gc programmato in dry-run segnala l evento pending senza listener e non
     assert.equal(report.orphanedWithPending[0].pendingState, 'merged');
     assert.ok(broker.getSubscriptionRecord(created.id), 'dry-run: la subscription resta');
     assert.ok(logged.some((line) => line.includes('event_gc_orphans_detected')));
+    const orphanLog = JSON.parse(logged.find((line) => line.includes('event_gc_orphans_detected')));
+    assert.equal(orphanLog.level, 'info');
+    assert.equal(orphanLog.error, undefined, 'nessuno stack per un orfano di routine');
 
     const health = eventLifecycleHealth({ scheduledGc: report }, 'default');
     assert.equal(health.alerts.some(({ code }) => code === 'orphaned_pending_events'), true);

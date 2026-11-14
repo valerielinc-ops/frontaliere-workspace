@@ -158,7 +158,9 @@ export const ORPHAN_RETIRE_INTERVAL_MS = 60 * 1_000;
 // moved, and computes `mergeable` lazily: a GET starts the computation and
 // may answer null. When a base branch moves (merged PR, push-triggered run)
 // the followed open PRs on it are re-read, with retries on null.
-export const MERGEABILITY_RECHECK_DELAY_MS = 10 * 1_000;
+// 30 s: GitHub needs a while to recompute mergeability after the base moves, so
+// a first read at 10 s mostly answered null and burned the retry ladder.
+export const MERGEABILITY_RECHECK_DELAY_MS = 30 * 1_000;
 export const MERGEABILITY_RETRY_DELAYS_MS = Object.freeze([5_000, 15_000, 45_000]);
 export const MERGEABILITY_RECHECK_MAX_PULL_REQUESTS = 25;
 export const DEFAULT_SCHEDULED_GC_AGE_MS = 60 * 60 * 1_000;
@@ -180,16 +182,26 @@ export function baseBranchMovement(eventName, payload) {
   const repo = payload?.repository?.full_name;
   if (!repo || !payload) return null;
   const event = String(eventName || '').toLowerCase();
+  // Only the default branch is the base of the PRs that get followed: a push
+  // or merge onto a feature branch (stacked PRs, bot branches) moved nobody's
+  // mergeability and used to start a recheck of every followed PR.
+  const defaultBranch = String(
+    payload.repository?.default_branch
+      || payload.pull_request?.base?.repo?.default_branch
+      || 'main',
+  );
+  const onDefault = (branch) => (branch === defaultBranch ? branch : null);
   if (event === 'pull_request' && payload.action === 'closed' && payload.pull_request?.merged === true) {
-    const branch = payload.pull_request?.base?.ref;
+    const branch = onDefault(payload.pull_request?.base?.ref);
     return branch ? { repo, branch, excludeNumber: payload.pull_request?.number ?? null } : null;
   }
   if (event === 'workflow_run' && payload.action === 'requested' && payload.workflow_run?.event === 'push') {
-    const branch = payload.workflow_run?.head_branch;
+    const branch = onDefault(payload.workflow_run?.head_branch);
     return branch ? { repo, branch } : null;
   }
   if (event === 'push' && typeof payload.ref === 'string' && payload.ref.startsWith('refs/heads/') && payload.deleted !== true) {
-    return { repo, branch: payload.ref.slice('refs/heads/'.length) };
+    const branch = onDefault(payload.ref.slice('refs/heads/'.length));
+    return branch ? { repo, branch } : null;
   }
   return null;
 }
@@ -338,6 +350,20 @@ function describeError(error, { includeStack = true } = {}) {
 
 const CLIENT_ERROR_LOG_DEDUPE_MS = 1_000;
 const clientErrorLogAt = new Map();
+
+/** A routine observation: no error object, no stack, level info. */
+function logStructuredInfo(event, details = {}) {
+  try {
+    process.stderr.write(`${JSON.stringify({
+      component: 'github-coordinator',
+      level: 'info',
+      event,
+      ...details,
+    })}\n`);
+  } catch {
+    // Logging must not turn a contained failure into a process failure.
+  }
+}
 
 function logStructuredError(event, error, details = {}) {
   try {
@@ -2667,7 +2693,8 @@ export class GitHubCoordinator {
     if (candidateIds.length > 0 || orphanedWithPending.length > 0) {
       if (logKey === this.lastScheduledGcLogKey) return this.lastScheduledGc;
       this.lastScheduledGcLogKey = logKey;
-      logStructuredError('event_gc_orphans_detected', new Error('orphaned event subscriptions'), {
+      // Orphans are a routine finding, not a failure: no stack, level info.
+      logStructuredInfo('event_gc_orphans_detected', {
         identity: this.identity,
         orphanCandidateCount: candidateIds.length,
         orphanedWithPendingSubscriptionCount: orphanedWithPending.length,
