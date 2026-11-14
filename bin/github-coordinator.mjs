@@ -3222,6 +3222,15 @@ export class GitHubCoordinator {
     if (updateBranch && request.ownerUpdateBranchOverride !== true) {
       return Promise.resolve(updateBranchBlockedResponse(updateBranch));
     }
+    if (request?.type === 'exec' && ghApiSlurpConflict(request.args)) {
+      return Promise.resolve({
+        ok: false,
+        exitCode: 1,
+        stdout: '',
+        stderr: `${GH_SLURP_WITH_JQ_MESSAGE}\n`,
+        error: { code: 'gh_api_slurp_with_jq', message: GH_SLURP_WITH_JQ_MESSAGE, exitCode: 1 },
+      });
+    }
     const cancellation = cancellationRequestDetails(request);
     if (cancellation && request[OWNER_CONFIRMATION] !== undefined) {
       // The symbol is added only by confirmCancellation inside this process;
@@ -4126,6 +4135,36 @@ function graphqlDocumentFromFile(file, cwd, { json = false } = {}) {
   } catch {
     return null;
   }
+}
+
+export const GH_SLURP_WITH_JQ_MESSAGE = 'the `--slurp` option is not supported with `--jq` or `--template`';
+
+/**
+ * The real gh refuses `gh api --slurp` combined with `--jq` or `--template`
+ * (exit 1, before any request). A local run must fail the same way the CI one
+ * does, whichever path would have executed it. Option values are skipped so a
+ * `-f note=--jq` field is not mistaken for the flag.
+ */
+export function ghApiSlurpConflict(args) {
+  if (!Array.isArray(args) || String(args[0]) !== 'api') return false;
+  const optionsWithValue = new Set([
+    '--cache', '--field', '--header', '--hostname', '--input', '--jq', '--method', '--preview',
+    '--raw-field', '--repo', '--template', '-F', '-H', '-X', '-f', '-p', '-q', '-t',
+  ]);
+  let slurp = false;
+  let formatter = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const value = String(args[index]);
+    if (value === '--') break;
+    if (value === '--slurp') slurp = true;
+    if (value === '--jq' || value === '-q' || value === '--template' || value === '-t'
+      || value.startsWith('--jq=') || value.startsWith('--template=')
+      || (/^-q./.test(value) && !value.startsWith('--')) || (/^-t./.test(value) && !value.startsWith('--'))) {
+      formatter = true;
+    }
+    if (optionsWithValue.has(value)) index += 1;
+  }
+  return slurp && formatter;
 }
 
 function cliApiInvocation(args, cwd = null) {
