@@ -519,6 +519,55 @@ test('consente git sparse-checkout add e le alternative indicate nel messaggio',
   }
 }));
 
+// 2026-11-15 11:24: un worktree sparse del sito è arrivato a 4,7 GiB con
+// `git sparse-checkout add data`, senza mai disattivare lo sparse.
+test('blocca sparse-checkout add/set che riprendono per intero data/, public/ o la radice nel sito', () => withWorkspace((ctx) => {
+  const blocked = [
+    'git sparse-checkout add data',
+    'git sparse-checkout add data/',
+    'git sparse-checkout add /data/',
+    'git sparse-checkout add ./data/**',
+    'git sparse-checkout add public',
+    'git sparse-checkout add docs public/',
+    "git sparse-checkout add '/*'",
+    "git sparse-checkout set --no-cone '/*'",
+    "git sparse-checkout set --no-cone '/*' '!/public/'",
+    'git sparse-checkout set data',
+    'git -C .claude/worktrees/task sparse-checkout add data',
+  ];
+  for (const command of blocked) {
+    const decision = decide(ctx, command, ctx.site);
+    assert.ok(decision, command);
+    assert.match(decision.reason, /per intero data\//);
+    assert.match(decision.reason, /git sparse-checkout add data\/faq-hub/);
+  }
+  assert.ok(decide(ctx, 'git sparse-checkout add data', ctx.farWorktree), 'worktree fuori dalla cartella del sito');
+}));
+
+test('consente i sotto-path, il profilo di fast-worktree e lo stesso comando fuori dal sito', () => withWorkspace((ctx) => {
+  for (const command of [
+    'git sparse-checkout add data/faq-hub public/assets/bridge.css',
+    'git sparse-checkout add data/health-premiums public/data',
+    "git sparse-checkout set --no-cone '/*' '!/public/' '!/data/'",
+    "git sparse-checkout add '!/data/jobs/'",
+    'git sparse-checkout add --stdin',
+  ]) {
+    assert.equal(decide(ctx, command, ctx.site), undefined, command);
+  }
+  for (const cwd of [ctx.corpus, ctx.corpusWorktree, ctx.reddit]) {
+    assert.equal(decide(ctx, 'git sparse-checkout add data', cwd), undefined, cwd);
+  }
+}));
+
+test('fast-worktree.sh --add data del sito è bloccato, quello del corpus no', () => withWorkspace((ctx) => {
+  assert.ok(decide(ctx, 'frontaliere-si-o-no/scripts/dev/fast-worktree.sh x --add data', ctx.workspace));
+  assert.ok(decide(ctx, 'scripts/dev/fast-worktree.sh x --add public/', ctx.site));
+  assert.ok(decide(ctx, 'bash scripts/dev/fast-worktree.sh x --add docs --add data', ctx.site));
+  assert.equal(decide(ctx, 'scripts/dev/fast-worktree.sh x --add data/health-premiums', ctx.site), undefined);
+  assert.equal(decide(ctx, 'scripts/dev/fast-worktree.sh x', ctx.site), undefined);
+  assert.equal(decide(ctx, 'frontaliere-articles/scripts/dev/fast-worktree.sh x --add data', ctx.workspace), undefined);
+}));
+
 test('--global e --system raggiungono il sito da qualsiasi directory', () => withWorkspace((ctx) => {
   assert.ok(decide(ctx, 'git config --global core.sparseCheckout false', ctx.corpus));
   assert.equal(decide(ctx, 'git config --global core.sparseCheckout true', ctx.corpus), undefined);
