@@ -681,6 +681,23 @@ cartella: `git show HEAD:data/<file>`, oppure `git ls-tree -r --name-only HEAD
 -- public/` per elencarla. Se ti serve davvero sul filesystem, materializza la
 **sottocartella** (`git sparse-checkout add public/assets`), mai il path intero.
 
+**Non disattivare lo sparse sul sito.** `git sparse-checkout disable`,
+`git config [--worktree] core.sparseCheckout false` (anche `--unset`, e con
+`--global`/`--system`) e `git -c core.sparseCheckout=false <comando>` sul clone
+del sito o su un suo worktree materializzano circa 5,5 GiB di `public/` e `data/`.
+Il 2026-11-15 il disco e' finito cosi': quattro worktree da 5,55 GiB creati tra
+00:20 e 04:27Z, nati sparse con `fast-worktree.sh` e resi completi da una
+sessione (`config.worktree` con `core.sparseCheckout=false`, `data/` e `public/`
+comparsi 36 s dopo la creazione). `bin/agent-resource-guard.mjs` (hook pre-bash
+caricato da `bin/hook-dispatch.mjs` per Claude e Codex) rifiuta queste forme e
+nel messaggio indica le alternative: `git sparse-checkout add <path>`,
+`git show origin/main:<path>`, `git ls-tree`. Il bersaglio si ricava come per un
+comando reale: cwd, `cd` e `git -C <dir>` (path relativi compresi, e i worktree
+del sito anche fuori dalla sua cartella); il corpus e il repo Reddit restano
+liberi, un bersaglio non risolvibile non viene bloccato (il guard e' fail-open).
+Override del proprietario: `FRONTALIERE_RESOURCE_GUARD_BYPASS=1` nell'ambiente
+della sessione.
+
 Con `--no-cone` si puo' re-includere **un singolo file**, non solo una
 sottocartella — utile quando ne serve uno solo di quei 2,3 GB:
 
@@ -719,15 +736,31 @@ fermato al 5% quando la pressione memoria del kernel era al livello 2.
 
 Il wrapper `bin/git-maintenance-wrapper` ora usa task espliciti: `commit-graph`
 ogni ora, `loose-objects` ogni giorno, `pack-refs` ogni settimana e un batch
-MIDX da 1 GiB a ogni esecuzione con schedule `daily`. Sul laptop questo significa
-ogni giorno; il Mac agenti usa un LaunchAgent domenicale che invoca lo schedule
-`daily`, quindi consolida un batch alla settimana. Dove supportato, `taskpolicy`
+MIDX a ogni esecuzione con schedule `daily`. Il batch e' da 1 GiB di default e
+si cambia per repo con `git -C frontaliere-si-o-no config
+frontaliere.maintenance.midxBatchSize <N>k|m|g` (esempio `4g`): sono accettati
+solo `<cifre><k|m|g>` minuscoli, non nulli e al massimo sei cifre (`0` chiederebbe
+a Git un batch senza limite, il repack che il wrapper esiste per evitare); un
+valore diverso viene registrato (`action=config_invalid`) e si usa 1g. Il
+valore usato compare in `action=repack_attempt ... batch_size=<valore>`.
+Cadenza: il laptop ha un LaunchAgent `daily` (ogni giorno). Un host che ha solo
+il job `sunday` (il Mac agenti) consolidava un batch alla settimana, circa
+1 GiB a fronte di 3-10 GiB di pack nuovi al giorno; ora
+`bin/install-git-maintenance-wrapper` toglie a quel job il vincolo `Weekday` da
+`StartCalendarInterval`, e il job gira ogni giorno alla stessa ora, sempre con
+lo schedule `daily`. Una macchina con un job `daily`
+separato (il laptop, o un host che ne ha uno) non cambia, quindi non fa due
+batch al giorno; `--restore` rimette il plist salvato. Misurato il 2026-11-15: il
+Mac agenti ha oggi anche un `ch.frontaliere.git-maintenance-daily.plist` creato
+a mano il 13/11 (i LaunchAgent non sono tracciati nel repo), e la run del 15/11 e'
+stata saltata per `low_disk` (10 GiB liberi, soglia 20): a quel punto il
+collo di bottiglia non era la cadenza ma lo spazio. Dove supportato, `taskpolicy`
 limita ogni processo a 2 GiB; su macOS 13 abbassa la priorita' e Git usa un pack
 window da 256 MiB con un thread.
 La manutenzione parte solo con almeno 20 GiB liberi e con pressione memoria
 sotto 2 leggibile. Il repack
 MIDX scrive solo i pack selezionati nel batch; la
-soglia da 1 GiB puo' essere superata dal pack che porta il batch alla soglia.
+soglia del batch puo' essere superata dal pack che porta il batch alla soglia.
 `expire` elimina i pack sostituiti nello stesso tentativo, prima e dopo il
 repack. Non viene usato il repack incrementale senza limite. Ogni esecuzione
 `daily` registra il batch come pendente prima dei controlli di memoria e spazio:

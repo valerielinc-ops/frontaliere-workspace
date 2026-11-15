@@ -314,7 +314,13 @@ per il piccolo repo Reddit basta un linked worktree da `origin/main`.
 I worktree condividono il `node_modules` principale: non eseguire `npm install`
 al loro interno. L'assenza di `public/` o `data/` in un worktree sparse non
 prova che il file non esista nel repository; usa `git show`, `git ls-tree` o
-materializza soltanto il path necessario.
+materializza soltanto il path necessario con `git sparse-checkout add <path>`.
+Non disattivare lo sparse sul sito: `git sparse-checkout disable`,
+`git config [--worktree] core.sparseCheckout false` e
+`git -c core.sparseCheckout=false ...` su `frontaliere-si-o-no` o su un suo
+worktree sono bloccati da `bin/agent-resource-guard.mjs` (materializzano circa
+5,5 GiB di `public/` e `data/`; il 2026-11-15 quattro worktree cosi' hanno
+riempito il disco). Il corpus e il repo Reddit non sono toccati dal blocco.
 
 Per verificare una patch contro un base senza toccare checkout, indice o file
 stranieri usa l'indice privato di `bin/verify-patch-index.mjs`:

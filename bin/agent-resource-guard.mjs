@@ -15,6 +15,7 @@ import {
   closeSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -828,6 +829,243 @@ function remediation(classification) {
   return 'Attendi la fine del job pesante corrente e riprova; i job leggeri possono continuare.';
 }
 
+// ── Sparse checkout del sito ───────────────────────────────────────────────
+// Il 2026-11-15 il disco si è riempito per quattro worktree del sito da
+// 5,55 GiB creati tra le 00:20 e le 04:27Z. Nascevano sparse
+// (`fast-worktree.sh`), poi una sessione eseguiva `git sparse-checkout
+// disable`: `config.worktree` dichiarava `core.sparseCheckout=false` e `data/`
+// e `public/` comparivano 36 s dopo la creazione. Sul clone del sito (o su un
+// suo worktree) questi comandi vengono rifiutati. Il corpus e il repo Reddit
+// sono piccoli e restano liberi.
+const FALSEY_GIT_BOOL = new Set(['false', 'no', 'off', '0', '']);
+const SPARSE_KEY = 'core.sparsecheckout';
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--exec-path', '--config-env', '--attr-source']);
+const CONFIG_OPTIONS_WITH_VALUE = new Set(['-f', '--file', '--blob', '--type', '-t', '--default', '--comment']);
+const WRAPPER_WORDS = new Set(['command', 'exec', 'time', 'nohup', 'nice', 'builtin']);
+
+/** Quoted text is masked by shellExecutableText, so separators are found on it and the raw text is sliced. */
+function shellSegments(command) {
+  const raw = String(command ?? '');
+  const executable = shellExecutableText(raw);
+  const segments = [];
+  let start = 0;
+  const flush = (end) => {
+    const text = raw.slice(start, end).trim();
+    if (text) segments.push(text);
+  };
+  for (let index = 0; index < executable.length; index += 1) {
+    const character = executable[index];
+    // `${VAR}` is one word, not a block.
+    if (character === '$' && executable[index + 1] === '{') {
+      const close = executable.indexOf('}', index);
+      if (close > 0) {
+        index = close;
+        continue;
+      }
+    }
+    if (character === ';' || character === '\n' || character === '|' || character === '&' || character === '(' || character === ')' || character === '{' || character === '}') {
+      flush(index);
+      start = index + 1;
+    }
+  }
+  flush(raw.length);
+  return segments;
+}
+
+function shellWords(segment) {
+  const words = [];
+  let current = '';
+  let active = false;
+  let quote;
+  for (let index = 0; index < segment.length; index += 1) {
+    const character = segment[index];
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      else current += character;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') quote = undefined;
+      else if (character === '\\' && index + 1 < segment.length && '"\\$`'.includes(segment[index + 1])) current += segment[++index];
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      active = true;
+    } else if (character === '\\' && index + 1 < segment.length) {
+      current += segment[++index];
+      active = true;
+    } else if (/\s/.test(character)) {
+      if (active) words.push(current);
+      current = '';
+      active = false;
+    } else {
+      current += character;
+      active = true;
+    }
+  }
+  if (active) words.push(current);
+  return words;
+}
+
+/** Expand `~`, `$HOME`, `$WORKSPACE`...; `undefined` when a variable cannot be resolved (the target is then unknown). */
+function expandPathWord(word, workspace) {
+  let text = String(word);
+  if (text === '~' || text.startsWith('~/')) text = `${os.homedir()}${text.slice(1)}`;
+  let unresolved = false;
+  text = text.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_, braced, plain) => {
+    const name = braced ?? plain;
+    const value = name === 'WORKSPACE' ? (process.env.WORKSPACE || workspace) : process.env[name];
+    if (value === undefined || value === '') unresolved = true;
+    return value ?? '';
+  });
+  return unresolved || /[`$]/.test(text) ? undefined : text;
+}
+
+function canonicalPath(target) {
+  const missing = [];
+  let current = path.resolve(target);
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    missing.unshift(path.basename(current));
+    current = parent;
+  }
+  try {
+    current = realpathSync(current);
+  } catch {
+    // keep the lexical path
+  }
+  return path.join(current, ...missing);
+}
+
+function isInside(child, parent) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/** The site clone, or a linked worktree of it wherever it lives (same git common dir). */
+function isSiteRepoPath(target, workspace) {
+  const site = canonicalPath(process.env.FRONTALIERE_SITE_REPO || path.join(workspace, 'frontaliere-si-o-no'));
+  const dir = canonicalPath(target);
+  if (isInside(dir, site)) return true;
+  let probe = dir;
+  while (!isDirectory(probe) && path.dirname(probe) !== probe) probe = path.dirname(probe);
+  try {
+    const common = execFileSync('git', ['-C', probe, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000,
+    }).trim();
+    return Boolean(common) && canonicalPath(path.resolve(probe, common)) === canonicalPath(path.join(site, '.git'));
+  } catch {
+    return false;
+  }
+}
+
+function sparseOffReason(form) {
+  return `${form} nel clone del sito (o in un suo worktree) materializza circa 5,5 GiB di public/ e data/: `
+    + 'quattro worktree sparse sono diventati completi così il 2026-11-15 e hanno riempito il disco. '
+    + 'Alternative: `git sparse-checkout add <path>` per il solo path che serve, `git show origin/main:<path>` '
+    + 'per leggere un file, `git ls-tree` per elencare.';
+}
+
+/**
+ * Detects the commands that turn a sparse checkout of the site into a full one:
+ * `git sparse-checkout disable`, `git config [--worktree] core.sparseCheckout
+ * false` (or `--unset`) and `git -c core.sparseCheckout=false <command>`.
+ * Follows `cd` and `git -C <dir>` (relative paths included) to find the target
+ * repo; an unresolvable target is not blocked (the guard stays fail-open).
+ * Returns `{ form, reason }` or `undefined`.
+ */
+export function sparseCheckoutDisableDecision(command, cwd, workspace = findWorkspace(cwd)) {
+  let current = cwd ? path.resolve(String(cwd)) : undefined;
+  for (const segment of shellSegments(command)) {
+    let words = shellWords(segment);
+    // `env`, `command`, VAR=value in front of git.
+    let at = 0;
+    while (at < words.length) {
+      const word = words[at];
+      if (ENV_ASSIGNMENT.test(word) || WRAPPER_WORDS.has(word)) at += 1;
+      else if (word === 'env') {
+        at += 1;
+        while (at < words.length && (words[at].startsWith('-') || ENV_ASSIGNMENT.test(words[at]))) at += words[at] === '-u' ? 2 : 1;
+      } else break;
+    }
+    words = words.slice(at);
+    if (!words.length) continue;
+
+    if (words[0] === 'cd' || words[0] === 'pushd' || words[0] === 'popd') {
+      const operand = words.slice(1).find((word) => !/^-[LPe@]*$/.test(word) || word === '-');
+      if (words[0] === 'popd' || operand === '-') current = undefined;
+      else if (operand === undefined) current = os.homedir();
+      else {
+        const expanded = expandPathWord(operand, workspace);
+        current = expanded === undefined || current === undefined && !path.isAbsolute(expanded)
+          ? undefined
+          : path.resolve(current ?? '/', expanded);
+      }
+      continue;
+    }
+    if (path.basename(words[0]) !== 'git') continue;
+
+    // Global git options: -C <dir>, -c <k=v>, --git-dir, --work-tree...
+    let directory = current;
+    let sparseOffByConfig = false;
+    let targets = [];
+    let index = 1;
+    while (index < words.length && words[index].startsWith('-')) {
+      const option = words[index];
+      const [name, inlineValue] = option.startsWith('--') && option.includes('=') ? [option.slice(0, option.indexOf('=')), option.slice(option.indexOf('=') + 1)] : [option, undefined];
+      const takesValue = GIT_OPTIONS_WITH_VALUE.has(name);
+      const value = inlineValue ?? (takesValue ? words[index + 1] : undefined);
+      index += takesValue && inlineValue === undefined ? 2 : 1;
+      if (name === '-C') {
+        const expanded = value === undefined ? undefined : expandPathWord(value, workspace);
+        directory = expanded === undefined || directory === undefined && !path.isAbsolute(expanded) ? undefined : path.resolve(directory ?? '/', expanded);
+      } else if (name === '-c' && value !== undefined) {
+        const separator = value.indexOf('=');
+        const key = (separator < 0 ? value : value.slice(0, separator)).toLowerCase();
+        if (key === SPARSE_KEY && separator >= 0 && FALSEY_GIT_BOOL.has(value.slice(separator + 1).trim().toLowerCase())) sparseOffByConfig = true;
+      } else if ((name === '--git-dir' || name === '--work-tree') && value !== undefined) {
+        const expanded = expandPathWord(value, workspace);
+        if (expanded !== undefined) targets.push(path.resolve(directory ?? '/', expanded));
+      }
+    }
+    const subcommand = words[index];
+    const args = words.slice(index + 1);
+    if (directory !== undefined) targets = [directory, ...targets];
+
+    let form;
+    let global = false;
+    if (sparseOffByConfig) form = '`git -c core.sparseCheckout=false`';
+    if (subcommand === 'sparse-checkout' && args[0] === 'disable') form = '`git sparse-checkout disable`';
+    if (subcommand === 'config') {
+      const positionals = [];
+      let unset = false;
+      for (let position = 0; position < args.length; position += 1) {
+        const argument = args[position];
+        if (argument === '--global' || argument === '--system') global = true;
+        else if (argument === '--unset' || argument === '--unset-all') unset = true;
+        else if (CONFIG_OPTIONS_WITH_VALUE.has(argument)) position += 1;
+        else if (!argument.startsWith('-') || argument === '-') positionals.push(argument);
+      }
+      if (positionals[0] === 'set' && positionals.length >= 3) positionals.shift();
+      else if (positionals[0] === 'unset' && positionals.length >= 2) {
+        positionals.shift();
+        unset = true;
+      }
+      if (positionals[0]?.toLowerCase() === SPARSE_KEY && (unset || (positionals.length >= 2 && FALSEY_GIT_BOOL.has(positionals[1].trim().toLowerCase())))) {
+        form = unset ? '`git config --unset core.sparseCheckout`' : '`git config core.sparseCheckout false`';
+      }
+    }
+    if (!form) continue;
+    // --global/--system reach the site clone from any directory.
+    if (global || targets.some((target) => isSiteRepoPath(target, workspace))) return { form, reason: sparseOffReason(form) };
+  }
+  return undefined;
+}
+
 export function guardPre(info, workspace = findWorkspace(info.cwd), options = {}) {
   const runtimeDir = runtimeDirectory(workspace);
   ensureRuntime(runtimeDir);
@@ -847,6 +1085,13 @@ export function guardPre(info, workspace = findWorkspace(info.cwd), options = {}
     startedAt: now(),
     hookPid: process.pid,
   };
+
+  const sparseOff = isBypassEnabled() ? undefined : sparseCheckoutDisableDecision(info.command, info.cwd, workspace);
+  if (sparseOff) {
+    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason: sparseOff.reason });
+    process.stderr.write(`\n🚫 resource-guard: comando bloccato — ${sparseOff.reason}\n`);
+    return { allowed: false, id, classification, runtimeDir, reason: sparseOff.reason };
+  }
 
   if (!classification.heavy) {
     appendJson(runtimeDir, { type: 'command_start', ...baseRecord });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -17,6 +18,7 @@ import {
   queueHead,
   redactCommand,
   runtimeDirectory,
+  sparseCheckoutDisableDecision,
   waitForHeavyLease,
 } from './agent-resource-guard.mjs';
 
@@ -390,3 +392,147 @@ test('con l\'id della chiamata l\'invocazione non dipende dalla directory ne\' d
   assert.notEqual(invocationId(bare('/a')), invocationId(bare('/b')));
 });
 
+
+// ── Sparse checkout del sito ────────────────────────────────────────────────
+// 2026-11-15: quattro worktree del sito da 5,55 GiB, nati sparse e poi resi
+// completi con `git sparse-checkout disable`, hanno riempito il disco.
+
+function git(cwd, ...args) {
+  return execFileSync('git', ['-C', cwd, '-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function withWorkspace(fn) {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'frontaliere-sparse-guard-')));
+  try {
+    const workspace = path.join(root, 'workspace');
+    const repos = {
+      site: path.join(workspace, 'frontaliere-si-o-no'),
+      corpus: path.join(workspace, 'frontaliere-articles'),
+      reddit: path.join(workspace, 'frontaliere-reddit-devvit'),
+    };
+    for (const repo of Object.values(repos)) {
+      mkdirSync(repo, { recursive: true });
+      execFileSync('git', ['init', '--quiet', repo]);
+      git(repo, 'commit', '--quiet', '--allow-empty', '-m', 'init');
+    }
+    const siteWorktree = path.join(repos.site, '.claude', 'worktrees', 'task');
+    git(repos.site, 'worktree', 'add', '--quiet', '-b', 'task', siteWorktree);
+    // A linked worktree of the site that lives OUTSIDE the site directory.
+    const farWorktree = path.join(root, 'elsewhere', 'far-task');
+    git(repos.site, 'worktree', 'add', '--quiet', '-b', 'far', farWorktree);
+    const corpusWorktree = path.join(repos.corpus, '.claude', 'worktrees', 'task');
+    git(repos.corpus, 'worktree', 'add', '--quiet', '-b', 'task', corpusWorktree);
+    return fn({ root, workspace, ...repos, siteWorktree, farWorktree, corpusWorktree });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const decide = (ctx, command, cwd) => sparseCheckoutDisableDecision(command, cwd, ctx.workspace);
+
+test('blocca sparse-checkout disable, config core.sparseCheckout false e -c nel clone del sito', () => withWorkspace((ctx) => {
+  const blocked = [
+    'git sparse-checkout disable',
+    'git config core.sparseCheckout false',
+    'git config --worktree core.sparseCheckout false',
+    'git config --local core.sparsecheckout FALSE',
+    'git config --worktree core.sparseCheckout 0',
+    'git config --worktree --unset core.sparseCheckout',
+    'git config set --worktree core.sparseCheckout false',
+    'git -c core.sparseCheckout=false checkout main',
+    "git -c 'core.sparseCheckout=false' read-tree -mu HEAD",
+    'git -c core.sparseCheckout=false worktree add ../x origin/main',
+    'git --no-pager sparse-checkout disable',
+    'FOO=1 git sparse-checkout disable',
+    'git config core.sparseCheckout false 2>&1',
+    'echo prima && git sparse-checkout disable && echo dopo',
+  ];
+  for (const command of blocked) {
+    const decision = decide(ctx, command, ctx.site);
+    assert.ok(decision, command);
+    assert.match(decision.reason, /5,5 GiB di public\/ e data\//);
+    assert.match(decision.reason, /git sparse-checkout add <path>/);
+    assert.match(decision.reason, /git show origin\/main:<path>/);
+    assert.match(decision.reason, /git ls-tree/);
+  }
+}));
+
+test('lo stesso vale in un worktree del sito, dentro o fuori dalla sua cartella', () => withWorkspace((ctx) => {
+  for (const cwd of [ctx.siteWorktree, ctx.farWorktree, path.join(ctx.siteWorktree, 'scripts', 'dev')]) {
+    assert.ok(decide(ctx, 'git sparse-checkout disable', cwd), cwd);
+    assert.ok(decide(ctx, 'git config --worktree core.sparseCheckout false', cwd), cwd);
+  }
+}));
+
+test('segue git -C, cd e i path relativi per trovare il repo bersaglio', () => withWorkspace((ctx) => {
+  // da fuori dal sito, ma il bersaglio e' il sito
+  assert.ok(decide(ctx, `git -C ${ctx.site} sparse-checkout disable`, ctx.workspace));
+  assert.ok(decide(ctx, `git -C "${ctx.siteWorktree}" sparse-checkout disable`, ctx.corpus));
+  assert.ok(decide(ctx, 'git -C frontaliere-si-o-no sparse-checkout disable', ctx.workspace), 'path relativo alla cwd');
+  assert.ok(decide(ctx, 'git -C ../frontaliere-si-o-no config core.sparseCheckout false', ctx.corpus), 'path relativo con ..');
+  assert.ok(decide(ctx, 'git -C . -C .claude/worktrees/task sparse-checkout disable', ctx.site), '-C ripetuti si compongono');
+  assert.ok(decide(ctx, 'cd frontaliere-si-o-no && git sparse-checkout disable', ctx.workspace));
+  assert.ok(decide(ctx, 'cd frontaliere-si-o-no; cd .claude/worktrees/task; git -c core.sparseCheckout=false checkout .', ctx.workspace));
+  assert.ok(decide(ctx, `cd "${ctx.farWorktree}" && git sparse-checkout disable`, ctx.corpus));
+  assert.equal(decide(ctx, 'git -C "$VARIABILE_SCONOSCIUTA_XYZ/frontaliere-si-o-no" sparse-checkout disable', ctx.corpus), undefined, 'variabile non risolta: bersaglio ignoto, fail-open');
+  const savedWorkspace = process.env.WORKSPACE;
+  process.env.WORKSPACE = ctx.workspace;
+  try {
+    assert.ok(decide(ctx, 'git -C "$WORKSPACE/frontaliere-si-o-no" sparse-checkout disable', ctx.corpus), '$WORKSPACE si espande');
+    assert.ok(decide(ctx, 'git -C ${WORKSPACE}/frontaliere-si-o-no sparse-checkout disable', ctx.corpus), '${WORKSPACE} si espande');
+  } finally {
+    if (savedWorkspace === undefined) delete process.env.WORKSPACE;
+    else process.env.WORKSPACE = savedWorkspace;
+  }
+  // cwd nel sito ma il comando entra nel corpus: consentito
+  assert.equal(decide(ctx, `git -C ${ctx.corpus} sparse-checkout disable`, ctx.site), undefined);
+  assert.equal(decide(ctx, 'cd ../frontaliere-articles && git sparse-checkout disable', ctx.site), undefined);
+}));
+
+test('consente gli stessi comandi nel corpus e nel repo Reddit', () => withWorkspace((ctx) => {
+  for (const cwd of [ctx.corpus, ctx.reddit, ctx.corpusWorktree, ctx.workspace]) {
+    for (const command of ['git sparse-checkout disable', 'git config --worktree core.sparseCheckout false', 'git -c core.sparseCheckout=false checkout main']) {
+      assert.equal(decide(ctx, command, cwd), undefined, `${command} in ${cwd}`);
+    }
+  }
+}));
+
+test('consente git sparse-checkout add e le alternative indicate nel messaggio', () => withWorkspace((ctx) => {
+  for (const command of [
+    'git sparse-checkout add docs',
+    'git sparse-checkout add data/health-premiums public/data',
+    'git sparse-checkout list',
+    'git sparse-checkout set docs',
+    'git config core.sparseCheckout',
+    'git config --get core.sparseCheckout',
+    'git config core.sparseCheckout true',
+    'git config --worktree core.sparseCheckoutCone true',
+    'git -c core.sparseCheckout=true status',
+    'git show origin/main:docs/LOCAL-DEV.md',
+    'git ls-tree -r origin/main docs',
+    'git status',
+    'echo "git sparse-checkout disable"',
+    "git commit -m 'git sparse-checkout disable e config core.sparseCheckout false'",
+  ]) {
+    assert.equal(decide(ctx, command, ctx.site), undefined, command);
+    assert.equal(decide(ctx, command, ctx.siteWorktree), undefined, command);
+  }
+}));
+
+test('--global e --system raggiungono il sito da qualsiasi directory', () => withWorkspace((ctx) => {
+  assert.ok(decide(ctx, 'git config --global core.sparseCheckout false', ctx.corpus));
+  assert.equal(decide(ctx, 'git config --global core.sparseCheckout true', ctx.corpus), undefined);
+}));
+
+test('guardPre rifiuta il comando nel sito, lo ammette nel corpus e rispetta il bypass del proprietario', () => withWorkspace((ctx) => withRuntime((runtime) => withGuardEnv(runtime, () => {
+  const info = (command, cwd) => ({ payload: {}, command, cwd, sessionId: 'mine', toolCallId: '' });
+  const blocked = guardPre(info('git sparse-checkout disable', ctx.siteWorktree), ctx.workspace);
+  assert.equal(blocked.allowed, false);
+  assert.match(blocked.reason, /git sparse-checkout add <path>/);
+  assert.ok(readFileSync(path.join(runtime, 'commands.jsonl'), 'utf8').includes('command_blocked'));
+  assert.equal(guardPre(info('git sparse-checkout add docs', ctx.siteWorktree), ctx.workspace).allowed, true);
+  assert.equal(guardPre(info('git sparse-checkout disable', ctx.corpusWorktree), ctx.workspace).allowed, true);
+  assert.equal(guardPre(info('git sparse-checkout disable', ctx.reddit), ctx.workspace).allowed, true);
+  process.env.FRONTALIERE_RESOURCE_GUARD_BYPASS = '1';
+  assert.equal(guardPre(info('git sparse-checkout disable', ctx.siteWorktree), ctx.workspace).allowed, true);
+}))));
