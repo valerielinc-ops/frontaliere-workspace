@@ -12,17 +12,24 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
 workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
 repo="$workspace_root/frontaliere-si-o-no"
 
-git_bin=/usr/bin/git
-df_bin=/bin/df
-time_bin=/usr/bin/time
-taskpolicy_bin=/usr/sbin/taskpolicy
-sysctl_bin=/usr/sbin/sysctl
+# The binaries are overridable only so tests/install-git-maintenance-wrapper
+# can run the real script against fakes; the LaunchAgents never set these.
+git_bin=${FRONTALIERE_GIT_BIN:-/usr/bin/git}
+df_bin=${FRONTALIERE_DF_BIN:-/bin/df}
+time_bin=${FRONTALIERE_TIME_BIN:-/usr/bin/time}
+taskpolicy_bin=${FRONTALIERE_TASKPOLICY_BIN:-/usr/sbin/taskpolicy}
+sysctl_bin=${FRONTALIERE_SYSCTL_BIN:-/usr/sbin/sysctl}
 python_bin=${FRONTALIERE_PYTHON_BIN:-/usr/bin/python3}
 min_free_gib=20
 min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
 memory_limit_mib=2048
 repack_retry_base_seconds=3600
 repack_retry_max_seconds=86400
+# Size of the one MIDX batch repacked per `daily` run. A repo can raise it with
+# `git config frontaliere.maintenance.midxBatchSize <N>k|m|g`; see
+# resolve_midx_batch_size for what is accepted.
+default_midx_batch_size=1g
+midx_batch_size=$default_midx_batch_size
 
 schedule=${1:-}
 locked_run=${2:-}
@@ -166,9 +173,10 @@ if [ "$state_needs_save" -eq 1 ] && ! save_state; then
   log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
   exit 74
 fi
-# The Mac agent host runs its Sunday LaunchAgent with the daily schedule.
-# Queue on daily so both the laptop's daily job and that weekly Sunday job
-# perform one bounded MIDX batch.
+# Queue on daily so every LaunchAgent that runs the daily schedule (the
+# laptop's daily job, and the Mac agent host's former Sunday job that
+# bin/install-git-maintenance-wrapper now schedules every day) performs one
+# bounded MIDX batch.
 if [ -f "$pending_marker" ] || [ "$schedule" = daily ]; then
   queue_pending_repack || {
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
@@ -176,7 +184,7 @@ if [ -f "$pending_marker" ] || [ "$schedule" = daily ]; then
   }
 fi
 
-pressure_level=$($sysctl_bin -n kern.memorystatus_vm_pressure_level 2>/dev/null)
+pressure_level=$("$sysctl_bin" -n kern.memorystatus_vm_pressure_level 2>/dev/null)
 case "$pressure_level" in
   ''|*[!0-9]*)
     log "action=skip reason=memory_pressure_probe_failed repo=$repo schedule=$schedule exit_code=0"
@@ -188,7 +196,7 @@ if [ "$pressure_level" -ge 2 ]; then
   exit 0
 fi
 
-free_kib=$($df_bin -Pk "$repo" | /usr/bin/awk 'NR == 2 { print $4 }')
+free_kib=$("$df_bin" -Pk "$repo" | /usr/bin/awk 'NR == 2 { print $4 }')
 case "$free_kib" in
   ''|*[!0-9]*)
     log "action=abort reason=disk_probe_failed repo=$repo schedule=$schedule raw_free_kib=$free_kib exit_code=74"
@@ -208,7 +216,8 @@ log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes mini
 
 # Use the memory cap where this OS supports it. Older taskpolicy releases still
 # lower maintenance priority, and Git receives bounded single-thread pack
-# settings for every task. Scheduled repacks select one bounded MIDX batch.
+# settings for every task. Scheduled repacks select one bounded MIDX batch
+# (default 1g, configurable per repo, see resolve_midx_batch_size).
 run_limited() {
   task_name=$1
   shift
@@ -248,6 +257,35 @@ repack_retry_delay() {
   printf '%s\n' "$delay"
 }
 
+# Reads frontaliere.maintenance.midxBatchSize from the repo's git config. Only
+# `<digits><k|m|g>` is accepted, with a non-zero value of at most six digits:
+# `0` would ask Git for an unbounded batch, which is the repack this wrapper
+# exists to avoid. Anything else is logged and the default is used, so a typo
+# in the config can never stop the maintenance or widen the batch.
+resolve_midx_batch_size() {
+  midx_batch_size=$default_midx_batch_size
+  configured=$("$git_bin" -C "$repo" config --get frontaliere.maintenance.midxBatchSize 2>/dev/null) || configured=''
+  [ -n "$configured" ] || return 0
+  batch_unit=${configured#"${configured%?}"}
+  batch_digits=${configured%?}
+  batch_valid=1
+  case "$batch_unit" in
+    k|m|g) ;;
+    *) batch_valid=0 ;;
+  esac
+  case "$batch_digits" in
+    ''|*[!0-9]*) batch_valid=0 ;;
+    *[1-9]*) [ "${#batch_digits}" -le 6 ] || batch_valid=0 ;;
+    *) batch_valid=0 ;;
+  esac
+  if [ "$batch_valid" -eq 1 ]; then
+    midx_batch_size=$configured
+    return 0
+  fi
+  shown_value=$(printf '%s' "$configured" | /usr/bin/tr -c 'A-Za-z0-9._-' '?' | /usr/bin/cut -c1-40)
+  log "action=config_invalid repo=$repo schedule=$schedule key=frontaliere.maintenance.midxBatchSize value=$shown_value expected=<digits><k|m|g> using_default=$default_midx_batch_size"
+}
+
 run_pending_repack() {
   [ "$state_pending_since" -gt 0 ] || return 0
 
@@ -269,7 +307,8 @@ run_pending_repack() {
     return 74
   }
   pending_age=$((current_epoch - state_pending_since))
-  log "action=repack_attempt repo=$repo schedule=$schedule batch_size=1g attempts=$state_attempt_count pending_age_seconds=$pending_age retry_delay_seconds=$retry_delay"
+  resolve_midx_batch_size
+  log "action=repack_attempt repo=$repo schedule=$schedule batch_size=$midx_batch_size attempts=$state_attempt_count pending_age_seconds=$pending_age retry_delay_seconds=$retry_delay"
 
   run_limited midx-expire multi-pack-index expire --no-progress
   task_status=$?
@@ -277,7 +316,7 @@ run_pending_repack() {
   run_limited midx-write multi-pack-index write --no-progress
   task_status=$?
   [ "$task_status" -eq 0 ] || return "$task_status"
-  run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size=1g --no-progress
+  run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size="$midx_batch_size" --no-progress
   task_status=$?
   [ "$task_status" -eq 0 ] || return "$task_status"
   run_limited midx-expire multi-pack-index expire --no-progress

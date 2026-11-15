@@ -3,6 +3,13 @@
 # Installs the wrapper outside the repository so launchd can use it while the
 # shared workspace checkout remains dirty. Existing custom plists are backed
 # up before their executable path is changed.
+#
+# Cadence of the MIDX batch. The wrapper repacks one batch on every `daily`
+# run. The laptop has a `daily` LaunchAgent (every day). A host that has only
+# the `sunday` LaunchAgent (the Mac agent host) used to repack one batch a week;
+# there the installer drops the weekday from that job's StartCalendarInterval,
+# so it runs every day at the same hour. A machine that also has a `daily`
+# LaunchAgent is left untouched. `--restore` brings the saved plist back.
 
 set -eu
 
@@ -67,6 +74,12 @@ read_saved_schedule() {
   return 1
 }
 
+# 1 when the `sunday` job is the host's only `daily`-schedule trigger.
+sunday_runs_every_day() {
+  [ -f "$launch_agents/ch.frontaliere.git-maintenance-sunday.plist" ] \
+    && [ ! -f "$launch_agents/ch.frontaliere.git-maintenance-daily.plist" ]
+}
+
 case "$action" in
   install)
     [ -d "$site_repo/.git" ] || {
@@ -91,6 +104,9 @@ case "$action" in
     git -C "$site_repo" config --local maintenance.strategy none
     git config --global --fixed-value --unset-all maintenance.repo "$site_repo" 2>/dev/null || true
 
+    sunday_note=''
+    sunday_every_day=0
+    sunday_runs_every_day && sunday_every_day=1
     already_current=1
     /usr/bin/cmp -s "$script_dir/git-maintenance-wrapper" "$wrapper" || already_current=0
     for schedule in hourly daily weekly sunday; do
@@ -121,6 +137,10 @@ case "$action" in
         && [ "$installed_stdout" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" ] \
         && [ "$installed_stderr" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" ] \
         || already_current=0
+      if [ "$schedule" = sunday ] && [ "$sunday_every_day" -eq 1 ] && [ "$job_schedule" = daily ]; then
+        # Not current while the saved weekday restriction is still in the plist.
+        ! "$plutil_bin" -extract StartCalendarInterval.Weekday raw "$plist" >/dev/null 2>&1 || already_current=0
+      fi
       "$launchctl_bin" print "gui/$uid/$label" >/dev/null 2>&1 || already_current=0
     done
     if [ "$already_current" -eq 1 ]; then
@@ -165,12 +185,17 @@ case "$action" in
       set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$temporary_plist"
       set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$temporary_plist"
       set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$temporary_plist"
+      if [ "$schedule" = sunday ] && [ "$sunday_every_day" -eq 1 ] && [ "$job_schedule" = daily ]; then
+        # plutil -remove fails when the key is absent (already every day): fine.
+        "$plutil_bin" -remove StartCalendarInterval.Weekday "$temporary_plist" >/dev/null 2>&1 || true
+        sunday_note=' Il job domenicale gira ogni giorno (nessun job daily separato).'
+      fi
       "$plutil_bin" -lint "$temporary_plist" >/dev/null
       "$launchctl_bin" bootout "gui/$uid/$label" >/dev/null 2>&1 || true
       /bin/mv -f "$temporary_plist" "$plist"
       "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
-    printf 'Wrapper Git con limiti installato; LaunchAgent custom ricaricati. Ripristina con: %s --restore\n' "$0"
+    printf 'Wrapper Git con limiti installato; LaunchAgent custom ricaricati.%s Ripristina con: %s --restore\n' "${sunday_note:-}" "$0"
     ;;
   --restore)
     for schedule in hourly daily weekly sunday; do
