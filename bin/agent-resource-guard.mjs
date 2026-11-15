@@ -970,10 +970,53 @@ function sparseOffReason(form) {
     + 'per leggere un file, `git ls-tree` per elencare.';
 }
 
+function sparseWideReason(form) {
+  return `${form} nel clone del sito (o in un suo worktree) materializza per intero data/ (circa 3,7 GiB), `
+    + 'public/ o la radice: il 2026-11-15 un worktree è arrivato a 4,7 GiB con `git sparse-checkout add data`. '
+    + 'Aggiungi solo il sotto-path che serve (es. `git sparse-checkout add data/faq-hub`), '
+    + 'oppure leggi con `git show origin/main:<path>` ed elenca con `git ls-tree`.';
+}
+
+// Le cartelle del sito che `fast-worktree.sh` esclude perché pesano GiB.
+// Un pattern sparse che le riprende per intero (o che riprende la radice)
+// costa sul disco quanto `disable`; un loro sotto-path resta libero.
+const HEAVY_SPARSE_ROOTS = new Set(['data', 'public']);
+
+function normalizedSparsePattern(pattern) {
+  return String(pattern).trim().replace(/^(?:\.\/|\/)+/, '').replace(/(?:\/\*\*|\/\*|\/)+$/, '');
+}
+
+const isRootSparsePattern = (normalized) => normalized === '' || normalized === '.' || normalized === '*' || normalized === '**';
+
+/**
+ * Il primo pattern di `sparse-checkout add|set` (o di `fast-worktree.sh --add`)
+ * che materializza per intero data/, public/ o la radice, altrimenti
+ * `undefined`. Con `set` una radice seguita dalle esclusioni di data/ e
+ * public/ è il profilo di `fast-worktree.sh` e resta ammessa. `--stdin`: i
+ * pattern non sono nel comando, bersaglio ignoto (fail-open come il resto).
+ */
+function heavySparseOperand(mode, operands) {
+  if (operands.includes('--stdin')) return undefined;
+  const patterns = operands.filter((word) => !word.startsWith('-'));
+  const whole = patterns.find((pattern) => !pattern.startsWith('!') && HEAVY_SPARSE_ROOTS.has(normalizedSparsePattern(pattern)));
+  if (whole) return whole;
+  const rootIndex = patterns.findIndex((pattern) => !pattern.startsWith('!') && isRootSparsePattern(normalizedSparsePattern(pattern)));
+  if (rootIndex < 0) return undefined;
+  if (mode === 'set') {
+    const excluded = new Set(patterns.slice(rootIndex + 1)
+      .filter((pattern) => pattern.startsWith('!'))
+      .map((pattern) => normalizedSparsePattern(pattern.slice(1))));
+    if ([...HEAVY_SPARSE_ROOTS].every((root) => excluded.has(root))) return undefined;
+  }
+  return patterns[rootIndex];
+}
+
 /**
  * Detects the commands that turn a sparse checkout of the site into a full one:
  * `git sparse-checkout disable`, `git config [--worktree] core.sparseCheckout
- * false` (or `--unset`) and `git -c core.sparseCheckout=false <command>`.
+ * false` (or `--unset`) and `git -c core.sparseCheckout=false <command>`, plus
+ * the ones that re-include a whole heavy directory or the root:
+ * `git sparse-checkout add|set data|public|/*` and `fast-worktree.sh --add data`.
  * Follows `cd` and `git -C <dir>` (relative paths included) to find the target
  * repo; an unresolvable target is not blocked (the guard stays fail-open).
  * Returns `{ form, reason }` or `undefined`.
@@ -1007,6 +1050,26 @@ export function sparseCheckoutDisableDecision(command, cwd, workspace = findWork
       }
       continue;
     }
+
+    // `fast-worktree.sh <nome> --add data`: lo stesso costo, prima di git.
+    const helperAt = path.basename(words[0]) === 'fast-worktree.sh' ? 0
+      : (['bash', 'sh', 'zsh'].includes(words[0]) && path.basename(words[1] ?? '') === 'fast-worktree.sh' ? 1 : -1);
+    if (helperAt >= 0) {
+      const added = [];
+      for (let position = helperAt + 1; position < words.length; position += 1) {
+        if (words[position] === '--add' && words[position + 1] !== undefined) added.push(words[++position]);
+      }
+      const heavy = heavySparseOperand('add', added);
+      const script = expandPathWord(words[helperAt], workspace);
+      const scriptPath = script === undefined || (current === undefined && !path.isAbsolute(script))
+        ? undefined
+        : path.resolve(current ?? '/', script);
+      if (heavy && scriptPath && isSiteRepoPath(path.dirname(scriptPath), workspace)) {
+        const form = `\`fast-worktree.sh --add ${heavy}\``;
+        return { form, reason: sparseWideReason(form) };
+      }
+      continue;
+    }
     if (path.basename(words[0]) !== 'git') continue;
 
     // Global git options: -C <dir>, -c <k=v>, --git-dir, --work-tree...
@@ -1037,9 +1100,17 @@ export function sparseCheckoutDisableDecision(command, cwd, workspace = findWork
     if (directory !== undefined) targets = [directory, ...targets];
 
     let form;
+    let wide = false;
     let global = false;
     if (sparseOffByConfig) form = '`git -c core.sparseCheckout=false`';
     if (subcommand === 'sparse-checkout' && args[0] === 'disable') form = '`git sparse-checkout disable`';
+    if (subcommand === 'sparse-checkout' && (args[0] === 'add' || args[0] === 'set')) {
+      const heavy = heavySparseOperand(args[0], args.slice(1));
+      if (heavy) {
+        form = `\`git sparse-checkout ${args[0]} ${heavy}\``;
+        wide = true;
+      }
+    }
     if (subcommand === 'config') {
       const positionals = [];
       let unset = false;
@@ -1061,7 +1132,9 @@ export function sparseCheckoutDisableDecision(command, cwd, workspace = findWork
     }
     if (!form) continue;
     // --global/--system reach the site clone from any directory.
-    if (global || targets.some((target) => isSiteRepoPath(target, workspace))) return { form, reason: sparseOffReason(form) };
+    if (global || targets.some((target) => isSiteRepoPath(target, workspace))) {
+      return { form, reason: wide ? sparseWideReason(form) : sparseOffReason(form) };
+    }
   }
   return undefined;
 }
