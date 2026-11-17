@@ -292,10 +292,10 @@ test('wrapper: only the daily schedule repacks', () => {
   assert.equal(hourly.repackCalls.length, 0);
 });
 
-test('wrapper: a larger batch does not bypass the 20 GiB free-disk guard', () => {
-  const run = runWrapper({ batchConfig: '8g', freeKib: 10 * 1024 * 1024 });
+test('wrapper: a larger batch does not bypass the 5 GiB free-disk guard', () => {
+  const run = runWrapper({ batchConfig: '8g', freeKib: 4 * 1024 * 1024 });
   assert.equal(run.status, 0, run.stderr + run.log);
   assert.equal(run.repackCalls.length, 0);
-  assert.match(run.log, /action=skip reason=low_disk .*minimum_gib=20/);
+  assert.match(run.log, /action=skip reason=low_disk .*minimum_gib=5/);
   assert.doesNotMatch(run.log, /action=repack_attempt/);
 });
