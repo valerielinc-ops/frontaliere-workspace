@@ -703,6 +703,55 @@ test('ciò che il server ha già (refs/pull) non è lavoro locale; un tag mai pu
   assert.equal(refetched.status, 0, `e torna con un lazy fetch economico: ${refetched.stderr}`);
 });
 
+test('fetch e ref spostati durante la run non perdono oggetti', { skip: INTEGRATION_SKIP }, (t) => {
+  // 19/11 21:51:29: un fetch di origin/main durante la run ha scritto un pack
+  // finito in quarantena; commit-graph write ha poi fallito su 135de89a.
+  const root = tempRoot(t, 'git-partial-compact-race-');
+  const fixture = createFixture(root);
+  const blob = git(fixture.repo, ['hash-object', '-w', '--stdin'], { input: 'revived-' + 'v'.repeat(5000) });
+  const tree = git(fixture.repo, ['mktree'], { input: `100644 blob ${blob}\trevived.json\n` });
+  const revived = git(fixture.repo, ['commit-tree', tree, '-m', 'dangling at start, re-referenced mid-run']);
+  git(fixture.repo, ['pack-objects', join(fixture.repo, '.git', 'objects', 'pack', 'pack')], { input: `${blob}\n${tree}\n${revived}\n` });
+  git(fixture.repo, ['prune-packed']);
+
+  writeFileSync(join(fixture.source, 'mid-run.json'), 'mid-run-' + 'r'.repeat(3000));
+  git(fixture.source, ['add', 'mid-run.json']);
+  git(fixture.source, ['commit', '-qm', 'arrives with a fetch during the run']);
+  const fetched = git(fixture.source, ['rev-parse', 'HEAD']);
+
+  const sentinel = join(root, 'raced-once');
+  const fakeGit = join(root, 'git-race');
+  writeFileSync(fakeGit, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+const real = (argv) => spawnSync(process.env.R4_REAL_GIT, argv, { stdio: 'ignore', env: process.env });
+if (args.includes('pack-objects') && !fs.existsSync(process.env.R4_RACE_SENTINEL)) {
+  fs.writeFileSync(process.env.R4_RACE_SENTINEL, 'raced');
+  real(['-C', process.env.R4_SOURCE, 'push', '-q', process.env.R4_BARE, 'HEAD:refs/heads/main']);
+  real(['-C', process.env.R4_REPO, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  real(['-C', process.env.R4_REPO, 'update-ref', 'refs/heads/revived', process.env.R4_REVIVED]);
+}
+const result = spawnSync(process.env.R4_REAL_GIT, args, { stdio: 'inherit', env: process.env });
+process.exit(result.status === null ? 1 : result.status);
+`, { mode: 0o700 });
+  chmodSync(fakeGit, 0o700);
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {
+    FRONTALIERE_GIT_BIN: fakeGit,
+    R4_REAL_GIT: GIT,
+    R4_RACE_SENTINEL: sentinel,
+    R4_SOURCE: fixture.source,
+    R4_BARE: fixture.bare,
+    R4_REPO: fixture.repo,
+    R4_REVIVED: revived,
+  }, { allowFailure: true });
+  assert.equal(existsSync(sentinel), true, 'la corsa e\' avvenuta');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).result, 'success');
+  assert.equal(git(fixture.repo, ['rev-parse', 'refs/remotes/origin/main']), fetched);
+  for (const oid of [fetched, revived, tree, blob]) assert.equal(existsObject(fixture.repo, oid), true, `oggetto raggiungibile dopo la corsa: ${oid}`);
+});
+
 test('blob remoto mancante viene recuperato in lazy fetch economico', { skip: INTEGRATION_SKIP }, (t) => {
   const root = tempRoot(t, 'git-partial-compact-lazy-');
   const fixture = createFixture(root);
