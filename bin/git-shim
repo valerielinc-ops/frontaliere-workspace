@@ -1,0 +1,268 @@
+#!/bin/sh
+
+# FRONTALIERE_GIT_SHIM=1
+# Resolve a modern Git without depending on interactive PATH setup. Only exact
+# origin/main fetches are throttled; every other command is an exec passthrough.
+
+set -u
+
+home_dir=${HOME:-/Users/luigisaggese}
+sleep_bin=${FRONTALIERE_SLEEP_BIN:-/bin/sleep}
+
+version_gt() {
+  awk -v left="$1" -v right="$2" 'BEGIN {
+    split(left, a, /[.]/); split(right, b, /[.]/);
+    for (i = 1; i <= 3; i++) {
+      av = a[i] + 0; bv = b[i] + 0;
+      if (av > bv) exit 0;
+      if (av < bv) exit 1;
+    }
+    exit 1;
+  }'
+}
+
+version_ge_244() {
+  awk -v value="$1" 'BEGIN {
+    split(value, v, /[.]/);
+    if ((v[1] + 0) > 2 || ((v[1] + 0) == 2 && (v[2] + 0) >= 44)) exit 0;
+    exit 1;
+  }'
+}
+
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+  esac
+}
+
+is_shim_path() {
+  candidate_path=$1
+  [ "$candidate_path" = "$home_dir/.local/bin/git" ] && return 0
+  [ -e "$home_dir/.local/bin/git" ] && [ "$candidate_path" -ef "$home_dir/.local/bin/git" ] && return 0
+  [ -f "$candidate_path" ] && grep -q 'FRONTALIERE_GIT_SHIM=1' "$candidate_path" 2>/dev/null
+}
+
+get_git_version() {
+  version_output=$("$1" --version 2>/dev/null) || return 1
+  printf '%s\n' "$version_output" | sed -n 's/^git version \([0-9][0-9.]*\).*$/\1/p' | sed -n '1p'
+}
+
+local_git=''
+local_git_version=''
+for candidate in "$home_dir"/.local/git-*/bin/git; do
+  [ -x "$candidate" ] || continue
+  candidate=$(absolute_path "$candidate")
+  is_shim_path "$candidate" && continue
+  candidate_version=$(get_git_version "$candidate") || continue
+  [ -n "$candidate_version" ] || continue
+  if [ -z "$local_git" ] || version_gt "$candidate_version" "$local_git_version"; then
+    local_git=$candidate
+    local_git_version=$candidate_version
+  fi
+done
+
+modern_git=''
+modern_git_version=''
+best_git=''
+best_git_version=''
+override_git=${FRONTALIERE_GIT_BIN:-}
+if [ -n "$override_git" ] && [ -x "$override_git" ]; then
+  override_git=$(absolute_path "$override_git")
+  if ! is_shim_path "$override_git"; then
+    override_version=$(get_git_version "$override_git") || override_version=''
+    if [ -n "$override_version" ] && version_ge_244 "$override_version"; then
+      modern_git=$override_git
+      modern_git_version=$override_version
+    fi
+  fi
+fi
+if [ -z "$modern_git" ] && [ -n "$local_git_version" ] && version_ge_244 "$local_git_version"; then
+  modern_git=$local_git
+  modern_git_version=$local_git_version
+fi
+
+if [ -z "$modern_git" ]; then
+  for candidate in "${FRONTALIERE_GIT_BIN:-}" "$local_git" /opt/homebrew/bin/git /usr/local/bin/git /usr/bin/git; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    candidate=$(absolute_path "$candidate")
+    is_shim_path "$candidate" && continue
+    candidate_version=$(get_git_version "$candidate") || continue
+    [ -n "$candidate_version" ] || continue
+
+    if [ -z "$best_git" ] || version_gt "$candidate_version" "$best_git_version"; then
+      best_git=$candidate
+      best_git_version=$candidate_version
+    fi
+    if [ -z "$modern_git" ] && version_ge_244 "$candidate_version"; then
+      modern_git=$candidate
+      modern_git_version=$candidate_version
+    fi
+  done
+fi
+
+if [ -n "$modern_git" ]; then
+  git_bin=$modern_git
+elif [ -n "$best_git" ]; then
+  git_bin=$best_git
+else
+  printf '%s\n' 'frontaliere git shim: no Git executable found' >&2
+  exit 127
+fi
+
+throttle_opt_out=${FRONTALIERE_FETCH_THROTTLE:-1}
+if [ "$throttle_opt_out" = 0 ]; then
+  exec "$git_bin" "$@"
+fi
+
+# Parse in a function so its positional parameters are local to the function;
+# the original argv remains intact for the final Git invocation.
+parse_main_fetch() {
+  throttle_target=$PWD
+  throttle_quiet=0
+  throttle_eligible=0
+  [ "$#" -gt 0 ] || return 0
+  if [ "$1" = -C ]; then
+    [ "$#" -ge 2 ] || return 0
+    throttle_target=$2
+    shift 2
+  fi
+  [ "$#" -gt 0 ] && [ "$1" = fetch ] || return 0
+  shift
+
+  remote_count=0
+  refspec_count=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -q|--quiet) throttle_quiet=1 ;;
+      --no-tags|--prune|-p) ;;
+      origin) remote_count=$((remote_count + 1)) ;;
+      main|refs/heads/main:refs/remotes/origin/main|+refs/heads/main:refs/remotes/origin/main)
+        refspec_count=$((refspec_count + 1))
+        ;;
+      *) return 0 ;;
+    esac
+    shift
+  done
+  [ "$remote_count" -eq 1 ] && [ "$refspec_count" -eq 1 ] || return 0
+  throttle_eligible=1
+}
+
+parse_main_fetch "$@"
+[ "$throttle_eligible" -eq 1 ] || exec "$git_bin" "$@"
+
+throttle_seconds=$("$git_bin" -C "$throttle_target" config --get frontaliere.fetchThrottleSeconds 2>/dev/null) || throttle_seconds=''
+case "$throttle_seconds" in
+  ''|*[!0-9]*) exec "$git_bin" "$@" ;;
+esac
+[ "${#throttle_seconds}" -le 9 ] || exec "$git_bin" "$@"
+[ "$throttle_seconds" -gt 0 ] || exec "$git_bin" "$@"
+
+repo_root=$("$git_bin" -C "$throttle_target" rev-parse --show-toplevel 2>/dev/null) || exec "$git_bin" "$@"
+common_dir=$("$git_bin" -C "$throttle_target" rev-parse --git-common-dir 2>/dev/null) || exec "$git_bin" "$@"
+case "$common_dir" in
+  /*) ;;
+  *) common_dir="$repo_root/$common_dir" ;;
+esac
+lock_dir="$common_dir/frontaliere-fetch-main.lock"
+
+stat_mtime() {
+  stat_output=$(stat -f %m "$1" 2>/dev/null) || stat_output=''
+  case "$stat_output" in ''|*[!0-9]*) stat_output=$(stat -c %Y "$1" 2>/dev/null) || stat_output='' ;; esac
+  case "$stat_output" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$stat_output"
+}
+
+last_ref_update_epoch() {
+  latest=0
+  ref_file="$common_dir/refs/remotes/origin/main"
+  reflog_file="$common_dir/logs/refs/remotes/origin/main"
+  ref_mtime=$(stat_mtime "$ref_file") || ref_mtime=0
+  reflog_mtime=$(stat_mtime "$reflog_file") || reflog_mtime=0
+  case "$ref_mtime" in ''|*[!0-9]*) ref_mtime=0 ;; esac
+  case "$reflog_mtime" in ''|*[!0-9]*) reflog_mtime=0 ;; esac
+  [ "$ref_mtime" -gt "$latest" ] && latest=$ref_mtime
+  [ "$reflog_mtime" -gt "$latest" ] && latest=$reflog_mtime
+  if [ -f "$reflog_file" ]; then
+    reflog_epoch=$(tail -n 1 "$reflog_file" | awk -F '\t' 'NF { n = split($1, fields, " "); if (n >= 2 && fields[n - 1] ~ /^[0-9]+$/) print fields[n - 1] }')
+    case "$reflog_epoch" in
+      ''|*[!0-9]*) ;;
+      *) [ "$reflog_epoch" -gt "$latest" ] && latest=$reflog_epoch ;;
+    esac
+  fi
+  printf '%s\n' "$latest"
+}
+
+is_recent_ref_update() {
+  now_epoch=$(/bin/date +%s)
+  update_epoch=$(last_ref_update_epoch)
+  [ "$update_epoch" -gt 0 ] || return 1
+  age=$((now_epoch - update_epoch))
+  [ "$age" -lt "$throttle_seconds" ]
+}
+
+skip_fetch() {
+  [ "$throttle_quiet" -eq 1 ] && return 0
+  printf 'frontaliere git shim: skipped recent fetch of origin main (%s-second throttle)\n' "$throttle_seconds" >&2
+}
+
+if is_recent_ref_update; then
+  skip_fetch
+  exit 0
+fi
+
+lock_owned=0
+if /bin/mkdir "$lock_dir" 2>/dev/null; then
+  lock_owned=1
+else
+  lock_waited=0
+  while [ -d "$lock_dir" ] && [ "$lock_waited" -lt 60 ]; do
+    lock_mtime=$(stat_mtime "$lock_dir") || lock_mtime=0
+    now_epoch=$(/bin/date +%s)
+    lock_age=$((now_epoch - lock_mtime))
+    [ "$lock_age" -ge 120 ] && break
+    "$sleep_bin" 1
+    lock_waited=$((lock_waited + 1))
+    if is_recent_ref_update; then
+      skip_fetch
+      exit 0
+    fi
+  done
+
+  if [ -d "$lock_dir" ]; then
+    lock_mtime=$(stat_mtime "$lock_dir") || lock_mtime=0
+    now_epoch=$(/bin/date +%s)
+    lock_age=$((now_epoch - lock_mtime))
+    if [ "$lock_age" -ge 120 ]; then
+      /bin/rmdir "$lock_dir" 2>/dev/null || :
+    fi
+  fi
+  if is_recent_ref_update; then
+    skip_fetch
+    exit 0
+  fi
+  if /bin/mkdir "$lock_dir" 2>/dev/null; then
+    lock_owned=1
+  else
+    [ "$throttle_quiet" -eq 1 ] || printf '%s\n' 'frontaliere git shim: another origin/main fetch is still running' >&2
+    exit 0
+  fi
+fi
+
+release_fetch_lock() {
+  [ "$lock_owned" -eq 1 ] && /bin/rmdir "$lock_dir" 2>/dev/null || :
+}
+trap 'release_fetch_lock' 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A ref may have advanced between the first freshness check and lock creation.
+if is_recent_ref_update; then
+  skip_fetch
+  exit 0
+fi
+
+"$git_bin" "$@"
+git_status=$?
+exit "$git_status"

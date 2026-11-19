@@ -1,33 +1,29 @@
 #!/bin/sh
 
 # Guarded background maintenance for the workspace's large site repository.
-#
-# `ulimit -v` rejects a finite address-space limit on macOS. Newer taskpolicy
-# versions can cap the Git process tree; older macOS versions use background
-# priority and a bounded pack window. /usr/bin/time -l records observed RSS.
+# Space recovery (MIDX expire/write/expire) has its own lower disk threshold;
+# pack consolidation and the scheduled maintenance tasks keep the 5 GiB guard.
 
 set -u
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
 workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
-repo="$workspace_root/frontaliere-si-o-no"
+repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
 
-# The binaries are overridable only so tests/install-git-maintenance-wrapper
-# can run the real script against fakes; the LaunchAgents never set these.
-git_bin=${FRONTALIERE_GIT_BIN:-/usr/bin/git}
 df_bin=${FRONTALIERE_DF_BIN:-/bin/df}
 time_bin=${FRONTALIERE_TIME_BIN:-/usr/bin/time}
 taskpolicy_bin=${FRONTALIERE_TASKPOLICY_BIN:-/usr/sbin/taskpolicy}
 sysctl_bin=${FRONTALIERE_SYSCTL_BIN:-/usr/sbin/sysctl}
 python_bin=${FRONTALIERE_PYTHON_BIN:-/usr/bin/python3}
-min_free_gib=5
-min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
-memory_limit_mib=2048
+
+min_recovery_gib=1
+min_recovery_bytes=$((min_recovery_gib * 1024 * 1024 * 1024))
+min_consolidation_gib=5
+min_consolidation_bytes=$((min_consolidation_gib * 1024 * 1024 * 1024))
+normal_memory_limit_mib=2048
+pressure_memory_limit_mib=512
 repack_retry_base_seconds=3600
 repack_retry_max_seconds=86400
-# Size of the one MIDX batch repacked per `daily` run. A repo can raise it with
-# `git config frontaliere.maintenance.midxBatchSize <N>k|m|g`; see
-# resolve_midx_batch_size for what is accepted.
 default_midx_batch_size=1g
 midx_batch_size=$default_midx_batch_size
 
@@ -44,15 +40,18 @@ esac
 home_dir=${HOME:-/Users/saggesel}
 log_dir=${FRONTALIERE_LOG_DIR:-$home_dir/Library/Logs/frontaliere}
 log_file=${FRONTALIERE_MAINTENANCE_LOG:-$log_dir/git-maintenance.log}
-state_file=${FRONTALIERE_MAINTENANCE_STATE:-$log_dir/git-maintenance-state}
+state_dir=${FRONTALIERE_STATE_DIR:-$home_dir/.local/state/frontaliere}
+state_file=${FRONTALIERE_MAINTENANCE_STATE:-$state_dir/git-maintenance-state}
+health_file=${FRONTALIERE_MAINTENANCE_HEALTH:-$state_dir/git-maintenance-health}
+lock_file=${FRONTALIERE_MAINTENANCE_LOCK:-$state_dir/git-maintenance.lock}
 pending_marker="$state_file.pending"
-lock_file=${FRONTALIERE_MAINTENANCE_LOCK:-$log_dir/git-maintenance.lock}
+legacy_state_file="$log_dir/git-maintenance-state"
+legacy_pending_marker="$legacy_state_file.pending"
 
 if ! /bin/mkdir -p "$log_dir"; then
   printf '%s cannot create log directory: %s\n' "git-maintenance-wrapper:" "$log_dir" >&2
   exit 74
 fi
-
 if ! exec >>"$log_file" 2>&1; then
   printf '%s cannot open log file: %s\n' "git-maintenance-wrapper:" "$log_file" >&2
   exit 74
@@ -66,12 +65,6 @@ log() {
   printf '%s git-maintenance-wrapper %s\n' "$(timestamp)" "$*"
 }
 
-state_pending_since=0
-state_attempt_count=0
-state_last_attempt=0
-state_last_success=0
-state_needs_save=0
-
 is_uint() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
@@ -79,7 +72,212 @@ is_uint() {
   esac
 }
 
+version_gt() {
+  awk -v left="$1" -v right="$2" 'BEGIN {
+    split(left, a, /[.]/); split(right, b, /[.]/);
+    for (i = 1; i <= 3; i++) {
+      av = a[i] + 0; bv = b[i] + 0;
+      if (av > bv) exit 0;
+      if (av < bv) exit 1;
+    }
+    exit 1;
+  }'
+}
+
+version_ge_244() {
+  awk -v value="$1" 'BEGIN {
+    split(value, v, /[.]/);
+    if ((v[1] + 0) > 2 || ((v[1] + 0) == 2 && (v[2] + 0) >= 44)) exit 0;
+    exit 1;
+  }'
+}
+
+absolute_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+  esac
+}
+
+is_shim_path() {
+  candidate_path=$1
+  [ "$candidate_path" = "$home_dir/.local/bin/git" ] && return 0
+  [ -e "$home_dir/.local/bin/git" ] && [ "$candidate_path" -ef "$home_dir/.local/bin/git" ] && return 0
+  [ -f "$candidate_path" ] && /usr/bin/grep -q 'FRONTALIERE_GIT_SHIM=1' "$candidate_path" 2>/dev/null
+}
+
+get_git_version() {
+  version_output=$("$1" --version 2>/dev/null) || return 1
+  printf '%s\n' "$version_output" | /usr/bin/sed -n 's/^git version \([0-9][0-9.]*\).*$/\1/p' | /usr/bin/sed -n '1p'
+}
+
+resolve_git() {
+  override_git=${FRONTALIERE_GIT_BIN:-}
+  override_git_version=''
+  if [ -n "$override_git" ] && [ -x "$override_git" ]; then
+    override_git=$(absolute_path "$override_git")
+    if ! is_shim_path "$override_git"; then
+      override_git_version=$(get_git_version "$override_git") || override_git_version=''
+      [ -n "$override_git_version" ] || override_git=''
+    else
+      override_git=''
+    fi
+  else
+    override_git=''
+  fi
+
+  if [ -n "$override_git_version" ] && version_ge_244 "$override_git_version"; then
+    git_bin=$override_git
+    git_version=$override_git_version
+    git_version_below_2_44=0
+    return 0
+  fi
+
+  local_git=''
+  local_git_version=''
+  for candidate in "$home_dir"/.local/git-*/bin/git; do
+    [ -x "$candidate" ] || continue
+    candidate=$(absolute_path "$candidate")
+    is_shim_path "$candidate" && continue
+    candidate_version=$(get_git_version "$candidate") || continue
+    [ -n "$candidate_version" ] || continue
+    if [ -z "$local_git" ] || version_gt "$candidate_version" "$local_git_version"; then
+      local_git=$candidate
+      local_git_version=$candidate_version
+    fi
+  done
+
+  if [ -n "$local_git_version" ] && version_ge_244 "$local_git_version"; then
+    git_bin=$local_git
+    git_version=$local_git_version
+    git_version_below_2_44=0
+    return 0
+  fi
+
+  best_git=$override_git
+  best_git_version=$override_git_version
+  if [ -n "$local_git" ] && { [ -z "$best_git" ] || version_gt "$local_git_version" "$best_git_version"; }; then
+    best_git=$local_git
+    best_git_version=$local_git_version
+  fi
+  for candidate in /opt/homebrew/bin/git /usr/local/bin/git /usr/bin/git; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    candidate=$(absolute_path "$candidate")
+    is_shim_path "$candidate" && continue
+    candidate_version=$(get_git_version "$candidate") || continue
+    [ -n "$candidate_version" ] || continue
+
+    if version_ge_244 "$candidate_version"; then
+      git_bin=$candidate
+      git_version=$candidate_version
+      git_version_below_2_44=0
+      return 0
+    fi
+    if [ -z "$best_git" ] || version_gt "$candidate_version" "$best_git_version"; then
+      best_git=$candidate
+      best_git_version=$candidate_version
+    fi
+  done
+
+  git_bin=$best_git
+  git_version=$best_git_version
+  git_version_below_2_44=1
+}
+
+resolve_git
+if [ -z "${git_bin:-}" ]; then
+  log "action=abort reason=git_not_found repo=$repo schedule=$schedule exit_code=69"
+  exit 69
+fi
+if [ "$git_version_below_2_44" -eq 1 ]; then
+  log "action=git_selected reason=git_version_below_2_44 git=$git_bin git_version=$git_version"
+else
+  log "action=git_selected git=$git_bin git_version=$git_version"
+fi
+
+if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then
+  log "action=abort reason=missing_repo repo=$repo schedule=$schedule exit_code=78"
+  exit 78
+fi
+
+if [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ] || [ ! -x "$python_bin" ]; then
+  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin python=$python_bin exit_code=69"
+  exit 69
+fi
+
+if ! /bin/mkdir -p "$(dirname -- "$state_file")" "$(dirname -- "$health_file")" "$(dirname -- "$lock_file")"; then
+  log "action=abort reason=state_directory_failed state_dir=$state_dir exit_code=74"
+  exit 74
+fi
+
+taskpolicy_memory_cap=0
+if "$taskpolicy_bin" -m "$normal_memory_limit_mib" /usr/bin/true >/dev/null 2>&1; then
+  taskpolicy_memory_cap=1
+fi
+
+if [ "$locked_run" != --locked ]; then
+  "$python_bin" - "$lock_file" "$0" "$schedule" <<'PY'
+import fcntl
+import os
+import sys
+
+lock_path, wrapper, schedule = sys.argv[1:]
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(75)
+os.set_inheritable(lock_fd, True)
+os.execv(wrapper, [wrapper, schedule, "--locked"])
+PY
+  lock_status=$?
+  if [ "$lock_status" -eq 75 ]; then
+    log "action=skip reason=maintenance_lock_busy repo=$repo schedule=$schedule exit_code=0"
+    exit 0
+  fi
+  [ "$lock_status" -eq 174 ] && exit 75
+  exit "$lock_status"
+fi
+
+state_pending_since=0
+state_attempt_count=0
+state_last_attempt=0
+state_last_success=0
+state_needs_save=0
+last_space_recovery_epoch=0
+last_consolidation_epoch=0
+last_skip_step=''
+last_skip_reason=''
+started_epoch=$(/bin/date +%s)
+exit_code=0
+
+read_health_value() {
+  [ -f "$health_file" ] || return 0
+  /usr/bin/awk -F= -v key="$1" '$1 == key { value = substr($0, index($0, "=") + 1) } END { if (value != "") print value }' "$health_file"
+}
+
+previous_value=$(read_health_value last_space_recovery_epoch)
+is_uint "$previous_value" && last_space_recovery_epoch=$previous_value
+previous_value=$(read_health_value last_consolidation_epoch)
+is_uint "$previous_value" && last_consolidation_epoch=$previous_value
+last_skip_step=$(read_health_value last_skip_step)
+last_skip_reason=$(read_health_value last_skip_reason)
+
 load_state() {
+  if [ ! -f "$state_file" ] && [ -f "$legacy_state_file" ]; then
+    migration_state="$state_file.$$"
+    if /bin/cp "$legacy_state_file" "$migration_state" && /bin/chmod 600 "$migration_state" && /bin/mv -f "$migration_state" "$state_file"; then
+      /bin/rm -f "$legacy_state_file"
+      log "action=state_migrated from=$legacy_state_file to=$state_file"
+    else
+      /bin/rm -f "$migration_state"
+      log "action=state_migration_failed from=$legacy_state_file to=$state_file"
+      return 1
+    fi
+  fi
+  if [ ! -f "$pending_marker" ] && [ -f "$legacy_pending_marker" ]; then
+    /bin/mv -f "$legacy_pending_marker" "$pending_marker" || return 1
+  fi
   [ -f "$state_file" ] || return 0
   if ! IFS=' ' read -r state_pending_since state_attempt_count state_last_attempt state_last_success <"$state_file" \
     || ! is_uint "$state_pending_since" || ! is_uint "$state_attempt_count" \
@@ -117,113 +315,126 @@ queue_pending_repack() {
   /bin/rm -f "$pending_marker"
 }
 
-repo=${FRONTALIERE_SITE_REPO:-$repo}
-
-if [ ! -d "$repo/.git" ]; then
-  log "action=abort reason=missing_repo repo=$repo schedule=$schedule exit_code=78"
-  exit 78
-fi
-
-if [ ! -x "$git_bin" ] || [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [ ! -x "$sysctl_bin" ] || [ ! -x "$python_bin" ]; then
-  log "action=abort reason=missing_runtime git=$git_bin df=$df_bin time=$time_bin taskpolicy=$taskpolicy_bin sysctl=$sysctl_bin python=$python_bin exit_code=69"
-  exit 69
-fi
-
-taskpolicy_memory_cap=0
-if "$taskpolicy_bin" -m "$memory_limit_mib" /usr/bin/true >/dev/null 2>&1; then
-  taskpolicy_memory_cap=1
-  memory_mode="taskpolicy-cap-${memory_limit_mib}m"
-else
-  memory_mode=background-priority-pack-window
-fi
-
-if [ "$locked_run" != --locked ]; then
-  if [ "$schedule" = weekly ] && ! : >"$pending_marker"; then
-    log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
-    exit 74
+write_health() {
+  updated_epoch=$(/bin/date +%s)
+  pack_dir="$repo/.git/objects/pack"
+  if [ -f "$repo/.git" ]; then
+    git_dir=$($git_bin -C "$repo" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=''
+    [ -n "$git_dir" ] && pack_dir="$git_dir/objects/pack"
   fi
-  # Python's fcntl.flock is a kernel lock on macOS too. Unlike the `lockf`
-  # utility, it is available on the Mac agent host's older OS and is released
-  # automatically if the wrapper crashes or is killed.
-  "$python_bin" - "$lock_file" "$0" "$schedule" <<'PY'
-import fcntl
+  pack_metrics=$("$python_bin" - "$pack_dir" <<'PY'
 import os
 import sys
 
-lock_path, wrapper, schedule = sys.argv[1:]
-lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+count = 0
+size = 0
 try:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    sys.exit(75)
-os.set_inheritable(lock_fd, True)
-os.execv(wrapper, [wrapper, schedule, "--locked"])
+    with os.scandir(sys.argv[1]) as entries:
+        for entry in entries:
+            if entry.name.endswith(".pack") and entry.is_file(follow_symlinks=False):
+                count += 1
+                size += entry.stat(follow_symlinks=False).st_size
+except OSError:
+    pass
+print(f"{count} {size}")
 PY
-  lock_status=$?
-  if [ "$lock_status" -eq 75 ]; then
-    log "action=skip reason=maintenance_lock_busy repo=$repo schedule=$schedule pending_marker=$([ -f "$pending_marker" ] && printf yes || printf no) exit_code=0"
-    exit 0
-  fi
-  [ "$lock_status" -eq 174 ] && exit 75
-  exit "$lock_status"
-fi
+) || pack_metrics='0 0'
+  pack_count=${pack_metrics%% *}
+  pack_bytes=${pack_metrics#* }
+  is_uint "$pack_count" || pack_count=0
+  is_uint "$pack_bytes" || pack_bytes=0
 
-load_state
+  temporary_health="$health_file.$$"
+  if ! {
+    printf 'updated_epoch=%s\n' "$updated_epoch"
+    printf 'repo=%s\n' "$repo"
+    printf 'last_space_recovery_epoch=%s\n' "$last_space_recovery_epoch"
+    printf 'last_consolidation_epoch=%s\n' "$last_consolidation_epoch"
+    printf 'last_skip_step=%s\n' "$last_skip_step"
+    printf 'last_skip_reason=%s\n' "$last_skip_reason"
+    printf 'pack_count=%s\n' "$pack_count"
+    printf 'pack_bytes=%s\n' "$pack_bytes"
+    printf 'git_version=%s\n' "$git_version"
+  } >"$temporary_health"; then
+    /bin/rm -f "$temporary_health"
+    return 1
+  fi
+  /bin/chmod 600 "$temporary_health" || {
+    /bin/rm -f "$temporary_health"
+    return 1
+  }
+  /bin/mv -f "$temporary_health" "$health_file"
+}
+
+finish() {
+  finish_code=$1
+  if ! write_health; then
+    log "action=health_write_failed repo=$repo health_file=$health_file"
+    [ "$finish_code" -ne 0 ] || finish_code=74
+  fi
+  finished_at=$(timestamp)
+  finished_epoch=$(/bin/date +%s)
+  log "action=finish repo=$repo schedule=$schedule exit_code=$finish_code duration_seconds=$((finished_epoch - started_epoch)) finished_at=$finished_at"
+  exit "$finish_code"
+}
+
+record_skip() {
+  last_skip_step=$1
+  last_skip_reason=$2
+  log "action=skip step=$last_skip_step reason=$last_skip_reason repo=$repo schedule=$schedule $3"
+}
+
+load_state || {
+  log "action=abort reason=state_migration_failed repo=$repo state_file=$state_file exit_code=74"
+  finish 74
+}
 if [ "$state_needs_save" -eq 1 ] && ! save_state; then
   log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
-  exit 74
+  finish 74
 fi
-# Queue on daily so every LaunchAgent that runs the daily schedule (the
-# laptop's daily job, and the Mac agent host's former Sunday job that
-# bin/install-git-maintenance-wrapper now schedules every day) performs one
-# bounded MIDX batch.
+if [ "$schedule" = weekly ] && ! : >"$pending_marker"; then
+  log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
+  finish 74
+fi
 if [ -f "$pending_marker" ] || [ "$schedule" = daily ]; then
   queue_pending_repack || {
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
-    exit 74
+    finish 74
   }
 fi
 
-pressure_level=$("$sysctl_bin" -n kern.memorystatus_vm_pressure_level 2>/dev/null)
+pressure_level=$("$sysctl_bin" -n kern.memorystatus_vm_pressure_level 2>/dev/null) || pressure_level=''
 case "$pressure_level" in
-  ''|*[!0-9]*)
-    log "action=skip reason=memory_pressure_probe_failed repo=$repo schedule=$schedule exit_code=0"
-    exit 0
-    ;;
-esac
-if [ "$pressure_level" -ge 2 ]; then
-  log "action=skip reason=memory_pressure repo=$repo schedule=$schedule pressure_level=$pressure_level maximum_pressure_level=1 exit_code=0"
-  exit 0
-fi
-
-free_kib=$("$df_bin" -Pk "$repo" | /usr/bin/awk 'NR == 2 { print $4 }')
-case "$free_kib" in
-  ''|*[!0-9]*)
-    log "action=abort reason=disk_probe_failed repo=$repo schedule=$schedule raw_free_kib=$free_kib exit_code=74"
-    exit 74
-    ;;
+  ''|*[!0-9]*) pressure_valid=0 ;;
+  *) pressure_valid=1 ;;
 esac
 
-free_bytes=$((free_kib * 1024))
-if [ "$free_bytes" -lt "$min_free_bytes" ]; then
-  log "action=skip reason=low_disk repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes available_gib=$((free_bytes / 1024 / 1024 / 1024)) minimum_gib=$min_free_gib exit_code=0"
-  exit 0
+read_free_bytes() {
+  free_kib=$("$df_bin" -Pk "$repo" | /usr/bin/awk 'NR == 2 { print $4 }')
+  case "$free_kib" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  free_bytes=$((free_kib * 1024))
+  return 0
+}
+
+if ! read_free_bytes; then
+  log "action=abort reason=disk_probe_failed repo=$repo schedule=$schedule raw_free_kib=${free_kib:-} exit_code=74"
+  finish 74
 fi
 
-started_at=$(timestamp)
 started_epoch=$(/bin/date +%s)
-log "action=start repo=$repo schedule=$schedule available_bytes=$free_bytes minimum_bytes=$min_free_bytes pressure_level=$pressure_level memory_mode=$memory_mode pack_threads=1 pack_window_memory=256m runner=taskpolicy started_at=$started_at"
+export GIT_NO_LAZY_FETCH=1
 
-# Use the memory cap where this OS supports it. Older taskpolicy releases still
-# lower maintenance priority, and Git receives bounded single-thread pack
-# settings for every task. Scheduled repacks select one bounded MIDX batch
-# (default 1g, configurable per repo, see resolve_midx_batch_size).
+current_cap_mib=$normal_memory_limit_mib
+if [ "$taskpolicy_memory_cap" -eq 0 ]; then current_cap_mib=0; fi
+
 run_limited() {
   task_name=$1
   shift
   log "action=task_start repo=$repo schedule=$schedule task=$task_name"
-  if [ "$taskpolicy_memory_cap" -eq 1 ]; then
-    "$taskpolicy_bin" -m "$memory_limit_mib" "$time_bin" -l "$git_bin" -c pack.threads=1 -c pack.windowMemory=256m -C "$repo" "$@"
+  if [ "$current_cap_mib" -gt 0 ]; then
+    "$taskpolicy_bin" -m "$current_cap_mib" "$time_bin" -l "$git_bin" -c pack.threads=1 -c pack.windowMemory=256m -C "$repo" "$@"
   else
     "$taskpolicy_bin" -b "$time_bin" -l "$git_bin" -c pack.threads=1 -c pack.windowMemory=256m -C "$repo" "$@"
   fi
@@ -232,123 +443,143 @@ run_limited() {
   return "$task_exit_code"
 }
 
-run_schedule() {
-  case "$schedule" in
-    hourly)
-      run_limited commit-graph maintenance run --task=commit-graph || return $?
-      ;;
-    daily)
-      run_limited loose-objects maintenance run --task=loose-objects || return $?
-      ;;
-    weekly)
-      run_limited pack-refs maintenance run --task=pack-refs || return $?
-      ;;
-  esac
-}
-
-repack_retry_delay() {
-  delay=$repack_retry_base_seconds
-  attempt=1
-  while [ "$attempt" -lt "$state_attempt_count" ] && [ "$delay" -lt "$repack_retry_max_seconds" ]; do
-    delay=$((delay * 2))
-    [ "$delay" -le "$repack_retry_max_seconds" ] || delay=$repack_retry_max_seconds
-    attempt=$((attempt + 1))
-  done
-  printf '%s\n' "$delay"
-}
-
-# Reads frontaliere.maintenance.midxBatchSize from the repo's git config. Only
-# `<digits><k|m|g>` is accepted, with a non-zero value of at most six digits:
-# `0` would ask Git for an unbounded batch, which is the repack this wrapper
-# exists to avoid. Anything else is logged and the default is used, so a typo
-# in the config can never stop the maintenance or widen the batch.
-resolve_midx_batch_size() {
-  midx_batch_size=$default_midx_batch_size
-  configured=$("$git_bin" -C "$repo" config --get frontaliere.maintenance.midxBatchSize 2>/dev/null) || configured=''
-  [ -n "$configured" ] || return 0
-  batch_unit=${configured#"${configured%?}"}
-  batch_digits=${configured%?}
-  batch_valid=1
-  case "$batch_unit" in
-    k|m|g) ;;
-    *) batch_valid=0 ;;
-  esac
-  case "$batch_digits" in
-    ''|*[!0-9]*) batch_valid=0 ;;
-    *[1-9]*) [ "${#batch_digits}" -le 6 ] || batch_valid=0 ;;
-    *) batch_valid=0 ;;
-  esac
-  if [ "$batch_valid" -eq 1 ]; then
-    midx_batch_size=$configured
-    return 0
+if [ "$pressure_valid" -eq 0 ]; then
+  record_skip space_recovery memory_pressure_probe_failed 'pressure_level=unknown'
+elif [ "$pressure_level" -ge 4 ]; then
+  record_skip space_recovery memory_pressure_critical "pressure_level=$pressure_level maximum_pressure_level=3"
+elif [ "$free_bytes" -lt "$min_recovery_bytes" ]; then
+  record_skip space_recovery low_disk "available_bytes=$free_bytes minimum_bytes=$min_recovery_bytes minimum_gib=$min_recovery_gib"
+else
+  if [ "$taskpolicy_memory_cap" -eq 1 ] && [ "$pressure_level" -ge 2 ]; then
+    current_cap_mib=$pressure_memory_limit_mib
+  elif [ "$taskpolicy_memory_cap" -eq 0 ]; then
+    current_cap_mib=0
+  else
+    current_cap_mib=$normal_memory_limit_mib
   fi
-  shown_value=$(printf '%s' "$configured" | /usr/bin/tr -c 'A-Za-z0-9._-' '?' | /usr/bin/cut -c1-40)
-  log "action=config_invalid repo=$repo schedule=$schedule key=frontaliere.maintenance.midxBatchSize value=$shown_value expected=<digits><k|m|g> using_default=$default_midx_batch_size"
-}
+  log "action=start step=space_recovery repo=$repo schedule=$schedule available_bytes=$free_bytes pressure_level=$pressure_level git_version=$git_version"
+  run_limited space-recovery-expire-before multi-pack-index expire --no-progress || exit_code=$?
+  if [ "$exit_code" -eq 0 ]; then run_limited space-recovery-write multi-pack-index write --no-progress || exit_code=$?; fi
+  if [ "$exit_code" -eq 0 ]; then run_limited space-recovery-expire-after multi-pack-index expire --no-progress || exit_code=$?; fi
+  if [ "$exit_code" -eq 0 ]; then
+    last_space_recovery_epoch=$(/bin/date +%s)
+    log "action=space_recovery_complete repo=$repo schedule=$schedule last_space_recovery_epoch=$last_space_recovery_epoch"
+  else
+    record_skip consolidation space_recovery_failed "exit_code=$exit_code"
+  fi
+fi
 
-run_pending_repack() {
-  [ "$state_pending_since" -gt 0 ] || return 0
+if [ "$exit_code" -ne 0 ]; then
+  finish "$exit_code"
+fi
 
-  current_epoch=$(/bin/date +%s)
-  retry_delay=$repack_retry_base_seconds
-  if [ "$state_attempt_count" -gt 0 ]; then
-    retry_delay=$(repack_retry_delay)
-    elapsed=$((current_epoch - state_last_attempt))
-    if [ "$elapsed" -lt "$retry_delay" ]; then
-      log "action=skip reason=repack_cooldown repo=$repo schedule=$schedule attempts=$state_attempt_count retry_in_seconds=$((retry_delay - elapsed))"
-      return 0
+if [ "$pressure_valid" -eq 0 ]; then
+  record_skip consolidation memory_pressure_probe_failed 'pressure_level=unknown'
+elif [ "$pressure_level" -ge 4 ]; then
+  record_skip consolidation memory_pressure_critical "pressure_level=$pressure_level maximum_pressure_level=2"
+elif [ "$pressure_level" -ge 3 ]; then
+  record_skip consolidation memory_pressure "pressure_level=$pressure_level maximum_pressure_level=2"
+elif [ "$pressure_level" -eq 2 ] && [ "$taskpolicy_memory_cap" -eq 0 ]; then
+  record_skip consolidation taskpolicy_memory_cap_unsupported 'pressure_level=2 required_cap_mib=512'
+else
+  if ! read_free_bytes; then
+    log "action=abort reason=disk_probe_failed_after_space_recovery repo=$repo schedule=$schedule raw_free_kib=${free_kib:-} exit_code=74"
+    finish 74
+  fi
+  if [ "$free_bytes" -lt "$min_consolidation_bytes" ]; then
+    record_skip consolidation low_disk "available_bytes=$free_bytes minimum_bytes=$min_consolidation_bytes minimum_gib=$min_consolidation_gib"
+  else
+    if [ "$pressure_level" -eq 2 ]; then
+      current_cap_mib=$pressure_memory_limit_mib
+    elif [ "$taskpolicy_memory_cap" -eq 1 ]; then
+      current_cap_mib=$normal_memory_limit_mib
+    else
+      current_cap_mib=0
+    fi
+    log "action=consolidation_decision repo=$repo schedule=$schedule decision=run pressure_level=$pressure_level available_bytes=$free_bytes memory_cap_mib=$current_cap_mib"
+
+    case "$schedule" in
+      hourly) run_limited commit-graph maintenance run --task=commit-graph || exit_code=$? ;;
+      daily) run_limited loose-objects maintenance run --task=loose-objects || exit_code=$? ;;
+      weekly) run_limited pack-refs maintenance run --task=pack-refs || exit_code=$? ;;
+    esac
+
+    if [ "$exit_code" -eq 0 ] && [ "$state_pending_since" -gt 0 ]; then
+      current_epoch=$(/bin/date +%s)
+      retry_delay=$repack_retry_base_seconds
+      if [ "$state_attempt_count" -gt 0 ]; then
+        retry_delay=$repack_retry_base_seconds
+        attempt=1
+        while [ "$attempt" -lt "$state_attempt_count" ] && [ "$retry_delay" -lt "$repack_retry_max_seconds" ]; do
+          retry_delay=$((retry_delay * 2))
+          [ "$retry_delay" -le "$repack_retry_max_seconds" ] || retry_delay=$repack_retry_max_seconds
+          attempt=$((attempt + 1))
+        done
+        elapsed=$((current_epoch - state_last_attempt))
+        if [ "$elapsed" -lt "$retry_delay" ]; then
+          last_skip_step=consolidation
+          last_skip_reason=repack_cooldown
+          log "action=skip step=consolidation reason=repack_cooldown repo=$repo schedule=$schedule attempts=$state_attempt_count retry_in_seconds=$((retry_delay - elapsed))"
+        fi
+      else
+        elapsed=$retry_delay
+      fi
+
+      if [ "$state_attempt_count" -eq 0 ] || [ "$elapsed" -ge "$retry_delay" ]; then
+        state_attempt_count=$((state_attempt_count + 1))
+        state_last_attempt=$current_epoch
+        save_state || {
+          log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+          finish 74
+        }
+        configured=$("$git_bin" -C "$repo" config --get frontaliere.maintenance.midxBatchSize 2>/dev/null) || configured=''
+        batch_unit=${configured#"${configured%?}"}
+        batch_digits=${configured%?}
+        batch_valid=1
+        if [ -n "$configured" ]; then
+          case "$batch_unit" in k|m|g) ;; *) batch_valid=0 ;; esac
+          case "$batch_digits" in ''|*[!0-9]*) batch_valid=0 ;; *[1-9]*) [ "${#batch_digits}" -le 6 ] || batch_valid=0 ;; *) batch_valid=0 ;; esac
+          if [ "$batch_valid" -eq 1 ]; then
+            midx_batch_size=$configured
+          else
+            shown_value=$(printf '%s' "$configured" | /usr/bin/tr -c 'A-Za-z0-9._-' '?' | /usr/bin/cut -c1-40)
+            log "action=config_invalid repo=$repo schedule=$schedule key=frontaliere.maintenance.midxBatchSize value=$shown_value expected=<digits><k|m|g> using_default=$default_midx_batch_size"
+          fi
+        fi
+        if [ "$pressure_level" -eq 2 ]; then
+          batch_number=${midx_batch_size%?}
+          batch_unit=${midx_batch_size#"$batch_number"}
+          batch_number=$(printf '%s\n' "$batch_number" | /usr/bin/sed 's/^0*//')
+          [ -n "$batch_number" ] || batch_number=0
+          case "$batch_unit" in
+            k) batch_bytes=$((batch_number * 1024)) ;;
+            m) batch_bytes=$((batch_number * 1024 * 1024)) ;;
+            g) batch_bytes=$((batch_number * 1024 * 1024 * 1024)) ;;
+          esac
+          [ "$batch_bytes" -le $((pressure_memory_limit_mib * 1024 * 1024)) ] || midx_batch_size=512m
+        fi
+        pending_age=$((current_epoch - state_pending_since))
+        log "action=repack_attempt repo=$repo schedule=$schedule batch_size=$midx_batch_size attempts=$state_attempt_count pending_age_seconds=$pending_age"
+        run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size="$midx_batch_size" --no-progress || exit_code=$?
+        if [ "$exit_code" -eq 0 ]; then run_limited midx-expire multi-pack-index expire --no-progress || exit_code=$?; fi
+        if [ "$exit_code" -eq 0 ]; then
+          completed_attempts=$state_attempt_count
+          finished_repack_epoch=$(/bin/date +%s)
+          completed_pending_age=$((finished_repack_epoch - state_pending_since))
+          state_pending_since=0
+          state_attempt_count=0
+          state_last_attempt=0
+          state_last_success=$finished_repack_epoch
+          last_consolidation_epoch=$finished_repack_epoch
+          save_state || {
+            log "action=abort reason=state_write_failed_after_repack repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
+            finish 74
+          }
+          log "action=repack_complete repo=$repo schedule=$schedule attempts=$completed_attempts pending_age_seconds=$completed_pending_age last_success=$state_last_success"
+        fi
+      fi
     fi
   fi
-
-  state_attempt_count=$((state_attempt_count + 1))
-  state_last_attempt=$current_epoch
-  save_state || {
-    log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
-    return 74
-  }
-  pending_age=$((current_epoch - state_pending_since))
-  resolve_midx_batch_size
-  log "action=repack_attempt repo=$repo schedule=$schedule batch_size=$midx_batch_size attempts=$state_attempt_count pending_age_seconds=$pending_age retry_delay_seconds=$retry_delay"
-
-  run_limited midx-expire multi-pack-index expire --no-progress
-  task_status=$?
-  [ "$task_status" -eq 0 ] || return "$task_status"
-  run_limited midx-write multi-pack-index write --no-progress
-  task_status=$?
-  [ "$task_status" -eq 0 ] || return "$task_status"
-  run_limited midx-repack -c pack.threads=1 -c pack.windowMemory=256m multi-pack-index repack --batch-size="$midx_batch_size" --no-progress
-  task_status=$?
-  [ "$task_status" -eq 0 ] || return "$task_status"
-  run_limited midx-expire multi-pack-index expire --no-progress
-  task_status=$?
-  [ "$task_status" -eq 0 ] || return "$task_status"
-
-  completed_attempts=$state_attempt_count
-  finished_repack_epoch=$(/bin/date +%s)
-  completed_pending_age=$((finished_repack_epoch - state_pending_since))
-  state_pending_since=0
-  state_attempt_count=0
-  state_last_attempt=0
-  state_last_success=$finished_repack_epoch
-  save_state || {
-    log "action=abort reason=state_write_failed_after_repack repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
-    return 74
-  }
-  log "action=repack_complete repo=$repo schedule=$schedule attempts=$completed_attempts pending_age_seconds=$completed_pending_age last_success=$state_last_success"
-}
-
-run_schedule
-exit_code=$?
-
-if [ "$exit_code" -eq 0 ]; then
-  run_pending_repack
-  exit_code=$?
 fi
 
-finished_at=$(timestamp)
-finished_epoch=$(/bin/date +%s)
-log "action=finish repo=$repo schedule=$schedule exit_code=$exit_code duration_seconds=$((finished_epoch - started_epoch)) finished_at=$finished_at"
-if [ "$locked_run" = --locked ] && [ "$exit_code" -eq 75 ]; then
-  exit 174
-fi
-exit "$exit_code"
+finish "$exit_code"

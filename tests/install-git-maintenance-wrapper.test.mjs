@@ -13,7 +13,16 @@ const FAKE_PLUTIL = `
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
-const read = (file) => JSON.parse(readFileSync(file, 'utf8'));
+function read(file) {
+  const source = readFileSync(file, 'utf8');
+  try { return JSON.parse(source); } catch {}
+  const plist = {};
+  const label = source.match(/<key>Label<\\/key>\\s*<string>([\\s\\S]*?)<\\/string>/);
+  if (label) plist.Label = label[1];
+  const argumentsMatch = source.match(/<key>ProgramArguments<\\/key>\\s*<array>([\\s\\S]*?)<\\/array>/);
+  if (argumentsMatch) plist.ProgramArguments = [...argumentsMatch[1].matchAll(/<string>([\\s\\S]*?)<\\/string>/g)].map((match) => match[1]);
+  return plist;
+}
 const walk = (root, keyPath) => keyPath.split('.').reduce((node, key) => (node == null ? undefined : node[key]), root);
 function parentOf(root, keyPath, create) {
   const keys = keyPath.split('.');
@@ -68,6 +77,7 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
     const launchAgents = join(home, 'Library', 'LaunchAgents');
     const toolDir = join(root, 'tools');
     const siteRepo = join(root, 'site repo');
+    const articlesRepo = join(root, 'articles repo');
     const fakePlutilScript = join(toolDir, 'fake-plutil.mjs');
     const fakePlutil = join(toolDir, 'plutil');
     const fakeLaunchctl = join(toolDir, 'launchctl');
@@ -76,8 +86,9 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
     mkdirSync(launchAgents, { recursive: true });
     mkdirSync(toolDir, { recursive: true });
     execFileSync('git', ['init', '--quiet', siteRepo]);
+    execFileSync('git', ['init', '--quiet', articlesRepo]);
     writeFileSync(fakePlutilScript, FAKE_PLUTIL);
-    writeFileSync(fakePlutil, `#!/bin/sh\nexec node "${fakePlutilScript}" "$@"\n`, { mode: 0o755 });
+    writeFileSync(fakePlutil, `#!/bin/sh\nexec "${process.execPath}" "${fakePlutilScript}" "$@"\n`, { mode: 0o755 });
     writeFileSync(fakeLaunchctl, '#!/bin/sh\nprintf "%s\\n" "$*" >>"$FAKE_LAUNCHCTL_LOG"\n', { mode: 0o755 });
     chmodSync(fakePlutil, 0o755);
     const env = {
@@ -85,10 +96,13 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
       HOME: home,
       GIT_CONFIG_GLOBAL: globalGitConfig,
       FRONTALIERE_SITE_REPO: siteRepo,
+      FRONTALIERE_ARTICLES_REPO: articlesRepo,
       FRONTALIERE_PLUTIL_BIN: fakePlutil,
       FRONTALIERE_LAUNCHCTL_BIN: fakeLaunchctl,
       FAKE_LAUNCHCTL_LOG: launchctlLog,
+      PATH: `${toolDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
     };
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', siteRepo], { env });
 
     const originalArguments = {};
     for (const [label, schedule] of Object.entries(SCHEDULES)) {
@@ -112,6 +126,14 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
       assert.deepEqual(JSON.parse(readFileSync(plistPath, 'utf8')).ProgramArguments, [wrapper, schedule], `${label} has only wrapper + schedule`);
       assert.deepEqual(JSON.parse(readFileSync(backupPath, 'utf8')).ProgramArguments, originalArguments[label], `${label} backup preserves original arguments`);
     }
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }).trim(), '1.day.ago');
+    assert.equal(execFileSync('git', ['-C', articlesRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }).trim(), '1.day.ago');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'frontaliere.fetchThrottleSeconds'], { encoding: 'utf8' }).trim(), '30');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'fetch.unpackLimit'], { encoding: 'utf8' }).trim(), '2000');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'transfer.unpackLimit'], { encoding: 'utf8' }).trim(), '2000');
+    assert.throws(() => execFileSync('git', ['-C', articlesRepo, 'config', '--local', '--get', 'fetch.unpackLimit'], { encoding: 'utf8' }));
+    assert.throws(() => execFileSync('git', ['-C', articlesRepo, 'config', '--local', '--get', 'transfer.unpackLimit'], { encoding: 'utf8' }));
+    assert.match(readFileSync(join(home, '.local', 'bin', 'git'), 'utf8'), /FRONTALIERE_GIT_SHIM=1/);
 
     const reinstalled = runInstaller([], env);
     assert.equal(reinstalled.status, 0, reinstalled.stderr);
@@ -127,7 +149,11 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
       assert.deepEqual(JSON.parse(readFileSync(plistPath, 'utf8')).ProgramArguments, originalArguments[label], `${label} restores original arguments`);
     }
     assert.equal(existsSync(wrapper), false, 'restore removes the installed wrapper');
-    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'maintenance.strategy'], { encoding: 'utf8' }).trim(), 'none');
+    assert.equal(existsSync(join(home, '.local', 'bin', 'git')), false, 'restore removes the shim when no prior git existed');
+    assert.equal(execFileSync('git', ['config', '--global', '--fixed-value', '--get', 'maintenance.repo', siteRepo], { encoding: 'utf8', env }).trim(), siteRepo);
+    assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }));
+    assert.throws(() => execFileSync('git', ['-C', articlesRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }));
+    assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'maintenance.strategy'], { encoding: 'utf8' }));
     assert.match(readFileSync(launchctlLog, 'utf8'), /bootstrap gui\//);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -141,12 +167,14 @@ function installerFixture(root, labels) {
   const launchAgents = join(home, 'Library', 'LaunchAgents');
   const toolDir = join(root, 'tools');
   const siteRepo = join(root, 'site');
+  const articlesRepo = join(root, 'articles');
   const launchctlLog = join(root, 'launchctl.log');
   mkdirSync(launchAgents, { recursive: true });
   mkdirSync(toolDir, { recursive: true });
   execFileSync('git', ['init', '--quiet', siteRepo]);
+  execFileSync('git', ['init', '--quiet', articlesRepo]);
   writeFileSync(join(toolDir, 'fake-plutil.mjs'), FAKE_PLUTIL);
-  writeFileSync(join(toolDir, 'plutil'), `#!/bin/sh\nexec node "${join(toolDir, 'fake-plutil.mjs')}" "$@"\n`, { mode: 0o755 });
+  writeFileSync(join(toolDir, 'plutil'), `#!/bin/sh\nexec "${process.execPath}" "${join(toolDir, 'fake-plutil.mjs')}" "$@"\n`, { mode: 0o755 });
   writeFileSync(join(toolDir, 'launchctl'), '#!/bin/sh\nprintf "%s\\n" "$*" >>"$FAKE_LAUNCHCTL_LOG"\nexit 0\n', { mode: 0o755 });
   const calendar = { sunday: { Hour: 4, Minute: 0, Weekday: 0 }, daily: { Hour: 4, Minute: 0 }, hourly: { Minute: 30 } };
   for (const label of labels) {
@@ -160,12 +188,14 @@ function installerFixture(root, labels) {
     HOME: home,
     GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
     FRONTALIERE_SITE_REPO: siteRepo,
+    FRONTALIERE_ARTICLES_REPO: articlesRepo,
     FRONTALIERE_PLUTIL_BIN: join(toolDir, 'plutil'),
     FRONTALIERE_LAUNCHCTL_BIN: join(toolDir, 'launchctl'),
     FAKE_LAUNCHCTL_LOG: launchctlLog,
+    PATH: `${toolDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
   };
   const plist = (label) => JSON.parse(readFileSync(join(launchAgents, `ch.frontaliere.git-maintenance-${label}.plist`), 'utf8'));
-  return { env, plist, launchctlLog };
+  return { env, plist, launchctlLog, root, home, siteRepo, articlesRepo, launchAgents };
 }
 
 test('a host with only the Sunday job runs it every day; hourly keeps its own calendar', () => {
@@ -210,6 +240,57 @@ test('the laptop, which has its own daily job, keeps the Sunday job on Sundays',
   }
 });
 
+test('installer adds one hourly job, preserves a user shim and Mole entries, and skips unpack limits on partial clones', () => {
+  const root = mkdtempSync(join(tmpdir(), 'git maintenance hourly and restore-'));
+  try {
+    const fixture = installerFixture(root, ['daily', 'sunday']);
+    const { env, launchctlLog, home, siteRepo, launchAgents, plist } = fixture;
+    const shimDir = join(home, '.local', 'bin');
+    const originalShim = join(shimDir, 'git');
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(originalShim, '#!/bin/sh\necho user-git\n', { mode: 0o755 });
+    mkdirSync(join(home, '.config', 'mole'), { recursive: true });
+    const whitelist = join(home, '.config', 'mole', 'whitelist');
+    writeFileSync(whitelist, '# keep this comment\n~/Library/Logs/frontaliere\n');
+    execFileSync('git', ['-C', siteRepo, 'config', '--local', 'splitIndex.sharedIndexExpire', '2.weeks.ago']);
+    execFileSync('git', ['-C', siteRepo, 'config', '--local', 'frontaliere.fetchThrottleSeconds', '9']);
+    execFileSync('git', ['-C', siteRepo, 'config', '--local', 'remote.origin.promisor', 'true']);
+
+    const installed = runInstaller([], env);
+    assert.equal(installed.status, 0, installed.stderr);
+    const hourly = join(launchAgents, 'ch.frontaliere.git-maintenance-hourly.plist');
+    assert.deepEqual(JSON.parse(readFileSync(hourly, 'utf8')).ProgramArguments, [
+      join(home, 'Library', 'Application Support', 'frontaliere', 'git-maintenance', 'git-maintenance-wrapper'),
+      'hourly',
+    ]);
+    assert.equal(existsSync(join(launchAgents, 'ch.frontaliere.git-maintenance-hourly-frontaliere.plist')), false);
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }).trim(), '1.day.ago');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'frontaliere.fetchThrottleSeconds'], { encoding: 'utf8' }).trim(), '30');
+    assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'fetch.unpackLimit'], { encoding: 'utf8' }));
+    assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'transfer.unpackLimit'], { encoding: 'utf8' }));
+    assert.equal(readFileSync(join(shimDir, 'git.pre-frontaliere'), 'utf8'), '#!/bin/sh\necho user-git\n');
+    assert.match(readFileSync(originalShim, 'utf8'), /FRONTALIERE_GIT_SHIM=1/);
+    assert.equal(readFileSync(whitelist, 'utf8'), '# keep this comment\n~/Library/Logs/frontaliere\n~/.local/state/frontaliere\n');
+
+    const bootstrapsBefore = readFileSync(launchctlLog, 'utf8').split('\n').filter((line) => line.startsWith('bootstrap')).length;
+    const reinstalled = runInstaller([], env);
+    assert.equal(reinstalled.status, 0, reinstalled.stderr);
+    const bootstrapsAfter = readFileSync(launchctlLog, 'utf8').split('\n').filter((line) => line.startsWith('bootstrap')).length;
+    assert.equal(bootstrapsAfter, bootstrapsBefore, 'a second install does not add or reload a duplicate hourly job');
+
+    const restored = runInstaller(['--restore'], env);
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(existsSync(hourly), false, 'restore removes the LaunchAgent created by this installer');
+    assert.equal(readFileSync(originalShim, 'utf8'), '#!/bin/sh\necho user-git\n');
+    assert.equal(existsSync(join(shimDir, 'git.pre-frontaliere')), false);
+    assert.equal(readFileSync(whitelist, 'utf8'), '# keep this comment\n~/Library/Logs/frontaliere\n');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }).trim(), '2.weeks.ago');
+    assert.equal(execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'frontaliere.fetchThrottleSeconds'], { encoding: 'utf8' }).trim(), '9');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // The real wrapper against fake git/df/time/taskpolicy/sysctl: only the MIDX
 // repack invocation and the log matter here.
 const WRAPPER = join(ROOT, 'bin', 'git-maintenance-wrapper');
@@ -224,7 +305,7 @@ function runWrapper({ batchConfig, schedule = 'daily', freeKib = 99999999999 } =
     mkdirSync(tools, { recursive: true });
     const gitCalls = join(root, 'git-calls.log');
     const script = (name, body) => writeFileSync(join(tools, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-    script('git', `case "$*" in *"config --get frontaliere.maintenance.midxBatchSize"*) if [ -n "\${FAKE_MIDX_BATCH+x}" ]; then printf '%s\\n' "$FAKE_MIDX_BATCH"; exit 0; fi; exit 1;; esac\nprintf '%s\\n' "$*" >>"$FAKE_GIT_CALLS"`);
+    script('git', `if [ "$1" = --version ]; then printf 'git version 2.56.0\\n'; exit 0; fi\ncase "$*" in *"config --get frontaliere.maintenance.midxBatchSize"*) if [ -n "\${FAKE_MIDX_BATCH+x}" ]; then printf '%s\\n' "$FAKE_MIDX_BATCH"; exit 0; fi; exit 1;; esac\nprintf '%s\\n' "$*" >>"$FAKE_GIT_CALLS"`);
     script('df', `printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 1 1 ${freeKib} 1%% /\\n"`);
     script('time', 'shift; exec "$@"');
     script('taskpolicy', 'case "$1" in -m) shift 2;; -b) shift;; esac\nexec "$@"');
@@ -296,6 +377,6 @@ test('wrapper: a larger batch does not bypass the 5 GiB free-disk guard', () => 
   const run = runWrapper({ batchConfig: '8g', freeKib: 4 * 1024 * 1024 });
   assert.equal(run.status, 0, run.stderr + run.log);
   assert.equal(run.repackCalls.length, 0);
-  assert.match(run.log, /action=skip reason=low_disk .*minimum_gib=5/);
+  assert.match(run.log, /action=skip step=consolidation reason=low_disk .*minimum_gib=5/);
   assert.doesNotMatch(run.log, /action=repack_attempt/);
 });
