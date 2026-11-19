@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -520,6 +520,40 @@ test('apply rifiuta operazioni Git in corso e spazio insufficiente senza spostar
   assert.equal(lowSpace.status, 1);
   assert.match(JSON.parse(lowSpace.stdout).error, /spazio insufficiente: richiesti \d+ byte/);
   assert.deepEqual(packNames(fixture.repo), beforePacks);
+});
+
+test('operazioni abbandonate non bloccano e i loro commit restano conservati', { skip: INTEGRATION_SKIP }, (t) => {
+  // Sul Mac agenti il 19/11 nove marker (rebase/merge/cherry-pick) avevano
+  // da 3 a 45 giorni e bloccavano ogni run. Un marker fermo da oltre 6 ore non
+  // blocca piu', ma i commit che nomina sono radici da conservare.
+  const root = tempRoot(t, 'git-partial-compact-stale-ops-');
+  const fixture = createFixture(root);
+  const danglingCommit = (name, content) => {
+    const blob = git(fixture.repo, ['hash-object', '-w', '--stdin'], { input: content });
+    const tree = git(fixture.repo, ['mktree'], { input: `100644 blob ${blob}\t${name}\n` });
+    const commit = git(fixture.repo, ['commit-tree', tree, '-m', `abandoned ${name}`]);
+    return { blob, tree, commit };
+  };
+  const merge = danglingCommit('abandoned-merge.json', 'merge-only-' + 'm'.repeat(5000));
+  const rebase = danglingCommit('abandoned-rebase.json', 'rebase-only-' + 'r'.repeat(5000));
+  // In un pack, non sciolti: gli oggetti sciolti non vengono toccati e il test non proverebbe nulla.
+  const oids = [merge.blob, merge.tree, merge.commit, rebase.blob, rebase.tree, rebase.commit].join('\n') + '\n';
+  git(fixture.repo, ['pack-objects', join(fixture.repo, '.git', 'objects', 'pack', 'pack')], { input: oids });
+  git(fixture.repo, ['prune-packed']);
+  const gitDir = join(fixture.repo, '.git');
+  writeFileSync(join(gitDir, 'MERGE_HEAD'), `${merge.commit}\n`);
+  mkdirSync(join(gitDir, 'rebase-merge'));
+  writeFileSync(join(gitDir, 'rebase-merge', 'git-rebase-todo'), `pick ${rebase.commit.slice(0, 10)} abandoned rebase\n`);
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  for (const marker of ['MERGE_HEAD', 'rebase-merge']) utimesSync(join(gitDir, marker), twoDaysAgo, twoDaysAgo);
+
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {}, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).result, 'success');
+  for (const oid of [merge.commit, merge.tree, merge.blob, rebase.commit, rebase.tree, rebase.blob]) {
+    assert.equal(existsObject(fixture.repo, oid), true, `oggetto dell'operazione abbandonata conservato: ${oid}`);
+  }
+  assert.equal(existsObject(fixture.repo, fixture.oldBlob), false, 'il blob storico remoto viene comunque scartato');
 });
 
 test('blob remoto mancante viene recuperato in lazy fetch economico', { skip: INTEGRATION_SKIP }, (t) => {

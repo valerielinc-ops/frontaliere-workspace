@@ -279,11 +279,67 @@ function enumerateRoots(repo, gitBin, worktrees, refList) {
   return { roots, refTips, reflogTips: unique([...reflogTips, ...worktreeReflogs]) };
 }
 
+// An operation marker untouched for this long is an abandoned rebase/merge/
+// cherry-pick, not one in progress: on the agent host on 2026-11-19 nine of
+// them were 3 to 45 days old and blocked every run. Abandoned ones no longer
+// block; the commits they reference are kept as roots (operationRoots).
+const ACTIVE_OPERATION_MS = 6 * 60 * 60 * 1000;
+
+function operationMarkerIsActive(markerPath, nowMs = Date.now()) {
+  try {
+    return nowMs - fs.statSync(markerPath).mtimeMs < ACTIVE_OPERATION_MS;
+  } catch { return false; }
+}
+
+const OPERATION_REF_FILES = [
+  'ORIG_HEAD', 'MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'AUTO_MERGE',
+  'BISECT_EXPECTED_REV',
+  'rebase-merge/onto', 'rebase-merge/orig-head', 'rebase-merge/stopped-sha', 'rebase-merge/amend',
+  'rebase-merge/autostash',
+  'rebase-apply/onto', 'rebase-apply/orig-head', 'rebase-apply/original-commit', 'rebase-apply/autostash',
+  'sequencer/head', 'sequencer/abort-safety',
+];
+const OPERATION_TODO_FILES = [
+  'rebase-merge/git-rebase-todo', 'rebase-merge/done', 'sequencer/todo', 'sequencer/done',
+];
+
+// Commits referenced by in-progress or abandoned operations of each worktree:
+// pseudo-refs hold full ids, todo/done lists hold abbreviated ones that are
+// resolved locally (lazy fetch is always off here, so an unknown one is skipped).
+function operationRoots(repoInfo, worktrees) {
+  const found = [];
+  const abbreviated = [];
+  for (const worktree of worktrees) {
+    for (const name of OPERATION_REF_FILES) {
+      let text = '';
+      try { text = fs.readFileSync(path.join(worktree.gitDir, name), 'utf8'); } catch { continue; }
+      found.push(...(text.match(/\b[0-9a-f]{40}(?:[0-9a-f]{24})?\b/gi) || []));
+    }
+    for (const name of OPERATION_TODO_FILES) {
+      let text = '';
+      try { text = fs.readFileSync(path.join(worktree.gitDir, name), 'utf8'); } catch { continue; }
+      for (const line of text.split(/\r?\n/)) {
+        const match = /^\s*(?:p|pick|r|reword|e|edit|s|squash|f|fixup|d|drop|revert|m|merge(?:\s+-[cC])?)\s+([0-9a-f]{7,64})\b/i.exec(line);
+        if (match) abbreviated.push(match[1]);
+      }
+    }
+  }
+  const full = unique(found);
+  if (abbreviated.length === 0) return full;
+  const resolved = git(repoInfo.repo, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
+    gitBin: repoInfo.gitBin,
+    input: `${[...new Set(abbreviated.map((oid) => oid.toLowerCase()))].join('\n')}\n`,
+    maxBuffer: 16 * 1024 * 1024,
+  }).split(/\r?\n/).map((line) => line.split(' ')).filter((parts) => parts[1] === 'commit').map((parts) => parts[0]);
+  return unique([...full, ...resolved]);
+}
+
 function safetyBlockers(repoInfo, worktrees) {
   const busy = [];
   for (const worktree of worktrees) {
     for (const marker of WORKTREE_OPERATIONS) {
-      if (fs.existsSync(path.join(worktree.gitDir, marker))) busy.push(`${worktree.path}/${marker}`);
+      const markerPath = path.join(worktree.gitDir, marker);
+      if (fs.existsSync(markerPath) && operationMarkerIsActive(markerPath)) busy.push(`${worktree.path}/${marker}`);
     }
     if (fs.existsSync(path.join(worktree.gitDir, 'gc.pid'))) busy.push(`${worktree.path}/gc.pid`);
   }
@@ -433,6 +489,7 @@ function snapshot(repoInfo, options) {
   const blockers = safetyBlockers(repoInfo, worktrees);
   if (options.apply && blockers.length) throw new Error(`operazione Git o gc in corso: ${blockers.join(', ')}`);
   const roots = enumerateRoots(repo, gitBin, worktrees, refList);
+  roots.roots = unique([...roots.roots, ...operationRoots(repoInfo, worktrees)]);
   const remote = options.convert ? chooseRemote(repo, gitBin, null) : partialRemote(repo, gitBin);
   if (!remote && !options.convert) throw new Error('repository completo: usa --convert --apply per convertirlo in partial clone');
   if (options.convert && partialRemote(repo, gitBin)) throw new Error('--convert richiede un clone completo, ma il repository è già partial clone');
