@@ -70,6 +70,15 @@ function runInstaller(args, env) {
   return spawnSync('/bin/sh', [INSTALLER, ...args], { encoding: 'utf8', env });
 }
 
+function globalMaintenanceRepos(env) {
+  try {
+    return execFileSync('git', ['config', '--global', '--get-all', 'maintenance.repo'], { encoding: 'utf8', env })
+      .trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 test('install and restore replace the complete LaunchAgent argument vector', () => {
   const root = mkdtempSync(join(tmpdir(), 'git maintenance installer-'));
   try {
@@ -78,6 +87,7 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
     const toolDir = join(root, 'tools');
     const siteRepo = join(root, 'site repo');
     const articlesRepo = join(root, 'articles repo');
+    const otherRepo = join(root, 'other repo');
     const fakePlutilScript = join(toolDir, 'fake-plutil.mjs');
     const fakePlutil = join(toolDir, 'plutil');
     const fakeLaunchctl = join(toolDir, 'launchctl');
@@ -103,6 +113,9 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
       PATH: `${toolDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
     };
     execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', siteRepo], { env });
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', articlesRepo], { env });
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', articlesRepo], { env });
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', otherRepo], { env });
 
     const originalArguments = {};
     for (const [label, schedule] of Object.entries(SCHEDULES)) {
@@ -119,6 +132,7 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
 
     const installed = runInstaller([], env);
     assert.equal(installed.status, 0, installed.stderr);
+    assert.deepEqual(globalMaintenanceRepos(env), [otherRepo], 'wrapper owns site and corpus maintenance while unrelated repos stay registered');
     const wrapper = join(home, 'Library', 'Application Support', 'frontaliere', 'git-maintenance', 'git-maintenance-wrapper');
     for (const [label, schedule] of Object.entries(SCHEDULES)) {
       const plistPath = join(launchAgents, `ch.frontaliere.git-maintenance-${label}.plist`);
@@ -150,7 +164,7 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
     }
     assert.equal(existsSync(wrapper), false, 'restore removes the installed wrapper');
     assert.equal(existsSync(join(home, '.local', 'bin', 'git')), false, 'restore removes the shim when no prior git existed');
-    assert.equal(execFileSync('git', ['config', '--global', '--fixed-value', '--get', 'maintenance.repo', siteRepo], { encoding: 'utf8', env }).trim(), siteRepo);
+    assert.deepEqual(globalMaintenanceRepos(env).sort(), [siteRepo, articlesRepo, articlesRepo, otherRepo].sort(), '--restore preserves the original site and corpus registrations');
     assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }));
     assert.throws(() => execFileSync('git', ['-C', articlesRepo, 'config', '--local', '--get', 'splitIndex.sharedIndexExpire'], { encoding: 'utf8' }));
     assert.throws(() => execFileSync('git', ['-C', siteRepo, 'config', '--local', '--get', 'maintenance.strategy'], { encoding: 'utf8' }));
@@ -160,9 +174,29 @@ test('install and restore replace the complete LaunchAgent argument vector', () 
   }
 });
 
+test('installer leaves a non-Git corpus in global maintenance.repo untouched', () => {
+  const root = mkdtempSync(join(tmpdir(), 'git maintenance non-git corpus-'));
+  try {
+    const fixture = installerFixture(root, ['daily'], { articlesGit: false });
+    mkdirSync(fixture.articlesRepo, { recursive: true });
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', fixture.siteRepo], { env: fixture.env });
+    execFileSync('git', ['config', '--global', '--add', 'maintenance.repo', fixture.articlesRepo], { env: fixture.env });
+
+    const installed = runInstaller([], fixture.env);
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.deepEqual(globalMaintenanceRepos(fixture.env), [fixture.articlesRepo]);
+
+    const restored = runInstaller(['--restore'], fixture.env);
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.deepEqual(globalMaintenanceRepos(fixture.env).sort(), [fixture.siteRepo, fixture.articlesRepo].sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // Minimal installer environment with only the given LaunchAgents, each saved
 // with the StartCalendarInterval the real plists carry.
-function installerFixture(root, labels) {
+function installerFixture(root, labels, { articlesGit = true } = {}) {
   const home = join(root, 'home');
   const launchAgents = join(home, 'Library', 'LaunchAgents');
   const toolDir = join(root, 'tools');
@@ -172,7 +206,7 @@ function installerFixture(root, labels) {
   mkdirSync(launchAgents, { recursive: true });
   mkdirSync(toolDir, { recursive: true });
   execFileSync('git', ['init', '--quiet', siteRepo]);
-  execFileSync('git', ['init', '--quiet', articlesRepo]);
+  if (articlesGit) execFileSync('git', ['init', '--quiet', articlesRepo]);
   writeFileSync(join(toolDir, 'fake-plutil.mjs'), FAKE_PLUTIL);
   writeFileSync(join(toolDir, 'plutil'), `#!/bin/sh\nexec "${process.execPath}" "${join(toolDir, 'fake-plutil.mjs')}" "$@"\n`, { mode: 0o755 });
   writeFileSync(join(toolDir, 'launchctl'), '#!/bin/sh\nprintf "%s\\n" "$*" >>"$FAKE_LAUNCHCTL_LOG"\nexit 0\n', { mode: 0o755 });

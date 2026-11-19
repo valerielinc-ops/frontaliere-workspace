@@ -23,7 +23,7 @@ const GIB = 1024 ** 3;
 const SIX_HOURS_S = 6 * 60 * 60;
 const THREE_DAYS_S = 72 * 60 * 60;
 const NOTIFY_COOLDOWN_S = SIX_HOURS_S;
-const HEALTH_FIELDS = [
+const LEGACY_HEALTH_FIELDS = [
   'updated_epoch',
   'repo',
   'last_space_recovery_epoch',
@@ -33,6 +33,23 @@ const HEALTH_FIELDS = [
   'pack_count',
   'pack_bytes',
   'git_version',
+];
+const HEALTH_FIELDS = [
+  ...LEGACY_HEALTH_FIELDS,
+  'health_since_epoch',
+  ...LEGACY_HEALTH_FIELDS.map((field) => `articles_${field}`),
+  'articles_health_since_epoch',
+];
+const LEGACY_TSV_HEADER = [
+  'timestamp_utc',
+  'free_bytes',
+  'swap_used_bytes',
+  'swap_total_bytes',
+  'memory_pressure',
+  'site_pack_count',
+  'site_pack_bytes',
+  'multi_pack_index_mtime_utc',
+  ...LEGACY_HEALTH_FIELDS.map((field) => `health_${field}`),
 ];
 export const TSV_HEADER = [
   'timestamp_utc',
@@ -285,13 +302,15 @@ function tsvValue(value) {
 function appendSample(tsvPath, timestamp, metrics, health, fs) {
   mkdirSync(dirname(tsvPath), { recursive: true });
   const hasFile = fs.existsSync(tsvPath) && fs.statSync(tsvPath).size > 0;
+  let header = TSV_HEADER;
   if (hasFile) {
     const firstLine = fs.readFileSync(tsvPath, 'utf8').split(/\r?\n/, 1)[0];
-    if (firstLine !== TSV_HEADER.join('\t')) throw new Error(`header non riconosciuto in ${tsvPath}`);
+    if (firstLine === LEGACY_TSV_HEADER.join('\t')) header = LEGACY_TSV_HEADER;
+    else if (firstLine !== TSV_HEADER.join('\t')) throw new Error(`header non riconosciuto in ${tsvPath}`);
   } else {
     appendFileSync(tsvPath, `${TSV_HEADER.join('\t')}\n`);
   }
-  const cells = [
+  const allCells = [
     timestamp,
     metrics.freeBytes,
     metrics.swapUsedBytes,
@@ -302,6 +321,7 @@ function appendSample(tsvPath, timestamp, metrics, health, fs) {
     metrics.multiPackIndexMtime,
     ...HEALTH_FIELDS.map((field) => health.fields[field] ?? ''),
   ].map(tsvValue);
+  const cells = header === LEGACY_TSV_HEADER ? allCells.slice(0, 8 + LEGACY_HEALTH_FIELDS.length) : allCells;
   appendFileSync(tsvPath, `${cells.join('\t')}\n`);
 }
 
@@ -323,11 +343,23 @@ export function deriveAlerts({ metrics, health, newLazyFindings, nowEpoch }) {
     if (String(spaceValue ?? '').trim() !== '' && Number.isFinite(spaceEpoch) && nowEpoch - spaceEpoch > SIX_HOURS_S) {
       alerts.push({ type: 'space_recovery_stale', summary: `ultimo recupero spazio ${nowEpoch - spaceEpoch} secondi fa` });
     }
-    const consolidationValue = health.fields.last_consolidation_epoch;
-    const consolidationEpoch = Number(consolidationValue);
-    if (String(consolidationValue ?? '').trim() !== '' && Number.isFinite(consolidationEpoch)
-      && nowEpoch - consolidationEpoch > THREE_DAYS_S) {
-      alerts.push({ type: 'consolidation_stale', summary: `ultima consolidazione ${nowEpoch - consolidationEpoch} secondi fa` });
+    const staleConsolidations = [];
+    for (const [prefix, label] of [['', 'sito'], ['articles_', 'corpus']]) {
+      const lastValue = health.fields[`${prefix}last_consolidation_epoch`];
+      if (!/^\d+$/.test(String(lastValue ?? '').trim())) continue;
+      const lastEpoch = Number(lastValue);
+      let referenceEpoch = lastEpoch;
+      if (lastEpoch === 0) {
+        const sinceValue = health.fields[`${prefix}health_since_epoch`];
+        if (!/^\d+$/.test(String(sinceValue ?? '').trim())) continue;
+        referenceEpoch = Number(sinceValue);
+      }
+      if (referenceEpoch > 0 && nowEpoch - referenceEpoch > THREE_DAYS_S) {
+        staleConsolidations.push(`${label}: ${nowEpoch - referenceEpoch} secondi`);
+      }
+    }
+    if (staleConsolidations.length) {
+      alerts.push({ type: 'consolidation_stale', summary: `consolidazione non recente (${staleConsolidations.join('; ')})` });
     }
   }
   return alerts;

@@ -209,6 +209,61 @@ test('reaper rimuove solo tmp_pack/tmp_idx vecchi e non aperti, nel dry-run non 
   }
 });
 
+test('reaper protegge current, release in uso e le due versioni piu recenti; applica solo quelle vecchie', async () => {
+  const dir = tempDir('r2-codex-releases-');
+  try {
+    const makePackage = (name, releases, current) => {
+      const packageDir = join(dir, '.codex', 'packages', name);
+      const releaseDir = join(packageDir, 'releases');
+      mkdirSync(releaseDir, { recursive: true });
+      for (const release of releases) mkdirSync(join(releaseDir, release), { recursive: true });
+      symlinkSync(join('releases', current), join(packageDir, 'current'));
+      return { packageDir, releaseDir };
+    };
+    const standalone = makePackage('standalone', [
+      '0.100.0', '0.110.0', '0.140.0', '0.150.0', '0.160.0', '0.170.0',
+    ], '0.100.0');
+    const daemon = makePackage('app-server-daemon', [
+      '1.0.0', '1.1.0', '1.2.0', '1.3.0',
+    ], '1.0.0');
+    const inUsePath = join(standalone.releaseDir, '0.110.0');
+    const process = processRow(701, 1, 30 * 86400, `${inUsePath}/bin/codex app-server --listen stdio`);
+    const options = reaperOptions(dir, { listProcesses: () => [process] });
+
+    const dryRun = await runReaper(options);
+    const planned = dryRun.actions.filter((action) => action.target === 'codex_release');
+    assert.deepEqual(planned.map((action) => [action.package, action.release]).sort(), [
+      ['app-server-daemon', '1.1.0'],
+      ['standalone', '0.140.0'],
+      ['standalone', '0.150.0'],
+    ]);
+    assert.ok(planned.every((action) => action.action === 'would_delete'));
+    for (const release of ['0.100.0', '0.110.0', '0.160.0', '0.170.0']) {
+      assert.equal(existsSync(join(standalone.releaseDir, release)), true, `${release} is kept in dry-run`);
+    }
+
+    const applied = await runReaper({ ...options, apply: true });
+    const removed = applied.actions.filter((action) => action.target === 'codex_release' && action.action === 'delete');
+    assert.deepEqual(removed.map((action) => [action.package, action.release]).sort(), [
+      ['app-server-daemon', '1.1.0'],
+      ['standalone', '0.140.0'],
+      ['standalone', '0.150.0'],
+    ]);
+    for (const release of ['0.140.0', '0.150.0']) {
+      assert.equal(existsSync(join(standalone.releaseDir, release)), false, `${release} is removed in apply`);
+    }
+    for (const release of ['0.100.0', '0.110.0', '0.160.0', '0.170.0']) {
+      assert.equal(existsSync(join(standalone.releaseDir, release)), true, `${release} is protected`);
+    }
+    assert.equal(existsSync(join(daemon.releaseDir, '1.1.0')), false);
+    assert.equal(existsSync(join(daemon.releaseDir, '1.2.0')), true);
+    assert.equal(existsSync(join(daemon.releaseDir, '1.3.0')), true);
+    assert.equal(applied.actions.some((action) => action.reason === 'orphan_mcp_or_app_server'), false, 'a Codex process under its managed release is protected');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('opt-out impedisce al reaper di leggere o agire sui processi', async () => {
   const dir = tempDir('r2-reaper-opt-out-');
   try {
@@ -256,7 +311,96 @@ test('il sentinel aggiunge header e righe TSV con le misure e i campi R1', async
     assert.equal(row[7], metrics.multiPackIndexMtime);
     assert.equal(row[8], '1799999990');
     assert.equal(row[9], 'workspace');
-    assert.equal(row.at(-1), '2.56.0');
+    assert.equal(row[TSV_HEADER.indexOf('health_git_version')], '2.56.0');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('la sentinella continua ad appendere a un TSV precedente senza cambiarne lo schema', async () => {
+  const dir = tempDir('r2-disk-legacy-tsv-');
+  try {
+    const logDir = join(dir, 'logs');
+    const tsvPath = join(logDir, 'disk-sentinel.tsv');
+    const legacyHeader = TSV_HEADER.slice(0, 8 + 9).join('\t');
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(tsvPath, `${legacyHeader}\nlegacy-row\n`);
+    await runDiskSentinel({
+      homeDir: dir,
+      logDir,
+      tsvPath,
+      statePath: join(logDir, 'state.json'),
+      nowEpoch: 1_800_000_000,
+      metrics: {
+        freeBytes: 20 * GIB,
+        swapUsedBytes: 0,
+        swapTotalBytes: GIB,
+        sitePackCount: 2,
+        sitePackBytes: 12,
+        health: { present: true, fields: { health_since_epoch: '1799990000', articles_pack_count: '4' } },
+      },
+      lazyFindings: [],
+      notify: async () => true,
+    });
+    const lines = readFileSync(tsvPath, 'utf8').split('\n');
+    assert.equal(lines[0], legacyHeader);
+    assert.equal(lines[1], 'legacy-row');
+    assert.equal(lines[2].split('\t').length, legacyHeader.split('\t').length);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('la sentinella considera health_since_epoch solo per consolidazioni mai eseguite, anche nel corpus', async () => {
+  const dir = tempDir('r2-consolidation-health-since-');
+  try {
+    const nowEpoch = 1_800_000_000;
+    const common = {
+      homeDir: dir,
+      logDir: join(dir, 'logs'),
+      statePath: join(dir, 'logs', 'state.json'),
+      metrics: {
+        freeBytes: 20 * GIB,
+        swapUsedBytes: 0,
+        swapTotalBytes: 4 * GIB,
+        health: { present: true, fields: {} },
+      },
+      lazyFindings: [],
+      notify: async () => true,
+    };
+    const runWith = (fields, offset = 0) => runDiskSentinel({
+      ...common,
+      metrics: { ...common.metrics, health: { present: true, fields } },
+      nowEpoch: nowEpoch + offset,
+    });
+    const recentSince = String(nowEpoch - 72 * 3600 + 1);
+    const recent = await runWith({
+      last_consolidation_epoch: '0',
+      health_since_epoch: recentSince,
+      articles_last_consolidation_epoch: '0',
+      articles_health_since_epoch: recentSince,
+    });
+    assert.equal(recent.alerts.some((alert) => alert.type === 'consolidation_stale'), false);
+    const row = readFileSync(join(dir, 'logs', 'disk-sentinel.tsv'), 'utf8').trim().split('\n')[1].split('\t');
+    assert.equal(row[TSV_HEADER.indexOf('health_articles_health_since_epoch')], recentSince);
+
+    const oldZero = await runWith({
+      last_consolidation_epoch: '0',
+      health_since_epoch: String(nowEpoch - 72 * 3600 - 1),
+      articles_last_consolidation_epoch: '0',
+      articles_health_since_epoch: recentSince,
+    }, 1);
+    assert.deepEqual(oldZero.alerts.map((alert) => alert.type), ['consolidation_stale']);
+    assert.match(oldZero.alerts[0].summary, /sito:/);
+
+    const oldSuccess = await runWith({
+      last_consolidation_epoch: String(nowEpoch - 72 * 3600 - 1),
+      health_since_epoch: recentSince,
+      articles_last_consolidation_epoch: String(nowEpoch - 72 * 3600 - 1),
+      articles_health_since_epoch: recentSince,
+    }, 2);
+    assert.deepEqual(oldSuccess.alerts.map((alert) => alert.type), ['consolidation_stale']);
+    assert.match(oldSuccess.alerts[0].summary, /sito:.*corpus:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

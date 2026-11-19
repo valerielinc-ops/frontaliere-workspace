@@ -804,12 +804,22 @@ un fast-forward del checkout root aggiorna il wrapper sia sul Mac principale
 sia sul Mac remoto che esegue lo stesso autoupdater. `--restore` crea un opt-out
 locale; una successiva invocazione manuale di `install` rimuove il marker.
 
+Il wrapper usa un solo lock per il giro completo e applica le stesse guardie al
+clone del sito e al corpus `frontaliere-articles`, quando quest'ultimo esiste
+ed e' un repository Git. Se `FRONTALIERE_ARTICLES_REPO` manca, deriva il
+percorso del corpus da `FRONTALIERE_SITE_REPO` o dalla root del workspace.
+Stato di backoff e batch pendente sono separati per repository, cosi' un
+tentativo sul corpus non sovrascrive quello del sito.
+
 Per distribuire il wrapper senza modificare il checkout principale, esegui
 `bin/install-git-maintenance-wrapper` dalla root del workspace; salva una copia
 dei LaunchAgent esistenti, aggiorna quelli custom (compreso l'eventuale job
 domenicale locale), imposta l'intero `ProgramArguments` a wrapper piu' schedule
 letto dal plist originale, imposta `maintenance.strategy=none` nel clone del
-sito e rimuove la registrazione globale del clone. Sostituire l'intero array
+sito e rimuove le registrazioni globali del sito e del corpus coperti dal
+wrapper. I valori globali originali di entrambi i repository sono salvati e
+`--restore` li ripristina; un percorso del corpus che non e' un repository Git
+resta nella manutenzione standard di Git. Sostituire l'intero array
 evita di lasciare il vecchio percorso dello script come argomento, che il
 wrapper interpreta come schedule non valido. Le attivita' esplicite del wrapper
 restano abilitate. `bin/install-git-maintenance-wrapper --restore` ripristina i
@@ -840,7 +850,8 @@ versione moderna usa la migliore disponibile e registra
 `git_version_below_2_44`. Non richiama `~/.local/bin/git`, per evitare di
 rientrare nello shim.
 
-Lo stato, il lock e il file health vivono in
+Lo stato del sito e' `git-maintenance-state`; quello del corpus e'
+`git-maintenance-state.articles`. Il lock unico e il file health vivono in
 `~/.local/state/frontaliere/`; log e stdout/stderr dei LaunchAgent restano in
 `~/Library/Logs/frontaliere/`. Al primo avvio il vecchio
 `git-maintenance-state` e il suo marker pendente vengono migrati. Il file
@@ -857,7 +868,24 @@ last_skip_reason=<causa o vuoto>
 pack_count=<numero>
 pack_bytes=<byte>
 git_version=<versione>
+health_since_epoch=<prima creazione health>
+articles_updated_epoch=<epoch>
+articles_repo=<percorso>
+articles_last_space_recovery_epoch=<epoch o 0>
+articles_last_consolidation_epoch=<epoch o 0>
+articles_health_since_epoch=<prima gestione del corpus>
+articles_last_skip_step=<step o vuoto>
+articles_last_skip_reason=<causa o vuoto>
+articles_pack_count=<numero>
+articles_pack_bytes=<byte>
+articles_git_version=<versione>
 ```
+
+Le chiavi del sito restano invariate per i consumer esistenti. `health_since_epoch`
+e `articles_health_since_epoch` restano stabili: se una consolidazione non e'
+mai riuscita (`last_consolidation_epoch=0`), la sentinella aspetta che la
+rispettiva health abbia piu' di 72 ore prima di allarmare; se una consolidazione
+era riuscita, usa invece l'eta' del suo ultimo successo.
 
 L'installer aggiunge il LaunchAgent orario solo se non trova gia' un job
 Frontaliere con schedule `hourly`; mantiene la configurazione giornaliera e
@@ -945,7 +973,11 @@ dopo 15 secondi, SIGKILL se il broker o un discendente è ancora vivo. MCP e
 `git fsmonitor--daemon` è candidato con PPID 1 se ha almeno 24 ore o se la
 directory di lavoro non esiste più. Nei repository root, sito, corpus e Reddit
 vengono rimossi solo `tmp_pack_*` e `tmp_idx_*` più vecchi di sei ore che
-`lsof` conferma non aperti. Il marker
+`lsof` conferma non aperti. In `~/.codex/packages/standalone/releases` e
+`~/.codex/packages/app-server-daemon/releases`, il reaper segnala in dry-run e
+rimuove con `--apply` le release versionate che non sono `current`, non sono
+nel comando di un processo vivo dell'utente e non rientrano nelle due versioni
+più recenti. Ogni rimozione viene registrata nel log. Il marker
 `~/.local/state/frontaliere/agent-orphan-reaper.disabled` sospende il reaper.
 
 ```bash
@@ -960,11 +992,13 @@ rm ~/.local/state/frontaliere/agent-orphan-reaper.disabled
 dati, swap usato/totale, pressione memoria stimata da `memory_pressure`, pack
 del sito, mtime del multi-pack-index e campi presenti in
 `~/.local/state/frontaliere/git-maintenance-health`. Le misure non usano `du`.
+Il TSV include anche i campi health prefissati `articles_` del corpus.
 `disk-sentinel.alert` conserva l'ultimo report con notifiche macOS, al massimo
 una ogni sei ore per tipo: meno di 10 GiB liberi, swap oltre il 75%, un nuovo
 pack promisor con una sola riga `<oid> <oid>` il cui primo oggetto è un commit,
 recupero spazio R1 più vecchio di sei ore o consolidazione più vecchia di 72
-ore. Per il pack lazy-fetch l'alert include OID, messaggio del commit e la
+ore. Per la consolidazione usa l'ultimo successo; se vale zero, attende che la
+health del sito o del corpus abbia più di 72 ore. Per il pack lazy-fetch l'alert include OID, messaggio del commit e la
 catena dei processi `git`, `codex` e `claude` dello stesso utente. La discovery
 sceglie il Git più recente trovato nel PATH o nelle installazioni utente; per
 classificare il pack deve essere almeno 2.44.

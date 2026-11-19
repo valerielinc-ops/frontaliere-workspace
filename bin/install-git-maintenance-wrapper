@@ -17,6 +17,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
 workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
 site_repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
 articles_repo=${FRONTALIERE_ARTICLES_REPO:-$workspace_root/frontaliere-articles}
+site_repo_input=$site_repo
+articles_repo_input=$articles_repo
 action=${1:-install}
 launch_agents=${HOME:?HOME is required}/Library/LaunchAgents
 install_dir="$HOME/Library/Application Support/frontaliere/git-maintenance"
@@ -103,6 +105,18 @@ append_unique_line() {
   /bin/mkdir -p "$(dirname -- "$_file")"
   [ -f "$_file" ] || : >"$_file"
   /usr/bin/grep -Fqx -- "$_line" "$_file" 2>/dev/null || printf '%s\n' "$_line" >>"$_file"
+}
+
+exact_config_value_pattern() {
+  printf '%s\n' "$1" | /usr/bin/awk '{
+    value = ""
+    for (i = 1; i <= length($0); i++) {
+      character = substr($0, i, 1)
+      if (character == "." || character == "[" || character == "]" || character == "\\" || character == "^" || character == "$" || character == "*" || character == "+" || character == "?" || character == "{" || character == "}" || character == "(" || character == ")" || character == "|") value = value "\\"
+      value = value character
+    }
+    print "^" value "$"
+  }'
 }
 
 has_installed_schedule() {
@@ -303,15 +317,61 @@ install_hourly_if_missing() {
 }
 
 backup_global_maintenance_repo() {
-  values_file="$config_backup_dir/global-maintenance-repo.values"
-  present_file="$config_backup_dir/global-maintenance-repo.present"
+  repo_id=$1
+  shift
+  if [ "$repo_id" = site ]; then
+    values_file="$config_backup_dir/global-maintenance-repo.values"
+    present_file="$config_backup_dir/global-maintenance-repo.present"
+  else
+    values_file="$config_backup_dir/global-maintenance-repo-articles.values"
+    present_file="$config_backup_dir/global-maintenance-repo-articles.present"
+  fi
   [ -f "$present_file" ] && return 0
   /bin/mkdir -p "$config_backup_dir"
-  if git config --global --fixed-value --get-all maintenance.repo "$site_repo" >"$values_file" 2>/dev/null; then
-    printf '1\n' >"$present_file"
+  all_values_file="$config_backup_dir/global-maintenance-repo.all-values.$$"
+  : >"$values_file"
+  found=0
+  if git config --global --get-all maintenance.repo >"$all_values_file" 2>/dev/null; then
+    while IFS= read -r configured_repo || [ -n "$configured_repo" ]; do
+      for repo_path in "$@"; do
+        if [ "$configured_repo" = "$repo_path" ]; then
+          printf '%s\n' "$configured_repo" >>"$values_file"
+          found=1
+          break
+        fi
+      done
+    done <"$all_values_file"
+  fi
+  /bin/rm -f "$all_values_file"
+  printf '%s\n' "$found" >"$present_file"
+}
+
+remove_global_maintenance_repo() {
+  for repo_path in "$@"; do
+    value_pattern=$(exact_config_value_pattern "$repo_path")
+    git config --global --unset-all maintenance.repo "$value_pattern" 2>/dev/null || true
+  done
+}
+
+restore_global_maintenance_repo() {
+  repo_id=$1
+  if [ "$repo_id" = site ]; then
+    values_file="$config_backup_dir/global-maintenance-repo.values"
+    present_file="$config_backup_dir/global-maintenance-repo.present"
   else
-    : >"$values_file"
-    printf '0\n' >"$present_file"
+    values_file="$config_backup_dir/global-maintenance-repo-articles.values"
+    present_file="$config_backup_dir/global-maintenance-repo-articles.present"
+  fi
+  if [ -f "$present_file" ] && [ "$(cat "$present_file")" = 1 ]; then
+    while IFS= read -r repo_path || [ -n "$repo_path" ]; do
+      value_pattern=$(exact_config_value_pattern "$repo_path")
+      desired_count=$(/usr/bin/awk -v value="$repo_path" '$0 == value { count++ } END { print count + 0 }' "$values_file")
+      current_count=$(git config --global --get-all maintenance.repo "$value_pattern" 2>/dev/null | /usr/bin/awk 'NF { count++ } END { print count + 0 }')
+      while [ "$current_count" -lt "$desired_count" ]; do
+        git config --global --add maintenance.repo "$repo_path"
+        current_count=$((current_count + 1))
+      done
+    done <"$values_file"
   fi
 }
 
@@ -322,7 +382,11 @@ case "$action" in
       exit 78
     }
     site_repo=$(CDPATH= cd -- "$site_repo" && pwd -P)
-    [ -d "$articles_repo/.git" ] || [ -f "$articles_repo/.git" ] || articles_repo=''
+    if [ -d "$articles_repo/.git" ] || [ -f "$articles_repo/.git" ]; then
+      git -C "$articles_repo" rev-parse --git-dir >/dev/null 2>&1 || articles_repo=''
+    else
+      articles_repo=''
+    fi
     if [ -n "$articles_repo" ]; then articles_repo=$(CDPATH= cd -- "$articles_repo" && pwd -P); fi
     [ -f "$script_dir/git-maintenance-wrapper" ] || {
       printf '%s missing source wrapper\n' "install-git-maintenance-wrapper:" >&2
@@ -338,8 +402,12 @@ case "$action" in
     configure_repo articles "$articles_repo"
     configure_complete_site_unpack_limits
     ensure_repo_config site "$site_repo" maintenance.strategy none
-    backup_global_maintenance_repo
-    git config --global --fixed-value --unset-all maintenance.repo "$site_repo" 2>/dev/null || true
+    backup_global_maintenance_repo site "$site_repo_input" "$site_repo"
+    remove_global_maintenance_repo "$site_repo_input" "$site_repo"
+    if [ -n "$articles_repo" ]; then
+      backup_global_maintenance_repo articles "$articles_repo_input" "$articles_repo"
+      remove_global_maintenance_repo "$articles_repo_input" "$articles_repo"
+    fi
     configure_mole_whitelist
     install_git_shim
 
@@ -471,16 +539,8 @@ case "$action" in
     restore_repo_config site "$site_repo" transfer.unpackLimit
     restore_repo_config articles "$articles_repo" splitIndex.sharedIndexExpire
     restore_repo_config articles "$articles_repo" frontaliere.fetchThrottleSeconds
-    values_file="$config_backup_dir/global-maintenance-repo.values"
-    present_file="$config_backup_dir/global-maintenance-repo.present"
-    if [ -f "$present_file" ] && [ "$(cat "$present_file")" = 1 ]; then
-      desired_count=$(/usr/bin/awk 'END { print NR + 0 }' "$values_file")
-      current_count=$(git config --global --fixed-value --get-all maintenance.repo "$site_repo" 2>/dev/null | /usr/bin/awk 'NF { count++ } END { print count + 0 }')
-      while [ "$current_count" -lt "$desired_count" ]; do
-        git config --global --add maintenance.repo "$site_repo"
-        current_count=$((current_count + 1))
-      done
-    fi
+    restore_global_maintenance_repo site
+    restore_global_maintenance_repo articles
 
     restore_mole_whitelist
     remove_managed_shim

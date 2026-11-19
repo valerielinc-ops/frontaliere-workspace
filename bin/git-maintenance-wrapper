@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Guarded background maintenance for the workspace's large site repository.
+# Guarded background maintenance for the workspace site and articles repositories.
 # Space recovery (MIDX expire/write/expire) has its own lower disk threshold;
 # pack consolidation and the scheduled maintenance tasks keep the 5 GiB guard.
 
@@ -8,7 +8,16 @@ set -u
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
 workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
-repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
+site_repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
+if [ -n "${FRONTALIERE_ARTICLES_REPO:-}" ]; then
+  articles_repo=$FRONTALIERE_ARTICLES_REPO
+elif [ -n "${FRONTALIERE_SITE_REPO:-}" ]; then
+  site_workspace=$(CDPATH= cd -- "$(dirname -- "$site_repo")" && pwd -P) || site_workspace=$workspace_root
+  articles_repo="$site_workspace/frontaliere-articles"
+else
+  articles_repo="$workspace_root/frontaliere-articles"
+fi
+repo=$site_repo
 
 df_bin=${FRONTALIERE_DF_BIN:-/bin/df}
 time_bin=${FRONTALIERE_TIME_BIN:-/usr/bin/time}
@@ -41,12 +50,9 @@ home_dir=${HOME:-/Users/saggesel}
 log_dir=${FRONTALIERE_LOG_DIR:-$home_dir/Library/Logs/frontaliere}
 log_file=${FRONTALIERE_MAINTENANCE_LOG:-$log_dir/git-maintenance.log}
 state_dir=${FRONTALIERE_STATE_DIR:-$home_dir/.local/state/frontaliere}
-state_file=${FRONTALIERE_MAINTENANCE_STATE:-$state_dir/git-maintenance-state}
+maintenance_state_base=${FRONTALIERE_MAINTENANCE_STATE:-$state_dir/git-maintenance-state}
 health_file=${FRONTALIERE_MAINTENANCE_HEALTH:-$state_dir/git-maintenance-health}
 lock_file=${FRONTALIERE_MAINTENANCE_LOCK:-$state_dir/git-maintenance.lock}
-pending_marker="$state_file.pending"
-legacy_state_file="$log_dir/git-maintenance-state"
-legacy_pending_marker="$legacy_state_file.pending"
 
 if ! /bin/mkdir -p "$log_dir"; then
   printf '%s cannot create log directory: %s\n' "git-maintenance-wrapper:" "$log_dir" >&2
@@ -195,7 +201,7 @@ else
   log "action=git_selected git=$git_bin git_version=$git_version"
 fi
 
-if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then
+if [ ! -d "$site_repo/.git" ] && [ ! -f "$site_repo/.git" ]; then
   log "action=abort reason=missing_repo repo=$repo schedule=$schedule exit_code=78"
   exit 78
 fi
@@ -205,7 +211,7 @@ if [ ! -x "$df_bin" ] || [ ! -x "$time_bin" ] || [ ! -x "$taskpolicy_bin" ] || [
   exit 69
 fi
 
-if ! /bin/mkdir -p "$(dirname -- "$state_file")" "$(dirname -- "$health_file")" "$(dirname -- "$lock_file")"; then
+if ! /bin/mkdir -p "$(dirname -- "$maintenance_state_base")" "$(dirname -- "$health_file")" "$(dirname -- "$lock_file")"; then
   log "action=abort reason=state_directory_failed state_dir=$state_dir exit_code=74"
   exit 74
 fi
@@ -239,6 +245,39 @@ PY
   exit "$lock_status"
 fi
 
+run_repo() {
+repo=$1
+repo_id=$2
+required=$3
+if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then
+  if [ "$required" -eq 1 ]; then
+    log "action=abort reason=missing_repo repo=$repo schedule=$schedule exit_code=78"
+    return 78
+  fi
+  log "action=skip reason=optional_repo_missing repo=$repo schedule=$schedule"
+  return 0
+fi
+if ! "$git_bin" -C "$repo" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+  if [ "$required" -eq 1 ]; then
+    log "action=abort reason=invalid_repo repo=$repo schedule=$schedule exit_code=78"
+    return 78
+  fi
+  log "action=skip reason=optional_repo_not_git repo=$repo schedule=$schedule"
+  return 0
+fi
+
+if [ "$repo_id" = articles ]; then
+  state_file="${maintenance_state_base}.articles"
+  health_prefix=articles_
+  legacy_state_file=''
+  legacy_pending_marker=''
+else
+  state_file=$maintenance_state_base
+  health_prefix=''
+  legacy_state_file="$log_dir/git-maintenance-state"
+  legacy_pending_marker="$legacy_state_file.pending"
+fi
+pending_marker="$state_file.pending"
 state_pending_since=0
 state_attempt_count=0
 state_last_attempt=0
@@ -246,6 +285,7 @@ state_last_success=0
 state_needs_save=0
 last_space_recovery_epoch=0
 last_consolidation_epoch=0
+health_since_epoch=0
 last_skip_step=''
 last_skip_reason=''
 started_epoch=$(/bin/date +%s)
@@ -256,15 +296,21 @@ read_health_value() {
   /usr/bin/awk -F= -v key="$1" '$1 == key { value = substr($0, index($0, "=") + 1) } END { if (value != "") print value }' "$health_file"
 }
 
-previous_value=$(read_health_value last_space_recovery_epoch)
+previous_value=$(read_health_value "${health_prefix}last_space_recovery_epoch")
 is_uint "$previous_value" && last_space_recovery_epoch=$previous_value
-previous_value=$(read_health_value last_consolidation_epoch)
+previous_value=$(read_health_value "${health_prefix}last_consolidation_epoch")
 is_uint "$previous_value" && last_consolidation_epoch=$previous_value
-last_skip_step=$(read_health_value last_skip_step)
-last_skip_reason=$(read_health_value last_skip_reason)
+previous_value=$(read_health_value "${health_prefix}health_since_epoch")
+if is_uint "$previous_value" && [ "$previous_value" -gt 0 ]; then
+  health_since_epoch=$previous_value
+else
+  health_since_epoch=$started_epoch
+fi
+last_skip_step=$(read_health_value "${health_prefix}last_skip_step")
+last_skip_reason=$(read_health_value "${health_prefix}last_skip_reason")
 
 load_state() {
-  if [ ! -f "$state_file" ] && [ -f "$legacy_state_file" ]; then
+  if [ -n "$legacy_state_file" ] && [ ! -f "$state_file" ] && [ -f "$legacy_state_file" ]; then
     migration_state="$state_file.$$"
     if /bin/cp "$legacy_state_file" "$migration_state" && /bin/chmod 600 "$migration_state" && /bin/mv -f "$migration_state" "$state_file"; then
       /bin/rm -f "$legacy_state_file"
@@ -275,7 +321,7 @@ load_state() {
       return 1
     fi
   fi
-  if [ ! -f "$pending_marker" ] && [ -f "$legacy_pending_marker" ]; then
+  if [ -n "$legacy_pending_marker" ] && [ ! -f "$pending_marker" ] && [ -f "$legacy_pending_marker" ]; then
     /bin/mv -f "$legacy_pending_marker" "$pending_marker" || return 1
   fi
   [ -f "$state_file" ] || return 0
@@ -346,15 +392,23 @@ PY
 
   temporary_health="$health_file.$$"
   if ! {
-    printf 'updated_epoch=%s\n' "$updated_epoch"
-    printf 'repo=%s\n' "$repo"
-    printf 'last_space_recovery_epoch=%s\n' "$last_space_recovery_epoch"
-    printf 'last_consolidation_epoch=%s\n' "$last_consolidation_epoch"
-    printf 'last_skip_step=%s\n' "$last_skip_step"
-    printf 'last_skip_reason=%s\n' "$last_skip_reason"
-    printf 'pack_count=%s\n' "$pack_count"
-    printf 'pack_bytes=%s\n' "$pack_bytes"
-    printf 'git_version=%s\n' "$git_version"
+    if [ -f "$health_file" ]; then
+      if [ "$health_prefix" = articles_ ]; then
+        /usr/bin/awk -F= '$1 !~ /^articles_/' "$health_file"
+      else
+        /usr/bin/awk -F= '$1 ~ /^articles_/' "$health_file"
+      fi
+    fi
+    printf '%supdated_epoch=%s\n' "$health_prefix" "$updated_epoch"
+    printf '%srepo=%s\n' "$health_prefix" "$repo"
+    printf '%slast_space_recovery_epoch=%s\n' "$health_prefix" "$last_space_recovery_epoch"
+    printf '%slast_consolidation_epoch=%s\n' "$health_prefix" "$last_consolidation_epoch"
+    printf '%shealth_since_epoch=%s\n' "$health_prefix" "$health_since_epoch"
+    printf '%slast_skip_step=%s\n' "$health_prefix" "$last_skip_step"
+    printf '%slast_skip_reason=%s\n' "$health_prefix" "$last_skip_reason"
+    printf '%spack_count=%s\n' "$health_prefix" "$pack_count"
+    printf '%spack_bytes=%s\n' "$health_prefix" "$pack_bytes"
+    printf '%sgit_version=%s\n' "$health_prefix" "$git_version"
   } >"$temporary_health"; then
     /bin/rm -f "$temporary_health"
     return 1
@@ -375,7 +429,7 @@ finish() {
   finished_at=$(timestamp)
   finished_epoch=$(/bin/date +%s)
   log "action=finish repo=$repo schedule=$schedule exit_code=$finish_code duration_seconds=$((finished_epoch - started_epoch)) finished_at=$finished_at"
-  exit "$finish_code"
+  return "$finish_code"
 }
 
 record_skip() {
@@ -387,19 +441,23 @@ record_skip() {
 load_state || {
   log "action=abort reason=state_migration_failed repo=$repo state_file=$state_file exit_code=74"
   finish 74
+  return $?
 }
 if [ "$state_needs_save" -eq 1 ] && ! save_state; then
   log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
   finish 74
+  return $?
 fi
 if [ "$schedule" = weekly ] && ! : >"$pending_marker"; then
   log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$pending_marker exit_code=74"
   finish 74
+  return $?
 fi
 if [ -f "$pending_marker" ] || [ "$schedule" = daily ]; then
   queue_pending_repack || {
     log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
     finish 74
+    return $?
   }
 fi
 
@@ -421,6 +479,7 @@ read_free_bytes() {
 if ! read_free_bytes; then
   log "action=abort reason=disk_probe_failed repo=$repo schedule=$schedule raw_free_kib=${free_kib:-} exit_code=74"
   finish 74
+  return $?
 fi
 
 started_epoch=$(/bin/date +%s)
@@ -471,6 +530,7 @@ fi
 
 if [ "$exit_code" -ne 0 ]; then
   finish "$exit_code"
+  return $?
 fi
 
 if [ "$pressure_valid" -eq 0 ]; then
@@ -485,6 +545,7 @@ else
   if ! read_free_bytes; then
     log "action=abort reason=disk_probe_failed_after_space_recovery repo=$repo schedule=$schedule raw_free_kib=${free_kib:-} exit_code=74"
     finish 74
+    return $?
   fi
   if [ "$free_bytes" -lt "$min_consolidation_bytes" ]; then
     record_skip consolidation low_disk "available_bytes=$free_bytes minimum_bytes=$min_consolidation_bytes minimum_gib=$min_consolidation_gib"
@@ -531,6 +592,7 @@ else
         save_state || {
           log "action=abort reason=state_write_failed repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
           finish 74
+          return $?
         }
         configured=$("$git_bin" -C "$repo" config --get frontaliere.maintenance.midxBatchSize 2>/dev/null) || configured=''
         batch_unit=${configured#"${configured%?}"}
@@ -574,6 +636,7 @@ else
           save_state || {
             log "action=abort reason=state_write_failed_after_repack repo=$repo schedule=$schedule state_file=$state_file exit_code=74"
             finish 74
+            return $?
           }
           log "action=repack_complete repo=$repo schedule=$schedule attempts=$completed_attempts pending_age_seconds=$completed_pending_age last_success=$state_last_success"
         fi
@@ -583,3 +646,14 @@ else
 fi
 
 finish "$exit_code"
+return $?
+}
+
+overall_exit_code=0
+run_repo "$site_repo" site 1
+repo_exit_code=$?
+[ "$repo_exit_code" -eq 0 ] || overall_exit_code=$repo_exit_code
+run_repo "$articles_repo" articles 0
+repo_exit_code=$?
+[ "$repo_exit_code" -eq 0 ] || { [ "$overall_exit_code" -ne 0 ] || overall_exit_code=$repo_exit_code; }
+exit "$overall_exit_code"
