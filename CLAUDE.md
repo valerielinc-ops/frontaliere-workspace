@@ -430,6 +430,9 @@ nuovo. Uno snapshot va in un tag `snapshot/<nome>`, mai in una PR draft usata
 come archivio. La procedura completa e il caso storico sono nella sezione
 `Lo stato orfano di una sessione morta` del riferimento.
 
+Per reaper dei processi residui, misure del disco e i relativi LaunchAgent,
+consulta `Processi orfani e sentinella del disco` nel riferimento operativo.
+
 ## Hook della root
 
 Gli hook devono restare attivi dalla root in `.claude/settings.json` e in

@@ -850,6 +850,71 @@ una notifica macOS al massimo ogni 6 ore. Non uccide processi.
 **solo il reboot libera la memoria**. Il bug risulta corretto in macOS 27.0
 secondo segnalazioni di utenti, non da note di rilascio Apple.
 
+## Processi orfani e sentinella del disco
+
+**Misura iniziale, 19/11/2026 (Mac agenti).** Dopo sessioni terminate senza
+`SessionEnd` erano rimasti 67 `app-server-broker.mjs serve` con PPID 1, fino a
+44 giorni, insieme ai rispettivi `codex app-server` e ai figli MCP: circa 35
+GiB di memoria e swap pieno (24/24 GiB). Chiudere i broker inattivi ha portato
+lo spazio libero da 17 a 41 GiB. C'erano anche 40 `git fsmonitor--daemon`
+orfani, fino a 36 giorni, e tre `tmp_pack_*` nel repo root per 5,1 GiB.
+
+La verifica read-only del 19/11 ha trovato quattro broker del Mac agenti con
+PPID 1, età oltre due ore e quattro socket Unix ciascuno. Due campioni a 31
+secondi hanno mantenuto gli stessi PID e conteggi; `lsof` ha mostrato tre
+socket collegati interni e un listener, senza socket aggiunti dai client. Su
+Git 2.56, in un repository temporaneo, `git status` ha riavviato il daemon
+fsmonitor dopo uno stop controllato. Il reaper quindi protegge processi con un
+padre vivo o di un altro utente, e non agisce sul proprio albero.
+
+**Reaper.** `bin/agent-orphan-reaper` è dry-run senza argomenti; stampa il
+conteggio e registra una riga JSON per azione in
+`~/Library/Logs/frontaliere/agent-orphan-reaper.log`. `--apply` abilita le
+azioni. Un broker deve avere PPID 1, età di almeno due ore e non più di quattro
+socket Unix in due campioni separati da almeno 30 secondi; riceve SIGTERM e,
+dopo 15 secondi, SIGKILL se il broker o un discendente è ancora vivo. MCP e
+`codex app-server` sono candidati quando restano orfani almeno due ore.
+`git fsmonitor--daemon` è candidato con PPID 1 se ha almeno 24 ore o se la
+directory di lavoro non esiste più. Nei repository root, sito, corpus e Reddit
+vengono rimossi solo `tmp_pack_*` e `tmp_idx_*` più vecchi di sei ore che
+`lsof` conferma non aperti. Il marker
+`~/.local/state/frontaliere/agent-orphan-reaper.disabled` sospende il reaper.
+
+```bash
+bin/agent-orphan-reaper                 # solo misura e dry-run
+bin/agent-orphan-reaper --apply         # azioni manuali esplicite
+mkdir -p ~/.local/state/frontaliere && touch ~/.local/state/frontaliere/agent-orphan-reaper.disabled
+rm ~/.local/state/frontaliere/agent-orphan-reaper.disabled
+```
+
+**Sentinella.** `bin/disk-sentinel` aggiunge ogni 15 minuti una riga TSV in
+`~/Library/Logs/frontaliere/disk-sentinel.tsv`: spazio disponibile sul volume
+dati, swap usato/totale, pressione memoria stimata da `memory_pressure`, pack
+del sito, mtime del multi-pack-index e campi presenti in
+`~/.local/state/frontaliere/git-maintenance-health`. Le misure non usano `du`.
+`disk-sentinel.alert` conserva l'ultimo report con notifiche macOS, al massimo
+una ogni sei ore per tipo: meno di 10 GiB liberi, swap oltre il 75%, un nuovo
+pack promisor con una sola riga `<oid> <oid>` il cui primo oggetto è un commit,
+recupero spazio R1 più vecchio di sei ore o consolidazione più vecchia di 72
+ore. Per il pack lazy-fetch l'alert include OID, messaggio del commit e la
+catena dei processi `git`, `codex` e `claude` dello stesso utente. La discovery
+sceglie il Git più recente trovato nel PATH o nelle installazioni utente; per
+classificare il pack deve essere almeno 2.44.
+
+Entrambi i LaunchAgent girano ogni 15 minuti con `ProcessType=Background`, I/O
+a bassa priorità e `Nice 10`. `bin/workspace-autoupdate run` riconcilia i plist
+quando il checkout root è allineato a `origin/main`; se il Mac non ha ancora
+l'autoupdate, installali e caricali con:
+
+```bash
+bin/workspace-autoupdate install
+launchctl print "gui/$(id -u)/ch.frontaliere.agent-orphan-reaper"
+launchctl print "gui/$(id -u)/ch.frontaliere.disk-sentinel"
+```
+
+I test dei due strumenti usano processi, `lsof`, Git, `osascript` e `launchctl`
+finti e girano anche su Linux.
+
 ## Host agenti remoto (MacBook Pro 2017, macOS 13)
 
 Dal 2026-10-02 un secondo Mac, `MacBookPro14,1` (i5-7360U: **2 core fisici**,

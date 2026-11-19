@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -u
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+node_bin=$(command -v node 2>/dev/null) || {
+  printf '%s\n' 'disk-sentinel: node non trovato nel PATH' >&2
+  exit 69
+}
+exec "$node_bin" "$script_dir/disk-sentinel.mjs" "$@"
