@@ -650,11 +650,21 @@ function verify(repoInfo, state, measurement) {
   verifyObjectPresence(repoInfo, measurement.localObjectOids, {
     label: 'verifica oggetti dei commit solo locali',
   });
+  // `git status` must still succeed with lazy fetch off (git() always passes
+  // --no-lazy-fetch and throws on a non-zero exit): a missing object it needs
+  // fails here. Equality with the status captured at the start is NOT required:
+  // a run takes one to two hours on the agent host, where agents keep editing
+  // the 30 worktrees, and status never reads blobs, so a different output is
+  // concurrent work, not corruption. It is only reported.
+  const changedStatuses = [];
   for (const worktree of state.worktrees) {
     const result = git(worktree.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       gitBin: repoInfo.gitBin, raw: true, encoding: null,
     });
-    if (!result.stdout.equals(state.statuses.get(worktree.path))) throw new Error(`status cambiato nel worktree ${worktree.path}`);
+    if (!result.stdout.equals(state.statuses.get(worktree.path))) changedStatuses.push(worktree.path);
+  }
+  if (changedStatuses.length) {
+    process.stderr.write(`git-partial-compact: status cambiato durante la run (lavoro concorrente) in ${changedStatuses.length} worktree: ${changedStatuses.join(', ')}\n`);
   }
   verifyObjectPresence(repoInfo, measurement.localBlobOids, { label: 'blob locale o d’indice non risolvibile' });
 }

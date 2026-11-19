@@ -469,6 +469,39 @@ process.exit(result.status === null ? 1 : result.status);
   assert.match(readFileSync(join(root, 'state', 'last'), 'utf8'), /result=failure/);
 });
 
+test('una modifica concorrente in un worktree durante la run non annulla la compattazione', { skip: INTEGRATION_SKIP }, (t) => {
+  // Sul Mac agenti una run dura 1-2 ore mentre gli agenti lavorano nei
+  // worktree: lo status cambia per lavoro concorrente, non per corruzione.
+  const root = tempRoot(t, 'git-partial-compact-concurrent-');
+  const fixture = createFixture(root, { partial: true });
+  const sentinel = join(root, 'edited-once');
+  const fakeGit = join(root, 'git-edit-during-run');
+  writeFileSync(fakeGit, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('multi-pack-index') && args.includes('write') && !fs.existsSync(process.env.R4_EDIT_SENTINEL)) {
+  fs.writeFileSync(process.env.R4_EDIT_SENTINEL, 'edited');
+  fs.appendFileSync(process.env.R4_EDIT_TARGET, 'concurrent agent edit\\n');
+}
+const result = spawnSync(process.env.R4_REAL_GIT, args, { stdio: 'inherit', env: process.env });
+process.exit(result.status === null ? 1 : result.status);
+`, { mode: 0o700 });
+  chmodSync(fakeGit, 0o700);
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {
+    FRONTALIERE_GIT_BIN: fakeGit,
+    R4_REAL_GIT: GIT,
+    R4_EDIT_SENTINEL: sentinel,
+    R4_EDIT_TARGET: join(fixture.repo, 'notes', 'concurrent-agent.txt'),
+  }, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).result, 'success');
+  assert.equal(existsSync(sentinel), true, 'the concurrent edit happened mid-run');
+  assert.match(result.stderr, /status cambiato durante la run \(lavoro concorrente\)/);
+  assert.match(readFileSync(join(fixture.repo, 'notes', 'concurrent-agent.txt'), 'utf8'), /concurrent agent edit/);
+  assert.equal(existsObject(fixture.repo, fixture.oldBlob), false, 'historical remote blob was still dropped');
+});
+
 test('apply rifiuta operazioni Git in corso e spazio insufficiente senza spostare pack', { skip: INTEGRATION_SKIP }, (t) => {
   const root = tempRoot(t, 'git-partial-compact-guards-');
   const fixture = createFixture(root);
