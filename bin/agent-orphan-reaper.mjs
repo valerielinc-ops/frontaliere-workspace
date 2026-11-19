@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -53,7 +53,8 @@ export function isBroker(process) {
 // app-server daemon pid-update-loop`, and its child `... app-server
 // --remote-control ...`. Measured on the agent host on 2026-11-19 (50 days old).
 export function isCodexAppServerDaemon(command) {
-  return /\/app-server-daemon\//.test(command)
+  return /\/\.codex\/packages\/[^/]+\/releases\/[^/]+\//.test(command)
+    || /\/app-server-daemon\//.test(command)
     || /(?:^|[\s/])codex\s+app-server\s+daemon(?:\s|$)/.test(command)
     || /\s--remote-control(?:\s|$)/.test(command);
 }
@@ -245,6 +246,64 @@ function listOldTemporaryPacks(packDirectories, { nowMs, fs = { readdirSync, lst
   return candidates;
 }
 
+function parseReleaseVersion(name) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(name);
+  if (!match) return null;
+  return { name, version: match.slice(1, 4).map(Number) };
+}
+
+function compareReleaseVersions(left, right) {
+  for (let index = 0; index < 3; index++) {
+    if (left.version[index] !== right.version[index]) return right.version[index] - left.version[index];
+  }
+  if (left.name === right.name) return 0;
+  return left.name < right.name ? 1 : -1;
+}
+
+function releaseUsedByProcess(releasePath, processes, uid) {
+  const marker = `${releasePath}/`;
+  return processes.some((process) => process.uid === uid
+    && (process.command === releasePath || String(process.command).includes(marker)));
+}
+
+function codexReleaseCandidates(homeDir, processes, uid, fs) {
+  const candidates = [];
+  const readLink = fs.readlinkSync || readlinkSync;
+  for (const packageName of ['standalone', 'app-server-daemon']) {
+    const packageDir = join(homeDir, '.codex', 'packages', packageName);
+    const releaseDir = join(packageDir, 'releases');
+    const currentPath = join(packageDir, 'current');
+    let names;
+    try { names = fs.readdirSync(releaseDir); } catch { continue; }
+
+    let currentTarget = '';
+    try { currentTarget = resolve(packageDir, readLink(currentPath)); } catch {
+      // Keep operating when no current symlink exists; named live releases stay protected below.
+    }
+
+    const releases = [];
+    for (const name of names) {
+      const version = parseReleaseVersion(name);
+      if (!version) continue;
+      const path = join(releaseDir, name);
+      try {
+        if (!fs.lstatSync(path).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      releases.push({ packageName, path, name, version });
+    }
+    releases.sort(compareReleaseVersions);
+    const newest = new Set(releases.slice(0, 2).map((release) => release.path));
+    for (const release of releases) {
+      if (release.path === currentTarget || newest.has(release.path)) continue;
+      if (releaseUsedByProcess(release.path, processes, uid)) continue;
+      candidates.push({ ...release, target: 'codex_release', reason: 'unused_old_codex_release' });
+    }
+  }
+  return candidates;
+}
+
 function processCandidates(processes, uid, excluded, cwdReader, pathExists) {
   const candidates = [];
   for (const process of processes) {
@@ -358,7 +417,7 @@ export async function runReaper(options = {}) {
   const stateDir = options.stateDir || join(homeDir, '.local', 'state', 'frontaliere');
   const disabledPath = options.disabledPath || join(stateDir, 'agent-orphan-reaper.disabled');
   const actions = [];
-  const fs = options.fs || { existsSync, readdirSync, lstatSync, rmSync };
+  const fs = options.fs || { existsSync, readdirSync, lstatSync, readlinkSync, rmSync };
   if (fs.existsSync(disabledPath)) return { optedOut: true, actions };
 
   const runCommand = options.runCommand || run;
@@ -448,41 +507,118 @@ export async function runReaper(options = {}) {
 
   if (!gitBin) {
     record(actions, logPath, { action: 'skip', reason: 'git_not_found_for_temp_pack_scan' });
+  } else {
+    const packDirectories = commonPackDirectories({ workspaceRoot, gitBin, runCommand, exists: fs.existsSync });
+    const temporaryPacks = listOldTemporaryPacks(packDirectories, {
+      nowMs,
+      fs,
+      openedFile: (filePath) => openedByProcess(filePath, { lsofBin, runCommand }),
+    });
+    for (const candidate of temporaryPacks) {
+      if (apply) {
+        let stillEligible = false;
+        try {
+          const stat = fs.lstatSync(candidate.filePath);
+          stillEligible = stat.isFile()
+            && nowMs - stat.mtimeMs > TEMP_PACK_MIN_AGE_MS
+            && openedByProcess(candidate.filePath, { lsofBin, runCommand }) === false;
+        } catch {
+          stillEligible = false;
+        }
+        if (!stillEligible) {
+          record(actions, logPath, { action: 'skip', target: 'temporary_git_pack', reason: 'changed_open_or_unverifiable', file: candidate.filePath });
+          continue;
+        }
+      }
+      record(actions, logPath, {
+        action: apply ? 'delete' : 'would_delete',
+        target: 'temporary_git_pack',
+        file: candidate.filePath,
+        age_ms: candidate.ageMs,
+      });
+      if (apply) {
+        try { fs.rmSync(candidate.filePath); } catch (error) {
+          record(actions, logPath, { action: 'delete_failed', file: candidate.filePath, detail: quoteLogValue(error.message) });
+        }
+      }
+    }
+  }
+  let releaseProcesses;
+  try {
+    releaseProcesses = listProcesses();
+  } catch (error) {
+    record(actions, logPath, {
+      action: 'skip',
+      target: 'codex_release',
+      reason: 'process_table_unavailable',
+      detail: quoteLogValue(error.message),
+    });
     return { optedOut: false, actions };
   }
-  const packDirectories = commonPackDirectories({ workspaceRoot, gitBin, runCommand, exists: fs.existsSync });
-  const temporaryPacks = listOldTemporaryPacks(packDirectories, {
-    nowMs,
-    fs,
-    openedFile: (filePath) => openedByProcess(filePath, { lsofBin, runCommand }),
-  });
-  for (const candidate of temporaryPacks) {
+  const oldReleases = codexReleaseCandidates(homeDir, releaseProcesses, uid, fs);
+  for (const candidate of oldReleases) {
     if (apply) {
-      let stillEligible = false;
+      let currentProcessesForRelease;
       try {
-        const stat = fs.lstatSync(candidate.filePath);
-        stillEligible = stat.isFile()
-          && nowMs - stat.mtimeMs > TEMP_PACK_MIN_AGE_MS
-          && openedByProcess(candidate.filePath, { lsofBin, runCommand }) === false;
-      } catch {
-        stillEligible = false;
+        currentProcessesForRelease = listProcesses();
+      } catch (error) {
+        record(actions, logPath, {
+          action: 'skip',
+          target: 'codex_release',
+          reason: 'process_table_unavailable',
+          package: candidate.packageName,
+          release: candidate.name,
+          detail: quoteLogValue(error.message),
+        });
+        continue;
       }
+      const stillEligible = codexReleaseCandidates(homeDir, currentProcessesForRelease, uid, fs)
+        .some((entry) => entry.path === candidate.path);
       if (!stillEligible) {
-        record(actions, logPath, { action: 'skip', target: 'temporary_git_pack', reason: 'changed_open_or_unverifiable', file: candidate.filePath });
+        record(actions, logPath, {
+          action: 'skip',
+          target: 'codex_release',
+          reason: 'became_current_in_use_or_recent',
+          package: candidate.packageName,
+          release: candidate.name,
+          path: candidate.path,
+        });
+        continue;
+      }
+      try {
+        const stat = fs.lstatSync(candidate.path);
+        if (!stat.isDirectory()) {
+          record(actions, logPath, {
+            action: 'skip',
+            target: 'codex_release',
+            reason: 'release_not_directory',
+            package: candidate.packageName,
+            release: candidate.name,
+            path: candidate.path,
+          });
+          continue;
+        }
+        fs.rmSync(candidate.path, { recursive: true });
+      } catch (error) {
+        record(actions, logPath, {
+          action: 'delete_failed',
+          target: 'codex_release',
+          package: candidate.packageName,
+          release: candidate.name,
+          path: candidate.path,
+          detail: quoteLogValue(error.message),
+        });
         continue;
       }
     }
     record(actions, logPath, {
       action: apply ? 'delete' : 'would_delete',
-      target: 'temporary_git_pack',
-      file: candidate.filePath,
-      age_ms: candidate.ageMs,
+      target: 'codex_release',
+      reason: candidate.reason,
+      package: candidate.packageName,
+      release: candidate.name,
+      path: candidate.path,
     });
-    if (apply) {
-      try { fs.rmSync(candidate.filePath); } catch (error) {
-        record(actions, logPath, { action: 'delete_failed', file: candidate.filePath, detail: quoteLogValue(error.message) });
-      }
-    }
   }
   return { optedOut: false, actions };
 }
@@ -502,5 +638,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(64);
   }
   const result = await runReaper({ apply: args.includes('--apply') });
-  process.stdout.write(`agent-orphan-reaper mode=${args.includes('--apply') ? 'apply' : 'dry-run'} opted_out=${result.optedOut} actions=${result.actions.length}\n`);
+  const mode = args.includes('--apply') ? 'apply' : 'dry-run';
+  process.stdout.write(`agent-orphan-reaper mode=${mode} opted_out=${result.optedOut} actions=${result.actions.length}\n`);
+  for (const action of result.actions) {
+    if (action.target !== 'codex_release' || !['would_delete', 'delete'].includes(action.action)) continue;
+    process.stdout.write(`codex-release action=${action.action} package=${action.package} release=${action.release} path=${action.path}\n`);
+  }
 }
