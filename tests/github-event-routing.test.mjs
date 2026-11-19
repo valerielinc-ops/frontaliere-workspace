@@ -15,6 +15,7 @@ import {
 
 const SITE_REPO = 'valerielinc-ops/frontaliere-si-o-no';
 const CORPUS_REPO = 'nanakokyobashi-rgb/frontaliere-articles';
+const SCHEDULER_REPO = 'nanakokyobashi-rgb/frontaliere-reddit-devvit';
 const WORKSPACE_REPO = 'valerielinc-ops/frontaliere-workspace';
 const OPERATOR_REPO = 'valerielinc-ops/frontaliere-operator';
 
@@ -54,6 +55,7 @@ test('la configurazione versionata espone solo le route production attese', () =
   assert.deepEqual(Object.fromEntries(routing.routes), {
     [SITE_REPO]: 'default',
     [CORPUS_REPO]: 'nanako',
+    [SCHEDULER_REPO]: 'nanako',
     'nanakokyobashi-rgb/frontaliere-articolifrontaliere-it': 'nanako',
     'nanakokyobashi-rgb/frontaliere-articolifrontaliere-en': 'nanako',
     'nanakokyobashi-rgb/frontaliere-articolifrontaliere-de': 'nanako',
@@ -73,6 +75,17 @@ test('la route del repository operativo accetta default e rifiuta nanako', () =>
     (error) => error.code === 'event_identity_mismatch'
       && error.actualIdentity === 'nanako'
       && error.expectedIdentity === 'default',
+  );
+});
+
+test('la route del repository scheduler accetta nanako e rifiuta default', () => {
+  const spec = { repo: SCHEDULER_REPO, resource: 'pull_request' };
+  assert.equal(assertEventIdentity({ spec, actualIdentity: 'nanako' }).expectedIdentity, 'nanako');
+  assert.throws(
+    () => assertEventIdentity({ spec, actualIdentity: 'default' }),
+    (error) => error.code === 'event_identity_mismatch'
+      && error.actualIdentity === 'default'
+      && error.expectedIdentity === 'nanako',
   );
 });
 
