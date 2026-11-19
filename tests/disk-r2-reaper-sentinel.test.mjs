@@ -649,3 +649,77 @@ esac
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('workspace-autoupdate installa e carica la compattazione settimanale solo quando serve', () => {
+  const dir = tempDir('r5b-autoupdate-compact-');
+  try {
+    const workspace = join(dir, 'workspace');
+    const tools = join(dir, 'tools');
+    const home = join(dir, 'home');
+    const launchAgents = join(home, 'Library', 'LaunchAgents');
+    const loadedDir = join(dir, 'loaded');
+    const launchLog = join(dir, 'launchctl.log');
+    const gitBin = join(tools, 'git');
+    const launchctlBin = join(tools, 'launchctl');
+    const plutilBin = join(tools, 'plutil');
+    mkdirSync(join(workspace, 'bin'), { recursive: true });
+    mkdirSync(join(workspace, 'config', 'launchd'), { recursive: true });
+    mkdirSync(join(workspace, 'frontaliere-si-o-no'), { recursive: true });
+    mkdirSync(tools, { recursive: true });
+    mkdirSync(loadedDir, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    copyFileSync(AUTUPDATE, join(workspace, 'bin', 'workspace-autoupdate'));
+    chmodSync(join(workspace, 'bin', 'workspace-autoupdate'), 0o755);
+    copyFileSync(join(ROOT, 'bin', 'git-partial-compact'), join(workspace, 'bin', 'git-partial-compact'));
+    const template = join(workspace, 'config', 'launchd', 'ch.frontaliere.git-partial-compact.plist');
+    copyFileSync(join(ROOT, 'config', 'launchd', 'ch.frontaliere.git-partial-compact.plist'), template);
+    symlinkSync(process.execPath, join(tools, 'node'));
+    writeFileSync(gitBin, '#!/bin/sh\ncase "$*" in *"symbolic-ref --short -q HEAD"*) echo main;; *"rev-parse --verify -q origin/main"*) echo 0123456789012345678901234567890123456789;; *"rev-parse HEAD"*) echo 0123456789012345678901234567890123456789;; *) exit 0;; esac\n', { mode: 0o755 });
+    writeFileSync(plutilBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(launchctlBin, `#!/bin/sh
+operation=$1
+label=${'${'}2##*/}
+if [ "$operation" = bootstrap ]; then label=${'${'}3##*/}; label=${'${'}label%.plist}; fi
+case "$operation" in
+  print) test -f "$FAKE_LOADED_DIR/$label" ;;
+  bootout) printf 'bootout %s\\n' "$label" >>"$FAKE_LAUNCH_LOG"; rm -f "$FAKE_LOADED_DIR/$label" ;;
+  bootstrap) printf 'bootstrap %s\\n' "$label" >>"$FAKE_LAUNCH_LOG"; : >"$FAKE_LOADED_DIR/$label" ;;
+  *) exit 2 ;;
+esac
+`, { mode: 0o755 });
+    for (const path of [gitBin, plutilBin, launchctlBin]) chmodSync(path, 0o755);
+    const env = {
+      HOME: home,
+      PATH: `${tools}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      AU_WORKSPACE: workspace,
+      AU_LOG_DIR: join(dir, 'logs'),
+      AU_LAUNCH_AGENTS_DIR: launchAgents,
+      AU_GIT_BIN: gitBin,
+      AU_PLUTIL_BIN: plutilBin,
+      AU_LAUNCHCTL_BIN: launchctlBin,
+      FAKE_LOADED_DIR: loadedDir,
+      FAKE_LAUNCH_LOG: launchLog,
+    };
+    const run = () => spawnSync('/bin/bash', [join(workspace, 'bin', 'workspace-autoupdate'), 'run'], { encoding: 'utf8', env });
+    const logText = () => { try { return readFileSync(join(dir, 'logs', 'workspace-autoupdate.log'), 'utf8'); } catch { return ''; } };
+    const first = run();
+    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}\n${logText()}`);
+    const plist = join(launchAgents, 'ch.frontaliere.git-partial-compact.plist');
+    assert.equal(existsSync(plist), true, logText());
+    const installed = readFileSync(plist, 'utf8');
+    assert.match(installed, /<string>--if-needed<\/string>/);
+    assert.doesNotMatch(installed, /__[A-Z_]+__/, 'nessun segnaposto rimasto');
+    const launchCalls = () => { try { return readFileSync(launchLog, 'utf8'); } catch { return ''; } };
+    assert.equal((launchCalls().match(/bootstrap ch\.frontaliere\.git-partial-compact/g) || []).length, 1, `${launchCalls()}\n${logText()}`);
+
+    assert.equal(run().status, 0);
+    assert.equal((launchCalls().match(/bootstrap ch\.frontaliere\.git-partial-compact/g) || []).length, 1, 'nessun ricaricamento se invariato');
+
+    writeFileSync(template, readFileSync(template, 'utf8').replace('<integer>30</integer>', '<integer>31</integer>'));
+    assert.equal(run().status, 0);
+    assert.equal((launchCalls().match(/bootstrap ch\.frontaliere\.git-partial-compact/g) || []).length, 2, launchCalls());
+    assert.match(launchCalls(), /bootout ch\.frontaliere\.git-partial-compact/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
