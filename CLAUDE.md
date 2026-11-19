@@ -292,6 +292,23 @@ risposta ancora necessaria restano espliciti, senza promettere autonomia totale.
 
 ## Comandi e worktree
 
+Il supervisor e il futuro dispatcher usano il resource guard per i lanci
+LLM non interattivi gestiti dal workspace. Per esempio, da un worktree:
+
+```bash
+node ~/Projects/frontaliere/bin/agent-resource-guard.mjs --run-llm -- codex exec 'Prompt di esempio'
+node ~/Projects/frontaliere/bin/agent-resource-guard.mjs --run-llm -- claude -p 'Prompt di esempio'
+```
+
+I lanci gestiti condividono due slot tra root e worktree. L'opzione
+`--reserve`, prima di `--`, consente al massimo una sessione gestita di
+riserva, che occupa uno dei due slot. Il daemon Claude gestisce separatamente
+il proprio pool. `claude --bg` è asincrono e va avviato fuori da questo runner.
+Il runner richiede `python3` su macOS o Linux. Restituisce 75 quando il lease
+è occupato, 2 per sintassi CLI errata e 1 per errori del runner. Dopo l'avvio
+propaga il codice del programma, o 128 più il numero del segnale se termina
+per segnale.
+
 Corpus/API:
 
 ```bash
