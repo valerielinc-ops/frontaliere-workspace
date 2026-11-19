@@ -16,6 +16,7 @@ import {
 const SITE_REPO = 'valerielinc-ops/frontaliere-si-o-no';
 const CORPUS_REPO = 'nanakokyobashi-rgb/frontaliere-articles';
 const WORKSPACE_REPO = 'valerielinc-ops/frontaliere-workspace';
+const OPERATOR_REPO = 'valerielinc-ops/frontaliere-operator';
 
 function fakeResponse(body) {
   return {
@@ -58,9 +59,21 @@ test('la configurazione versionata espone solo le route production attese', () =
     'nanakokyobashi-rgb/frontaliere-articolifrontaliere-de': 'nanako',
     'nanakokyobashi-rgb/frontaliere-articolifrontaliere-fr': 'nanako',
     [WORKSPACE_REPO]: 'default',
+    [OPERATOR_REPO]: 'default',
     'anthropics/oss-scanner': 'default',
     'valerielinc-ops/villacomo': 'default',
   });
+});
+
+test('la route del repository operativo accetta default e rifiuta nanako', () => {
+  const spec = { repo: OPERATOR_REPO };
+  assert.equal(assertEventIdentity({ spec, actualIdentity: 'default' }).expectedIdentity, 'default');
+  assert.throws(
+    () => assertEventIdentity({ spec, actualIdentity: 'nanako' }),
+    (error) => error.code === 'event_identity_mismatch'
+      && error.actualIdentity === 'nanako'
+      && error.expectedIdentity === 'default',
+  );
 });
 
 test('canonicalizza le identità prima della selezione del coordinatore', () => {
