@@ -698,6 +698,31 @@ liberi, un bersaglio non risolvibile non viene bloccato (il guard e' fail-open).
 Override del proprietario: `FRONTALIERE_RESOURCE_GUARD_BYPASS=1` nell'ambiente
 della sessione.
 
+**OID e scansioni storiche nei cloni parziali.** Il guard pre-bash controlla i
+comandi Git che leggono oggetti (`checkout`, `switch`, `reset`, `worktree add`,
+`branch`, `merge`, `rebase`, `diff`, `log`, `show`, `cat-file` e gli altri
+comandi di revisione) quando il repository dichiara un promisor o
+`extensions.partialClone`. Se un argomento usa un OID completo SHA-1 (40
+esadecimali) o SHA-256 (64) assente in locale, il comando viene bloccato prima
+che Git possa fare il lazy fetch: su questo clone il costo misurato è circa
+450 MB, cioè tutta la storia. Prima si esegue `git fetch origin
+refs/pull/<N>/head` per la head di una PR oppure `git fetch origin <oid>`, poi
+si ripete il comando. `fetch`, `push`, `ls-remote`, `clone`, `remote` e `config`
+sono esclusi. Per la sonda il guard cerca un Git >= 2.44 nel `PATH` e nei path
+di installazione comuni; se non lo trova lascia passare il comando senza
+tentare `cat-file` con un Git vecchio.
+I cloni completi non sono coinvolti. L'override del proprietario resta
+`FRONTALIERE_RESOURCE_GUARD_BYPASS=1`.
+
+Nei cloni parziali vengono bloccati anche `git log`/`whatchanged` con
+`-p`/`--patch`/`-S`/`-G`/`--follow` e `git blame` senza limite: quei comandi
+scaricano blob storici e li lasciano nei pack. Limita il blame con `-L`,
+`-n`/`--max-count`, `--since`/`--after` o un range selettivo; limita il log con
+`--max-count` o un range breve senza `-p`/`-S`/`-G`/`--follow`. Un OID costruito a
+runtime, per esempio con `$(gh pr view … --json headRefOid -q …)`, non compare nel testo ricevuto dal guard e non è verificabile
+prima dell'esecuzione: in quel caso la sentinella disco R2 segnala il pack e i
+processi che lo hanno causato.
+
 Con `--no-cone` si puo' re-includere **un singolo file**, non solo una
 sottocartella — utile quando ne serve uno solo di quei 2,3 GB:
 
