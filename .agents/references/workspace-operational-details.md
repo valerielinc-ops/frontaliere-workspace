@@ -1120,6 +1120,78 @@ di picco, a nice 10) ha portato i pack a 1.887 e il multi-pack-index a
 giorno: `cat-file` di un tree da 163 a 38 ms, `log -1 -- <path>` da 438 a
 128 ms, `merge-base` da 229 a 160 ms.
 
+### Compattare lo store Git parziale del sito
+
+Misure del 2026-11-19: sul Mac agenti il clone `blob:none` aveva 4.558 pack
+per 74,4 GiB. In due pack da circa 20 GiB, un campione di un oggetto ogni
+1.000 ha trovato circa il 95% del peso nei blob, soprattutto versioni storiche
+di JSON in `data/` e `public/`; commit e tree della storia completa pesano
+circa 0,45 GiB. Tenendo commit, tree e blob ancora necessari solo ai ref e agli
+indici locali, lo store atteso è circa 1-2 GiB. Sul Mac principale il clone è
+completo, con 89 GiB di pack e 3,5 GiB liberi; la conversione è necessaria
+perché quello store continua a crescere con la storia.
+
+`bin/git-partial-compact` richiede Git >= 2.44 e scopre l'eseguibile disponibile
+invece di assumere che `/usr/bin/git` sia abbastanza nuovo. Senza `--apply`
+stampa byte e numero dei pack, ref locali, oggetti e commit/blob locali stimati,
+spazio richiesto e libero e il piano senza modificare il repository. La stima dello
+spazio usa le dimensioni non compresse degli oggetti più un margine, quindi è
+conservativa.
+
+L'insieme viene enumerato all'inizio da tutti i ref, dagli HEAD e reflog di ogni
+worktree e dai reflog delle ref (incluso `refs/stash`). Un pack promisor conserva
+tutti i commit, tree e tag raggiungibili, scritto con `--revs --filter=blob:none
+--missing=allow-any` e lazy fetch disabilitato. Un pack normale conserva i blob
+raggiungibili solo dai commit non raggiungibili da
+`refs/remotes/<promisor>/*` e i blob non `skip-worktree` degli indici di ogni
+worktree. I blob già assenti e le loose objects non vengono scritti né rimossi.
+
+Prima di scrivere, il comando acquisisce il lock kernel `flock` condiviso con
+la manutenzione e rifiuta operazioni Git in corso, `gc.pid`, lock MIDX/commit-
+graph occupati o spazio insufficiente. Per compatibilità con il wrapper già
+installato acquisisce sia `${FRONTALIERE_MAINTENANCE_LOCK:-
+~/.local/state/frontaliere/git-maintenance.lock}` sia il suo fallback attuale
+`~/Library/Logs/frontaliere/git-maintenance.lock`. I nuovi pack vengono creati
+prima di spostare i pack presenti all'avvio e i file MIDX nella quarantena
+`objects/pack/pack-quarantine-<epoch>`. Poi riscrive MIDX e commit-graph e
+verifica ref, commit/tree raggiungibili, oggetti dei commit solo locali e lo
+status porcelain esatto di ogni worktree, tutto con lazy fetch spento. Un errore
+di verifica ripristina i pack e la configurazione della conversione, riscrive
+MIDX e termina con errore. La quarantena si elimina dopo la verifica, salvo
+`--keep-quarantine`.
+
+Sul Mac agenti, prima controlla il piano e poi applica:
+
+```bash
+bin/git-partial-compact --repo frontaliere-si-o-no --json
+bin/git-partial-compact --repo frontaliere-si-o-no --apply
+```
+
+Sul Mac principale il repository completo va prima reso sparse, escludendo
+`public/` e `data/` non necessari nel checkout principale: l'indice pieno può
+richiedere diversi GiB di blob locali e il comando rifiuta l'apply se lo spazio
+stimato non entra. Poi controlla la conversione e applicala:
+
+```bash
+bin/git-partial-compact --repo frontaliere-si-o-no --convert --json
+bin/git-partial-compact --repo frontaliere-si-o-no --convert --apply
+```
+
+`--if-needed` fa il lavoro solo in un clone parziale con pack attivi maggiori
+di `max(10 GiB, 4 × byte_after dell'ultima compattazione riuscita)`. Il plist
+`config/launchd/ch.frontaliere.git-partial-compact.plist` esegue
+`--apply --if-needed` la domenica alle 05:30, come processo Background con
+`LowPriorityIO` e `Nice 10`. `bin/git-partial-compact install` e `uninstall`
+scrivono o rimuovono idempotentemente il plist senza invocare `launchctl`; il
+collegamento al ciclo automatico viene gestito dalla PR concatenata.
+
+Log e ultimo riepilogo sono rispettivamente
+`~/Library/Logs/frontaliere/git-partial-compact.log` e
+`~/.local/state/frontaliere/git-partial-compact-last` (`epoch`, byte e pack
+prima/dopo, esito). Oggetti irraggiungibili da ref, reflog e HEAD di worktree,
+inclusi commit “fantasma” senza riferimenti, non fanno parte dell'insieme e
+possono essere eliminati quando la quarantena viene rimossa.
+
 **Esenzione Strumenti per sviluppatori: Claude e Codex.** L'esenzione su
 `/usr/libexec/sshd-keygen-wrapper` copre solo i processi attribuiti alla
 sessione SSH (Claude). L'app-server di Codex e' responsabile di se stesso e

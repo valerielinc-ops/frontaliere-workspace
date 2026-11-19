@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ch.frontaliere.git-partial-compact</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__NODE_PATH__</string>
+		<string>__SCRIPT_PATH__</string>
+		<string>--repo</string>
+		<string>__SITE_REPO__</string>
+		<string>--apply</string>
+		<string>--if-needed</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key><integer>0</integer>
+		<key>Hour</key><integer>5</integer>
+		<key>Minute</key><integer>30</integer>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>__WORKSPACE__</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key><string>__HOME__</string>
+		<key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__LOG_DIR__/git-partial-compact.launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__LOG_DIR__/git-partial-compact.launchd.err.log</string>
+</dict>
+</plist>
