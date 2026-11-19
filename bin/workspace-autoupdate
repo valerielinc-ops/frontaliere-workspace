@@ -31,6 +31,8 @@ release_root=${FRONTALIERE_GH_RELEASE_ROOT:-$home_dir/.local/share/frontaliere/g
 interval_s=${AU_INTERVAL_S:-900}
 lock_max_age_min=30
 max_log_lines=2000
+plutil_bin=${AU_PLUTIL_BIN:-/usr/bin/plutil}
+launchctl_bin=${AU_LAUNCHCTL_BIN:-/bin/launchctl}
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 0
 ws=${AU_WORKSPACE:-$(CDPATH= cd -- "$script_dir/.." && pwd -P)}
@@ -149,6 +151,7 @@ cmd_run() {
   update_checkout "$target"
   update_git_maintenance_wrapper "$target"
   update_coordinator "$target"
+  reconcile_sentinels_for_target "$target"
   trim_log
 }
 
@@ -167,11 +170,10 @@ xml() { # escape per i valori del plist
 # La directory e' risolta una volta sola: se node si sposta (upgrade di un
 # version manager), rieseguire `install`.
 launchd_path() {
-  node_bin=$(command -v node 2>/dev/null) || node_bin=''
-  case "$node_bin" in
-    /*) ;;
-    *) printf 'workspace-autoupdate: node non nel PATH (PATH=%s): nessun plist scritto\n' "${PATH:-}" >&2; return 1 ;;
-  esac
+  node_bin=$(resolve_node_bin) || {
+    printf 'workspace-autoupdate: node non nel PATH: nessun plist scritto\n' >&2
+    return 1
+  }
   out=''
   for entry in "$home_dir/.local/bin" "${node_bin%/*}" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
     case ":$out:" in
@@ -182,9 +184,116 @@ launchd_path() {
   printf '%s\n' "$out"
 }
 
+resolve_node_bin() {
+  node_bin=$(command -v node 2>/dev/null) || node_bin=''
+  case "$node_bin" in
+    /*) printf '%s\n' "$node_bin" ;;
+    *) return 1 ;;
+  esac
+}
+
+sed_replacement() {
+  printf '%s' "$(xml "$1")" | /usr/bin/sed 's/[\\&|]/\\&/g'
+}
+
+render_sentinel_plist() {
+  local template=$1 node_executable=$2 launchd_env_path=$3
+  local node_value workspace_value home_value path_value logs_value
+  node_value=$(sed_replacement "$node_executable") || return 1
+  workspace_value=$(sed_replacement "$ws") || return 1
+  home_value=$(sed_replacement "$home_dir") || return 1
+  path_value=$(sed_replacement "$launchd_env_path") || return 1
+  logs_value=$(sed_replacement "$log_dir") || return 1
+  /usr/bin/sed \
+    -e "s|@@NODE_BIN@@|$node_value|g" \
+    -e "s|@@WORKSPACE@@|$workspace_value|g" \
+    -e "s|@@HOME@@|$home_value|g" \
+    -e "s|@@PATH@@|$path_value|g" \
+    -e "s|@@LOG_DIR@@|$logs_value|g" \
+    "$template"
+}
+
+reconcile_sentinel_jobs() {
+  local node_executable=$1 launchd_env_path=$2
+  local domain sentinel_label template plist temp
+  /bin/mkdir -p "$agents_dir" "$log_dir" || return 1
+  domain="gui/$(/usr/bin/id -u)"
+  for sentinel_label in ch.frontaliere.agent-orphan-reaper ch.frontaliere.disk-sentinel; do
+    template="$ws/config/launchd/$sentinel_label.plist"
+    [ -f "$template" ] || continue
+    plist="$agents_dir/$sentinel_label.plist"
+    temp="$plist.tmp.$$"
+    if ! render_sentinel_plist "$template" "$node_executable" "$launchd_env_path" >"$temp"; then
+      /bin/rm -f "$temp"
+      log "sentinella $sentinel_label non generata"
+      return 1
+    fi
+    if ! "$plutil_bin" -lint -s "$temp"; then
+      /bin/rm -f "$temp"
+      log "plist sentinella $sentinel_label non valido"
+      return 1
+    fi
+    if [ -f "$plist" ] && /usr/bin/cmp -s "$plist" "$temp"; then
+      /bin/rm -f "$temp"
+      [ -n "${AU_NO_LAUNCHCTL:-}" ] && continue
+      if "$launchctl_bin" print "$domain/$sentinel_label" >/dev/null 2>&1; then
+        continue
+      fi
+      if "$launchctl_bin" bootstrap "$domain" "$plist"; then
+        log "sentinella $sentinel_label caricata"
+      else
+        log "sentinella $sentinel_label non caricata; tentativo al prossimo giro"
+        return 1
+      fi
+      continue
+    fi
+    /bin/mv -f "$temp" "$plist" || return 1
+    [ -n "${AU_NO_LAUNCHCTL:-}" ] && continue
+    "$launchctl_bin" bootout "$domain/$sentinel_label" 2>/dev/null || true
+    if "$launchctl_bin" bootstrap "$domain" "$plist"; then
+      log "sentinella $sentinel_label aggiornata"
+    else
+      log "sentinella $sentinel_label aggiornata su disco, caricamento ritentato al prossimo giro"
+      return 1
+    fi
+  done
+  return 0
+}
+
+reconcile_sentinels_for_target() {
+  local target=$1 branch head node_executable launchd_env_path changed
+  [ -f "$ws/config/launchd/ch.frontaliere.agent-orphan-reaper.plist" ] || return 0
+  [ -f "$ws/config/launchd/ch.frontaliere.disk-sentinel.plist" ] || return 0
+  branch=$(g symbolic-ref --short -q HEAD) || branch=''
+  [ "$branch" = main ] || return 0
+  head=$(g rev-parse HEAD 2>/dev/null) || return 0
+  [ "$head" = "$target" ] || return 0
+  if ! g diff --quiet "$target" -- \
+    bin/agent-orphan-reaper bin/agent-orphan-reaper.mjs bin/disk-sentinel bin/disk-sentinel.mjs \
+    config/launchd/ch.frontaliere.agent-orphan-reaper.plist config/launchd/ch.frontaliere.disk-sentinel.plist; then
+    log "sentinelle disco/processi non riconciliate: file locali diversi da origin/main"
+    return 0
+  fi
+  changed=$(g status --porcelain -- \
+    bin/agent-orphan-reaper bin/agent-orphan-reaper.mjs bin/disk-sentinel bin/disk-sentinel.mjs \
+    config/launchd/ch.frontaliere.agent-orphan-reaper.plist config/launchd/ch.frontaliere.disk-sentinel.plist)
+  if [ -n "$changed" ]; then
+    log "sentinelle disco/processi non riconciliate: modifiche locali non committate"
+    return 0
+  fi
+  node_executable=$(resolve_node_bin) || {
+    log "sentinelle disco/processi non riconciliate: node non nel PATH"
+    return 0
+  }
+  launchd_env_path=$(launchd_path) || return 0
+  reconcile_sentinel_jobs "$node_executable" "$launchd_env_path" || true
+}
+
 cmd_install() {
   launchd_env_path=$(launchd_path) || exit 69
+  node_executable=$(resolve_node_bin) || exit 69
   /bin/mkdir -p "$agents_dir" "$log_dir" || exit 73
+  reconcile_sentinel_jobs "$node_executable" "$launchd_env_path" || exit 1
   plist=$(plist_path)
   cat >"$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -224,11 +333,11 @@ cmd_install() {
 </dict>
 </plist>
 EOF
-  /usr/bin/plutil -lint -s "$plist" || exit 65
+  "$plutil_bin" -lint -s "$plist" || exit 65
   [ -n "${AU_NO_LAUNCHCTL:-}" ] && { printf '%s\n' "$plist"; return 0; }
   domain="gui/$(/usr/bin/id -u)"
-  /bin/launchctl bootout "$domain/$label" 2>/dev/null
-  /bin/launchctl bootstrap "$domain" "$plist" || exit 1
+  "$launchctl_bin" bootout "$domain/$label" 2>/dev/null
+  "$launchctl_bin" bootstrap "$domain" "$plist" || exit 1
   printf 'caricato %s (ogni %ss): %s\n' "$label" "$interval_s" "$plist"
 }
 
