@@ -240,12 +240,31 @@ function parseWorktrees(repo, gitBin) {
   }
   if (current) worktrees.push(current);
   if (worktrees.length === 0) throw new Error('Git non ha restituito worktree registrati');
-  return worktrees.map((worktree) => {
-    const fullPath = path.resolve(worktree.path);
-    if (!fs.existsSync(fullPath)) throw new Error(`worktree registrato ma assente: ${fullPath}`);
-    const gitDirRaw = git(fullPath, ['rev-parse', '--git-dir'], { gitBin });
-    return { ...worktree, path: fullPath, head: git(fullPath, ['rev-parse', 'HEAD'], { gitBin }), gitDir: path.resolve(fullPath, gitDirRaw) };
-  });
+  // A registered worktree whose directory is gone (pruned while this ran, or a
+  // removal that left its admin dir) is skipped here; its HEAD and reflog are
+  // still kept as roots by adminWorktreeRoots, so nothing it referenced is lost.
+  return worktrees
+    .map((worktree) => ({ ...worktree, path: path.resolve(worktree.path) }))
+    .filter((worktree) => fs.existsSync(worktree.path))
+    .map((worktree) => {
+      const gitDirRaw = git(worktree.path, ['rev-parse', '--git-dir'], { gitBin });
+      return { ...worktree, head: git(worktree.path, ['rev-parse', 'HEAD'], { gitBin }), gitDir: path.resolve(worktree.path, gitDirRaw) };
+    });
+}
+
+// HEAD and HEAD reflog of every linked worktree admin dir (<common>/worktrees/*),
+// including those whose working directory no longer exists.
+function adminWorktreeRoots(repoInfo) {
+  const found = [];
+  const adminRoot = path.join(repoInfo.commonDir, 'worktrees');
+  for (const name of safeReadDir(adminRoot)) {
+    for (const file of ['HEAD', 'ORIG_HEAD', path.join('logs', 'HEAD')]) {
+      let text = '';
+      try { text = fs.readFileSync(path.join(adminRoot, name, file), 'utf8'); } catch { continue; }
+      found.push(...(text.match(/\b[0-9a-f]{40}(?:[0-9a-f]{24})?\b/gi) || []));
+    }
+  }
+  return unique(found.map((oid) => oid.toLowerCase())).filter((oid) => !/^0+$/.test(oid));
 }
 
 function refs(repo, gitBin) {
@@ -284,6 +303,7 @@ function enumerateRoots(repo, gitBin, worktrees, refList) {
 // them were 3 to 45 days old and blocked every run. Abandoned ones no longer
 // block; the commits they reference are kept as roots (operationRoots).
 const ACTIVE_OPERATION_MS = 6 * 60 * 60 * 1000;
+const PROMISOR_SAMPLE_SIZE = 5000;
 
 function operationMarkerIsActive(markerPath, nowMs = Date.now()) {
   try {
@@ -334,6 +354,44 @@ function operationRoots(repoInfo, worktrees) {
   return unique([...full, ...resolved]);
 }
 
+// Roots of local work, whose blobs must stay: local (non remote-tracking) refs
+// and their reflogs, HEAD of every worktree and its reflog, stash. Reflogs of
+// refs/remotes/* are NOT local work: their old tips came from the server (e.g.
+// agent branches rewritten by force-push). On the agent host on 2026-11-19
+// counting them made 131,550 commits and 927,924 blobs "local only", i.e.
+// almost the whole store. Their commits and trees still go in the promisor pack.
+function oidsInReflogFile(file) {
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const found = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^([0-9a-f]{40}(?:[0-9a-f]{24})?) ([0-9a-f]{40}(?:[0-9a-f]{24})?) /i.exec(line);
+    if (match) found.push(match[1], match[2]);
+  }
+  return found;
+}
+
+function localWorkRoots(repoInfo, worktrees, refList) {
+  const found = refList.filter((ref) => !ref.name.startsWith('refs/remotes/')).map((ref) => ref.oid);
+  found.push(...worktrees.map((worktree) => worktree.head));
+  found.push(...oidsInReflogFile(path.join(repoInfo.commonDir, 'logs', 'HEAD')));
+  const walk = (directory) => {
+    for (const entry of safeReadDir(directory)) {
+      const full = path.join(directory, entry);
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (stat.isDirectory()) walk(full);
+      else found.push(...oidsInReflogFile(full));
+    }
+  };
+  for (const entry of safeReadDir(path.join(repoInfo.commonDir, 'logs', 'refs'))) {
+    if (entry === 'remotes') continue;
+    const full = path.join(repoInfo.commonDir, 'logs', 'refs', entry);
+    try { if (fs.statSync(full).isDirectory()) walk(full); else found.push(...oidsInReflogFile(full)); } catch { /* vanished */ }
+  }
+  return unique(found.map((oid) => oid.toLowerCase())).filter((oid) => !/^0+$/.test(oid));
+}
+
 function safetyBlockers(repoInfo, worktrees) {
   const busy = [];
   for (const worktree of worktrees) {
@@ -360,9 +418,14 @@ function checkSafety(repoInfo, worktrees) {
 function captureStatuses(repoInfo, worktrees) {
   const statuses = new Map();
   for (const worktree of worktrees) {
+    if (!fs.existsSync(worktree.path)) continue; // removed concurrently: nothing to compare
     const result = git(worktree.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-      gitBin: repoInfo.gitBin, raw: true, encoding: null,
+      gitBin: repoInfo.gitBin, raw: true, encoding: null, allowFailure: true,
     });
+    if (result.status !== 0) {
+      if (!fs.existsSync(worktree.path)) continue;
+      throw new Error(`git status fallito nel worktree ${worktree.path}: ${String(result.stderr || '').trim()}`);
+    }
     statuses.set(worktree.path, result.stdout);
   }
   return statuses;
@@ -377,9 +440,29 @@ function packBytes(packDir) {
 }
 
 function listRefsForRemote(repo, remote, gitBin) {
-  const prefix = `refs/remotes/${remote}/`;
-  const output = git(repo, ['for-each-ref', '--format=%(objectname)', prefix], { gitBin });
+  const prefixes = [`refs/remotes/${remote}/`, `refs/prefetch/remotes/${remote}/`];
+  const output = git(repo, ['for-each-ref', '--format=%(objectname)', ...prefixes], { gitBin });
   return unique(output.split(/\r?\n/).filter(Boolean));
+}
+
+// Tips the server already has, beyond the remote-tracking refs: every PR head
+// (`refs/pull/*/head`, kept by GitHub after the branch is deleted), branches and
+// tags. On the agent host on 2026-11-19, 681 local `snapshot/purge/*` tags of
+// pruned worktrees pointed at PR heads that are on GitHub only as refs/pull:
+// counting them as local work kept 922,066 historical blobs. Only tips present
+// locally can be used as negative revisions; if the remote cannot be listed the
+// result is empty and more blobs are kept (the conservative direction).
+function serverKnownTips(repoInfo, remote) {
+  const listed = git(repoInfo.repo, ['ls-remote', remote, 'refs/pull/*/head', 'refs/heads/*', 'refs/tags/*'], {
+    gitBin: repoInfo.gitBin, allowFailure: true, raw: true, env: { GIT_TERMINAL_PROMPT: '0' },
+  });
+  if (!listed || listed.status !== 0) {
+    process.stderr.write(`git-partial-compact: ls-remote ${remote} non riuscito: tengo i blob di tutti i ref locali\n`);
+    return [];
+  }
+  const tips = unique(String(listed.stdout).split(/\r?\n/).map((line) => line.split(/\s+/)[0]).filter(Boolean));
+  if (tips.length === 0) return [];
+  return objectRecords(repoInfo, tips).filter((record) => record.type === 'commit').map((record) => record.oid);
 }
 
 function listWorktreeIndexBlobs(repoInfo, worktrees) {
@@ -403,9 +486,12 @@ function listWorktreeIndexBlobs(repoInfo, worktrees) {
   return unique(entries);
 }
 
-function objectRecords(repoInfo, oids) {
+// `diskSize` reads the on-disk (compressed) size: the uncompressed size of the
+// ~1M trees of the site history is ~15 GB, against ~0.45 GB once packed.
+function objectRecords(repoInfo, oids, { diskSize = false } = {}) {
   if (oids.length === 0) return [];
-  const output = git(repoInfo.repo, ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], {
+  const sizeField = diskSize ? '%(objectsize:disk)' : '%(objectsize)';
+  const output = git(repoInfo.repo, ['cat-file', `--batch-check=%(objectname) %(objecttype) ${sizeField}`], {
     gitBin: repoInfo.gitBin,
     input: `${oids.join('\n')}\n`,
     maxBuffer: Math.max(1024 * 1024 * 16, oids.length * 100),
@@ -454,17 +540,23 @@ function freeBytes(repoPath) {
   return availableKiB * 1024;
 }
 
-function estimatePackBytes(repoInfo, promisorRoots, indexOids, remoteTips) {
+function estimatePackBytes(repoInfo, promisorRoots, localRoots, indexOids, remoteTips) {
   const treeAndCommitOids = objectSetForRoots(repoInfo, promisorRoots, { filterBlobs: true });
-  const localObjects = objectSetForRoots(repoInfo, promisorRoots, { excludeTips: remoteTips });
+  const localObjects = objectSetForRoots(repoInfo, localRoots, { excludeTips: remoteTips });
   const candidates = unique([...localObjects, ...indexOids]);
-  const promisorRecords = objectRecords(repoInfo, treeAndCommitOids);
-  const localRecords = objectRecords(repoInfo, candidates);
-  const missingPromisor = promisorRecords.find((record) => record.type === 'missing');
+  // A sample, not every object: a cat-file over ~1M commits/trees took hours on
+  // the agent host (4,700 packs) and was the whole cost of a 4h20m failed run.
+  // Missing commits/trees are still caught by verify() after the swap.
+  const step = Math.max(1, Math.floor(treeAndCommitOids.length / PROMISOR_SAMPLE_SIZE));
+  const sample = treeAndCommitOids.filter((_, index) => index % step === 0);
+  const sampleRecords = objectRecords(repoInfo, sample, { diskSize: true });
+  const missingPromisor = sampleRecords.find((record) => record.type === 'missing');
   if (missingPromisor) throw new Error(`commit/tree/tag già mancante prima della compattazione: ${missingPromisor.oid}`);
+  const sampleBytes = sampleRecords.reduce((total, record) => total + record.size, 0);
+  const promisorRawBytes = sampleRecords.length ? Math.ceil((sampleBytes / sampleRecords.length) * treeAndCommitOids.length) : 0;
+  const localRecords = objectRecords(repoInfo, candidates, { diskSize: true });
   const missingLocal = new Set(localRecords.filter((record) => record.type === 'missing').map((record) => record.oid));
   const localObjectSet = new Set(localObjects.filter((oid) => !missingLocal.has(oid)));
-  const promisorRawBytes = promisorRecords.reduce((total, record) => total + record.size, 0);
   const blobRecords = localRecords.filter((record) => record.type === 'blob');
   const localBlobBytes = blobRecords.reduce((total, record) => total + record.size, 0);
   const localBlobOids = unique(blobRecords.map((record) => record.oid));
@@ -489,15 +581,20 @@ function snapshot(repoInfo, options) {
   const blockers = safetyBlockers(repoInfo, worktrees);
   if (options.apply && blockers.length) throw new Error(`operazione Git o gc in corso: ${blockers.join(', ')}`);
   const roots = enumerateRoots(repo, gitBin, worktrees, refList);
-  roots.roots = unique([...roots.roots, ...operationRoots(repoInfo, worktrees)]);
+  roots.roots = unique([...roots.roots, ...operationRoots(repoInfo, worktrees), ...adminWorktreeRoots(repoInfo)]);
   const remote = options.convert ? chooseRemote(repo, gitBin, null) : partialRemote(repo, gitBin);
   if (!remote && !options.convert) throw new Error('repository completo: usa --convert --apply per convertirlo in partial clone');
   if (options.convert && partialRemote(repo, gitBin)) throw new Error('--convert richiede un clone completo, ma il repository è già partial clone');
   const shallow = git(repo, ['rev-parse', '--is-shallow-repository'], { gitBin }) === 'true';
   if (shallow) throw new Error('clone shallow non supportato');
-  const remoteTips = listRefsForRemote(repo, remote, gitBin);
+  const remoteTips = unique([...listRefsForRemote(repo, remote, gitBin), ...serverKnownTips(repoInfo, remote)]);
   const indexOids = listWorktreeIndexBlobs(repoInfo, worktrees);
-  const estimate = estimatePackBytes(repoInfo, roots.roots, indexOids, remoteTips);
+  const localRoots = unique([
+    ...localWorkRoots(repoInfo, worktrees, refList),
+    ...operationRoots(repoInfo, worktrees),
+    ...adminWorktreeRoots(repoInfo),
+  ]);
+  const estimate = estimatePackBytes(repoInfo, roots.roots, localRoots, indexOids, remoteTips);
   const beforePacks = packFiles(repoInfo.packDir);
   const bytesBefore = packBytes(repoInfo.packDir);
   const free = freeBytes(repo);
@@ -715,10 +812,16 @@ function verify(repoInfo, state, measurement) {
   // concurrent work, not corruption. It is only reported.
   const changedStatuses = [];
   for (const worktree of state.worktrees) {
+    if (!fs.existsSync(worktree.path)) continue; // pruned during the run: concurrent work, not corruption
     const result = git(worktree.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-      gitBin: repoInfo.gitBin, raw: true, encoding: null,
+      gitBin: repoInfo.gitBin, raw: true, encoding: null, allowFailure: true,
     });
-    if (!result.stdout.equals(state.statuses.get(worktree.path))) changedStatuses.push(worktree.path);
+    if (result.status !== 0) {
+      if (!fs.existsSync(worktree.path)) continue;
+      throw new Error(`git status fallito dopo la compattazione nel worktree ${worktree.path}: ${String(result.stderr || '').trim()}`);
+    }
+    const before = state.statuses.get(worktree.path);
+    if (!before || !result.stdout.equals(before)) changedStatuses.push(worktree.path);
   }
   if (changedStatuses.length) {
     process.stderr.write(`git-partial-compact: status cambiato durante la run (lavoro concorrente) in ${changedStatuses.length} worktree: ${changedStatuses.join(', ')}\n`);
@@ -813,6 +916,13 @@ function applyCompaction(repoInfo, options, measurement, statePaths) {
     checkSafety(repoInfo, measurement.worktrees);
     const availableBytes = freeBytes(repoInfo.repo);
     if (availableBytes < needed) throw new Error(`spazio insufficiente: richiesti ${needed} byte (${bytes(needed)}), disponibili ${availableBytes} byte (${bytes(availableBytes)})`);
+    // A fresh MIDX makes every object lookup of pack-objects and of the
+    // verification a binary search instead of a scan of thousands of packs.
+    git(repoInfo.repo, ['multi-pack-index', 'write', '--no-progress'], { gitBin: repoInfo.gitBin });
+    // The measurement can take long on a busy host: worktrees and their status
+    // are read again right before the swap, so the comparison window is short.
+    measurement.worktrees = parseWorktrees(repoInfo.repo, repoInfo.gitBin);
+    measurement.statuses = captureStatuses(repoInfo, measurement.worktrees);
     scratch = makeScratch(repoInfo);
     if (options.convert) configSnapshot = rewriteConfig(repoInfo, measurement.remote);
     const revisionInput = `${measurement.roots.join('\n')}\n`;

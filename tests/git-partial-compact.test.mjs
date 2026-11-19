@@ -440,7 +440,13 @@ test('errore dopo la quarantena ripristina pack, config di conversione e MIDX', 
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
-if (args[0] !== '--version' && args.includes('multi-pack-index') && args.includes('write') && !fs.existsSync(process.env.R4_FAIL_SENTINEL)) {
+// The first MIDX write is the fresh index at the start of --apply; fail the
+// second one, the rewrite after the quarantine.
+const counter = process.env.R4_FAIL_SENTINEL + '.count';
+const isMidxWrite = args[0] !== '--version' && args.includes('multi-pack-index') && args.includes('write');
+const seen = isMidxWrite ? Number(fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8') : '0') + 1 : 0;
+if (isMidxWrite) fs.writeFileSync(counter, String(seen));
+if (isMidxWrite && seen === 2 && !fs.existsSync(process.env.R4_FAIL_SENTINEL)) {
   fs.writeFileSync(process.env.R4_FAIL_SENTINEL, 'failed once');
   process.stderr.write('injected MIDX failure');
   process.exit(91);
@@ -480,7 +486,7 @@ test('una modifica concorrente in un worktree durante la run non annulla la comp
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
-if (args.includes('multi-pack-index') && args.includes('write') && !fs.existsSync(process.env.R4_EDIT_SENTINEL)) {
+if (args.includes('pack-objects') && !fs.existsSync(process.env.R4_EDIT_SENTINEL)) {
   fs.writeFileSync(process.env.R4_EDIT_SENTINEL, 'edited');
   fs.appendFileSync(process.env.R4_EDIT_TARGET, 'concurrent agent edit\\n');
 }
@@ -554,6 +560,147 @@ test('operazioni abbandonate non bloccano e i loro commit restano conservati', {
     assert.equal(existsObject(fixture.repo, oid), true, `oggetto dell'operazione abbandonata conservato: ${oid}`);
   }
   assert.equal(existsObject(fixture.repo, fixture.oldBlob), false, 'il blob storico remoto viene comunque scartato');
+});
+
+test('worktree spariti prima o durante la run non la fanno fallire e i loro commit restano', { skip: INTEGRATION_SKIP }, (t) => {
+  // 19/11: una run reale e' fallita dopo 4h20m perche' un worktree registrato
+  // all'inizio era stato potato nel frattempo.
+  const root = tempRoot(t, 'git-partial-compact-vanished-');
+  const fixture = createFixture(root);
+  const blob = git(fixture.repo, ['hash-object', '-w', '--stdin'], { input: 'ghost-only-' + 'g'.repeat(5000) });
+  const tree = git(fixture.repo, ['mktree'], { input: `100644 blob ${blob}\tghost.json\n` });
+  const commit = git(fixture.repo, ['commit-tree', tree, '-m', 'ghost worktree commit']);
+  git(fixture.repo, ['pack-objects', join(fixture.repo, '.git', 'objects', 'pack', 'pack')], { input: `${blob}\n${tree}\n${commit}\n` });
+  git(fixture.repo, ['prune-packed']);
+  const ghost = join(root, 'ghost-worktree');
+  gitLazy(fixture.repo, ['worktree', 'add', '--detach', '--no-checkout', ghost, commit]);
+  rmSync(ghost, { recursive: true, force: true }); // registrato ma senza cartella: resta solo l'admin dir
+
+  const sentinel = join(root, 'removed-once');
+  const fakeGit = join(root, 'git-remove-during-run');
+  writeFileSync(fakeGit, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args.includes('pack-objects') && !fs.existsSync(process.env.R4_REMOVE_SENTINEL)) {
+  fs.writeFileSync(process.env.R4_REMOVE_SENTINEL, 'removed');
+  fs.rmSync(process.env.R4_REMOVE_TARGET, { recursive: true, force: true });
+}
+const result = spawnSync(process.env.R4_REAL_GIT, args, { stdio: 'inherit', env: process.env });
+process.exit(result.status === null ? 1 : result.status);
+`, { mode: 0o700 });
+  chmodSync(fakeGit, 0o700);
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {
+    FRONTALIERE_GIT_BIN: fakeGit,
+    R4_REAL_GIT: GIT,
+    R4_REMOVE_SENTINEL: sentinel,
+    R4_REMOVE_TARGET: fixture.sparse,
+  }, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).result, 'success');
+  assert.equal(existsSync(sentinel), true, 'il worktree sparse e\' stato rimosso a meta\' run');
+  for (const oid of [commit, tree, blob]) assert.equal(existsObject(fixture.repo, oid), true, `oggetto del worktree senza cartella conservato: ${oid}`);
+  assert.equal(existsObject(fixture.repo, fixture.oldBlob), false);
+});
+
+test('la stima usa le dimensioni su disco, non quelle non compresse', { skip: INTEGRATION_SKIP }, (t) => {
+  // Sul sito i ~1M tree pesano ~15 GB non compressi e ~0,45 GB nel pack: con le
+  // dimensioni non compresse la conversione del Mac principale (pochi GiB liberi)
+  // verrebbe rifiutata per spazio insufficiente.
+  const root = tempRoot(t, 'git-partial-compact-estimate-');
+  const source = join(root, 'source');
+  const bare = join(root, 'origin.git');
+  const clone = join(root, 'clone');
+  mkdirSync(join(source, 'data'), { recursive: true });
+  git(root, ['init', '-q', '-b', 'main', source]);
+  git(source, ['config', 'user.email', 'r4@example.invalid']);
+  git(source, ['config', 'user.name', 'R4']);
+  for (let i = 0; i < 2000; i++) writeFileSync(join(source, 'data', `entry-${String(i).padStart(5, '0')}.json`), `{"id":${i}}\n`);
+  for (let c = 0; c < 10; c++) {
+    writeFileSync(join(source, 'data', 'entry-00000.json'), `{"id":0,"rev":${c}}\n`);
+    git(source, ['add', '-A']);
+    git(source, ['commit', '-qm', `rev ${c}`]);
+  }
+  git(root, ['clone', '-q', '--bare', source, bare]);
+  git(bare, ['repack', '-adq']);
+  git(root, ['clone', '-q', '--filter=blob:none', '--no-checkout', `file://${bare}`, clone]);
+  const result = runTool(['--repo', clone, '--json'], root);
+  assert.equal(result.status, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  const nonBlob = git(clone, ['cat-file', '--batch-all-objects', '--batch-check=%(objecttype) %(objectsize)'])
+    .split('\n').filter((line) => line && !line.startsWith('blob '));
+  const nonBlobRaw = nonBlob.reduce((total, line) => total + Number(line.split(' ')[1]), 0);
+  assert.ok(nonBlobRaw > 400_000, `i tree non compressi pesano ${nonBlobRaw} byte`);
+  // Lo stesso overhead fisso della stima: 1 MiB + 128 byte per oggetto.
+  const fixedOverhead = 1024 * 1024 + 128 * (nonBlob.length + summary.localOnlyBlobsEstimated);
+  assert.ok(summary.estimatedPackBytes - fixedOverhead < nonBlobRaw / 2,
+    `stima ${summary.estimatedPackBytes} (overhead fisso ${fixedOverhead}) deve stare ben sotto ${nonBlobRaw} byte non compressi`);
+});
+
+test('i reflog dei ref remoti non sono lavoro locale: commit e tree restano, i blob no', { skip: INTEGRATION_SKIP }, (t) => {
+  // 19/11, Mac agenti: contando i reflog di refs/remotes/* (vecchie punte di
+  // branch di agenti riscritti col force-push) risultavano «solo locali»
+  // 131.550 commit e 927.924 blob, quasi tutto lo store.
+  const root = tempRoot(t, 'git-partial-compact-remote-reflog-');
+  const fixture = createFixture(root);
+  const make = (name, content) => {
+    const blob = git(fixture.repo, ['hash-object', '-w', '--stdin'], { input: content });
+    const tree = git(fixture.repo, ['mktree'], { input: `100644 blob ${blob}\t${name}\n` });
+    const commit = git(fixture.repo, ['commit-tree', tree, '-m', name]);
+    return { blob, tree, commit };
+  };
+  const remoteOld = make('force-pushed.json', 'force-pushed-' + 'f'.repeat(6000));
+  const localOld = make('amended-away.json', 'amended-' + 'a'.repeat(6000));
+  const oids = [remoteOld.blob, remoteOld.tree, remoteOld.commit, localOld.blob, localOld.tree, localOld.commit].join('\n') + '\n';
+  git(fixture.repo, ['pack-objects', join(fixture.repo, '.git', 'objects', 'pack', 'pack')], { input: oids });
+  git(fixture.repo, ['prune-packed']);
+  const main = git(fixture.repo, ['rev-parse', 'refs/remotes/origin/main']);
+  git(fixture.repo, ['update-ref', '--create-reflog', 'refs/remotes/origin/agent-rewritten', remoteOld.commit]);
+  git(fixture.repo, ['update-ref', 'refs/remotes/origin/agent-rewritten', main]);
+  git(fixture.repo, ['update-ref', '--create-reflog', 'refs/heads/amended-local', localOld.commit]);
+  git(fixture.repo, ['update-ref', 'refs/heads/amended-local', main]);
+
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {}, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsObject(fixture.repo, remoteOld.commit), true, 'commit del reflog remoto nel pack promisor');
+  assert.equal(existsObject(fixture.repo, remoteOld.tree), true, 'tree del reflog remoto nel pack promisor');
+  assert.equal(existsObject(fixture.repo, remoteOld.blob), false, 'blob del reflog remoto scartato: arriva dal server');
+  for (const oid of [localOld.commit, localOld.tree, localOld.blob]) {
+    assert.equal(existsObject(fixture.repo, oid), true, `oggetto del reflog di un branch locale conservato: ${oid}`);
+  }
+});
+
+test('ciò che il server ha già (refs/pull) non è lavoro locale; un tag mai pubblicato sì', { skip: INTEGRATION_SKIP }, (t) => {
+  // 19/11, Mac agenti: 681 tag locali snapshot/purge/* puntavano a head di PR
+  // che GitHub conserva solo in refs/pull/N/head e trattenevano 922.066 blob.
+  const root = tempRoot(t, 'git-partial-compact-server-tips-');
+  const fixture = createFixture(root);
+  git(fixture.source, ['checkout', '-qb', 'pr-branch']);
+  writeFileSync(join(fixture.source, 'pr-only.json'), 'pr-only-' + 'p'.repeat(6000));
+  git(fixture.source, ['add', 'pr-only.json']);
+  git(fixture.source, ['commit', '-qm', 'pr head kept only as refs/pull']);
+  const prCommit = git(fixture.source, ['rev-parse', 'HEAD']);
+  const prBlob = git(fixture.source, ['rev-parse', 'HEAD:pr-only.json']);
+  git(fixture.source, ['push', '-q', fixture.bare, `${prCommit}:refs/pull/1/head`]);
+  git(fixture.source, ['checkout', '-q', '-']);
+  gitLazy(fixture.repo, ['fetch', '-q', 'origin', 'refs/pull/1/head:refs/tags/snapshot/purge/pr-1']);
+  gitLazy(fixture.repo, ['cat-file', '-p', prBlob]); // il blob arriva in locale come in un lazy fetch reale
+  assert.equal(existsObject(fixture.repo, prBlob), true);
+
+  const blob = git(fixture.repo, ['hash-object', '-w', '--stdin'], { input: 'never-pushed-' + 'n'.repeat(6000) });
+  const tree = git(fixture.repo, ['mktree'], { input: `100644 blob ${blob}\tnever-pushed.json\n` });
+  const commit = git(fixture.repo, ['commit-tree', tree, '-m', 'never pushed']);
+  git(fixture.repo, ['pack-objects', join(fixture.repo, '.git', 'objects', 'pack', 'pack')], { input: `${blob}\n${tree}\n${commit}\n` });
+  git(fixture.repo, ['prune-packed']);
+  git(fixture.repo, ['tag', 'snapshot/purge/local-only', commit]);
+
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {}, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsObject(fixture.repo, prCommit), true, 'il commit della PR resta nel pack promisor');
+  assert.equal(existsObject(fixture.repo, prBlob), false, 'il blob della PR, che il server ha, viene scartato');
+  for (const oid of [commit, tree, blob]) assert.equal(existsObject(fixture.repo, oid), true, `oggetto mai pubblicato conservato: ${oid}`);
+  const refetched = run(GIT, ['-C', fixture.repo, 'cat-file', '-e', prBlob], { allowFailure: true, env: cleanEnv() });
+  assert.equal(refetched.status, 0, `e torna con un lazy fetch economico: ${refetched.stderr}`);
 });
 
 test('blob remoto mancante viene recuperato in lazy fetch economico', { skip: INTEGRATION_SKIP }, (t) => {
