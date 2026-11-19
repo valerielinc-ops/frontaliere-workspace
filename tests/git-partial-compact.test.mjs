@@ -752,6 +752,28 @@ process.exit(result.status === null ? 1 : result.status);
   for (const oid of [fetched, revived, tree, blob]) assert.equal(existsObject(fixture.repo, oid), true, `oggetto raggiungibile dopo la corsa: ${oid}`);
 });
 
+test('i blob lato HEAD delle modifiche in stage restano: status rileva i rinominati senza lazy fetch', { skip: INTEGRATION_SKIP }, (t) => {
+  // 19/11: il checkout principale del sito, fermo in un rebase abbandonato con
+  // 37.420 modifiche in stage, ha fatto fallire la verifica: status cercava il
+  // blob lato HEAD fff81149 per il rilevamento dei rinominati.
+  const root = tempRoot(t, 'git-partial-compact-staged-head-');
+  const fixture = createFixture(root);
+  const headBlob = git(fixture.repo, ['rev-parse', 'HEAD:archive/history.json']);
+  const content = readFileSync(join(fixture.repo, 'archive', 'history.json'), 'utf8');
+  git(fixture.repo, ['rm', '-q', '--cached', 'archive/history.json']);
+  rmSync(join(fixture.repo, 'archive', 'history.json'));
+  writeFileSync(join(fixture.repo, 'archive', 'history-renamed.json'), content.replace('current', 'currentX'));
+  git(fixture.repo, ['add', 'archive/history-renamed.json']);
+  const before = statusBytes(fixture.repo);
+  assert.match(before.toString(), /R {1,2}archive\/history\.json|archive\/history-renamed\.json/);
+
+  const result = runTool(['--repo', fixture.repo, '--apply', '--json'], root, {}, { allowFailure: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).result, 'success');
+  assert.equal(existsObject(fixture.repo, headBlob), true, 'blob lato HEAD della modifica in stage conservato');
+  assert.deepEqual(statusBytes(fixture.repo), before, 'status identico e senza lazy fetch');
+});
+
 test('blob remoto mancante viene recuperato in lazy fetch economico', { skip: INTEGRATION_SKIP }, (t) => {
   const root = tempRoot(t, 'git-partial-compact-lazy-');
   const fixture = createFixture(root);
