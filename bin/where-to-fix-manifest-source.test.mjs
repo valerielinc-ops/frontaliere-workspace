@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
   MANIFEST_GIT_REF,
+  createManifestIndex,
   loadManifest,
   resolvePath,
 } from './where-to-fix-lib.mjs';
@@ -16,6 +17,86 @@ import {
 
 const MANIFEST_REL = 'scripts/ci/loop-sync-manifest.json';
 const TWIN = 'scripts/ci/new-twin.mjs';
+
+test('risolve i path operator senza interferenze dal manifest o dalla ricerca nella root', (t) => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'where-to-fix-'));
+  const corpusRoot = path.join(workspaceRoot, 'frontaliere-articles');
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+  const index = createManifestIndex([{ path: TWIN, mode: 'identical' }]);
+  const operatorRoot = path.join(workspaceRoot, 'frontaliere-operator');
+  fs.mkdirSync(path.join(operatorRoot, 'scripts', 'ci'), { recursive: true });
+  fs.writeFileSync(path.join(operatorRoot, TWIN), '');
+  const inputs = [
+    [workspaceRoot, `frontaliere-operator/${TWIN}`],
+    [workspaceRoot, path.join(operatorRoot, TWIN)],
+    [path.join(operatorRoot, 'scripts'), 'ci/new-twin.mjs'],
+  ];
+
+  for (const [cwd, input] of inputs) {
+    assert.deepEqual(resolvePath(input, { cwd, workspaceRoot, index }), {
+      input,
+      repo: 'operator',
+      repoName: 'frontaliere-operator',
+      relativePath: TWIN,
+      mode: null,
+      fixRepo: 'operator',
+      fixRepoName: 'frontaliere-operator',
+      corresponding: null,
+      correspondingAll: [],
+      reason: 'Path del repository indipendente.',
+      manifestReason: null,
+      warnings: [],
+      repoMatchesFix: true,
+    });
+  }
+
+  assert.throws(() => resolvePath(TWIN, { cwd: workspaceRoot, workspaceRoot, index }), {
+    code: 'PATH_AMBIGUOUS',
+  });
+  fs.mkdirSync(path.join(corpusRoot, 'scripts', 'ci'), { recursive: true });
+  fs.writeFileSync(path.join(corpusRoot, TWIN), '');
+  const corpus = resolvePath(TWIN, { cwd: workspaceRoot, workspaceRoot, index });
+  assert.equal(corpus.repo, 'corpus');
+  assert.equal(corpus.mode, 'identical');
+  assert.equal(corpus.fixRepo, 'site');
+});
+
+test('il CLI risolve richieste solo operator senza corpus e conserva gli errori per input misti', (t) => {
+  const workspaceRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'where-to-fix-'));
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+  const bin = path.join(workspaceRoot, 'bin');
+  const operatorRoot = path.join(workspaceRoot, 'frontaliere-operator');
+  fs.mkdirSync(bin);
+  fs.mkdirSync(operatorRoot);
+  for (const file of ['where-to-fix', 'where-to-fix-lib.mjs']) {
+    fs.copyFileSync(new URL(file, import.meta.url), path.join(bin, file));
+  }
+
+  const env = { ...process.env };
+  delete env.LOOP_SYNC_MANIFEST_PATH;
+  const cli = (...paths) => spawnSync(process.execPath, [path.join(bin, 'where-to-fix'), '--json', ...paths], {
+    cwd: workspaceRoot,
+    encoding: 'utf8',
+    env,
+  });
+  const operatorPath = `frontaliere-operator/${TWIN}`;
+  const success = cli(operatorPath, path.join(operatorRoot, TWIN));
+  assert.equal(success.status, 0, success.stderr);
+  assert.equal(success.stderr, '');
+  assert.deepEqual(JSON.parse(success.stdout).map(({ fixRepo }) => fixRepo), ['operator', 'operator']);
+
+  const sitePath = `frontaliere-si-o-no/${TWIN}`;
+  const missing = cli(operatorPath, sitePath);
+  assert.equal(missing.status, 3, missing.stderr);
+  assert.match(missing.stderr, /Child repo frontaliere-articles non trovato/);
+
+  const corpusRoot = path.join(workspaceRoot, 'frontaliere-articles');
+  writeManifest(corpusRoot, []);
+  fs.writeFileSync(path.join(corpusRoot, MANIFEST_REL), '{}');
+  const invalid = cli(operatorPath, sitePath);
+  assert.equal(invalid.status, 4, invalid.stderr);
+  assert.match(invalid.stderr, /Manifest senza array files/);
+});
 
 const git = (cwd, ...args) => execFileSync('git', args, {
   cwd,
