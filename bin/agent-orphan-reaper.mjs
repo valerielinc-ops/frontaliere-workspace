@@ -48,11 +48,21 @@ export function isBroker(process) {
   return /app-server-broker\.mjs\s+serve(?:\s|$)/.test(process.command);
 }
 
+// The Codex app-server daemon is also a `codex app-server` with ppid 1 (started
+// by launchd) and legitimately lives for weeks: `.../app-server-daemon/.../codex
+// app-server daemon pid-update-loop`, and its child `... app-server
+// --remote-control ...`. Measured on the agent host on 2026-11-19 (50 days old).
+export function isCodexAppServerDaemon(command) {
+  return /\/app-server-daemon\//.test(command)
+    || /(?:^|[\s/])codex\s+app-server\s+daemon(?:\s|$)/.test(command)
+    || /\s--remote-control(?:\s|$)/.test(command);
+}
+
 export function isOrphanMcpOrAppServer(process) {
   const command = process.command;
   return /context7-mcp/i.test(command)
     || /firebase(?:-tools)?(?:@[^\s]+)?[^\n]*\bmcp\b/i.test(command)
-    || /(?:^|[\s/])codex\s+app-server(?:\s|$)/i.test(command);
+    || (/(?:^|[\s/])codex\s+app-server(?:\s|$)/i.test(command) && !isCodexAppServerDaemon(command));
 }
 
 export function isFsmonitor(process) {
