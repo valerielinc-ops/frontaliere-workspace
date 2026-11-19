@@ -788,7 +788,75 @@ sito e rimuove la registrazione globale del clone. Sostituire l'intero array
 evita di lasciare il vecchio percorso dello script come argomento, che il
 wrapper interpreta come schedule non valido. Le attivita' esplicite del wrapper
 restano abilitate. `bin/install-git-maintenance-wrapper --restore` ripristina i
-plist originali e ferma il riallineamento automatico su quella macchina.
+plist originali, le configurazioni Git, lo shim e le righe Mole aggiunte, poi
+ferma il riallineamento automatico su quella macchina.
+
+#### Aggiornamento 2026-11-19: recupero spazio, stato e throttle dei fetch
+
+Ogni schedule (`hourly`, `daily`, `weekly`) prova prima il recupero spazio
+separato: `multi-pack-index expire`, `write`, `expire`, in quest'ordine. Parte
+con pressione memoria sotto il livello 4 e almeno 1 GiB libero. Questa fase
+aggiorna il MIDX ed elimina i pack che non contengono copie uniche degli
+oggetti indicizzati; non esegue repack. Se pressione o spazio non bastano, il
+log riporta `action=skip step=space_recovery reason=...`.
+
+Il consolidamento e le attivita' schedule restano protetti da almeno 5 GiB
+liberi. A pressione 0-1 usano il batch configurato; a pressione 2 partono solo
+se `taskpolicy -m` e' disponibile, con cap e batch massimo di 512 MiB. A
+pressione 3 o superiore il consolidamento viene saltato. La decisione compare
+nel log come `action=consolidation_decision` oppure
+`action=skip step=consolidation`. Il wrapper imposta `GIT_NO_LAZY_FETCH=1` per
+non trasformare la manutenzione del clone parziale in fetch.
+
+Il wrapper sceglie Git almeno 2.44 nell'ordine `$FRONTALIERE_GIT_BIN`, il Git
+locale con versione piu' alta sotto `~/.local/git-*/bin/git`,
+`/opt/homebrew/bin/git`, `/usr/local/bin/git`, `/usr/bin/git`. Se non trova una
+versione moderna usa la migliore disponibile e registra
+`git_version_below_2_44`. Non richiama `~/.local/bin/git`, per evitare di
+rientrare nello shim.
+
+Lo stato, il lock e il file health vivono in
+`~/.local/state/frontaliere/`; log e stdout/stderr dei LaunchAgent restano in
+`~/Library/Logs/frontaliere/`. Al primo avvio il vecchio
+`git-maintenance-state` e il suo marker pendente vengono migrati. Il file
+`git-maintenance-health` viene sostituito atomicamente a fine run e contiene
+almeno queste righe `chiave=valore`:
+
+```text
+updated_epoch=<epoch>
+repo=<percorso>
+last_space_recovery_epoch=<epoch o 0>
+last_consolidation_epoch=<epoch o 0>
+last_skip_step=<step o vuoto>
+last_skip_reason=<causa o vuoto>
+pack_count=<numero>
+pack_bytes=<byte>
+git_version=<versione>
+```
+
+L'installer aggiunge il LaunchAgent orario solo se non trova gia' un job
+Frontaliere con schedule `hourly`; mantiene la configurazione giornaliera e
+settimanale presente. Sul sito e sul corpus, se esistono, imposta
+`splitIndex.sharedIndexExpire=1.day.ago` e
+`frontaliere.fetchThrottleSeconds=30`. Solo sul clone completo del sito
+(nessun remote promisor) imposta anche `fetch.unpackLimit=2000` e
+`transfer.unpackLimit=2000`. Se Mole e' installato, aggiunge in modo
+idempotente alla whitelist `~/Library/Logs/frontaliere` e
+`~/.local/state/frontaliere`.
+
+L'installer copia `bin/git-shim` in `~/.local/bin/git`. Lo shim usa lo stesso
+ordine di selezione Git del wrapper. Con `frontaliere.fetchThrottleSeconds >
+0`, salta solo i fetch esatti di `origin/main` con refspec `main`,
+`refs/heads/main:refs/remotes/origin/main` o la forma con `+`, inclusi gli
+switch ammessi `-q`/`--quiet`, `--no-tags`, `--prune`/`-p` e un eventuale `-C`
+iniziale. Se il ref remoto o il suo reflog e' piu' recente della finestra, il
+fetch termina senza rete; senza quiet stampa la decisione su stderr. Un lock
+`mkdir` nel Git common dir serializza i fetch in corso. Gli altri argomenti,
+inclusi `--depth`, `--unshallow` e `--refetch`, passano al Git reale senza
+throttle. `FRONTALIERE_FETCH_THROTTLE=0` disattiva il throttle. Se esisteva uno
+shim non gestito viene conservato in `~/.local/bin/git.pre-frontaliere`;
+`--restore` ripristina anche quello e rimuove solo le configurazioni e le righe
+che l'installer aveva aggiunto.
 
 ## Leak kernel da script annidati (macOS 26.x)
 

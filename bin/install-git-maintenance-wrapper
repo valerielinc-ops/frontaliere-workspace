@@ -16,11 +16,22 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 70
 workspace_root=$(CDPATH= cd -- "$script_dir/.." && pwd) || exit 70
 site_repo=${FRONTALIERE_SITE_REPO:-$workspace_root/frontaliere-si-o-no}
+articles_repo=${FRONTALIERE_ARTICLES_REPO:-$workspace_root/frontaliere-articles}
 action=${1:-install}
 launch_agents=${HOME:?HOME is required}/Library/LaunchAgents
 install_dir="$HOME/Library/Application Support/frontaliere/git-maintenance"
 backup_dir="$install_dir/original-launch-agents"
 wrapper="$install_dir/git-maintenance-wrapper"
+shim_source="$script_dir/git-shim"
+shim_dir="$HOME/.local/bin"
+shim="$shim_dir/git"
+shim_backup="$shim_dir/git.pre-frontaliere"
+shim_original="$install_dir/git-shim-original"
+shim_backup_created="$install_dir/git-shim-backup-created"
+wrapper_backup="$install_dir/git-maintenance-wrapper.pre-frontaliere"
+created_agents="$install_dir/created-launch-agents"
+config_backup_dir="$install_dir/config-backup"
+mole_state="$install_dir/mole-whitelist-state"
 disabled_marker="$install_dir/disabled"
 uid=$(/usr/bin/id -u)
 plutil_bin=${FRONTALIERE_PLUTIL_BIN:-/usr/bin/plutil}
@@ -80,29 +91,211 @@ sunday_runs_every_day() {
     && [ ! -f "$launch_agents/ch.frontaliere.git-maintenance-daily.plist" ]
 }
 
+managed_shim() {
+  [ -f "$1" ] && /usr/bin/grep -q 'FRONTALIERE_GIT_SHIM=1' "$1" 2>/dev/null
+}
+
+append_unique_line() {
+  _file=$1
+  _line=$2
+  /bin/mkdir -p "$(dirname -- "$_file")"
+  [ -f "$_file" ] || : >"$_file"
+  /usr/bin/grep -Fqx -- "$_line" "$_file" 2>/dev/null || printf '%s\n' "$_line" >>"$_file"
+}
+
+has_installed_schedule() {
+  _wanted=$1
+  for _plist in "$launch_agents"/ch.frontaliere.git-maintenance-*.plist; do
+    [ -f "$_plist" ] || continue
+    _found_schedule=$(read_saved_schedule "$_plist") || continue
+    [ "$_found_schedule" = "$_wanted" ] && return 0
+  done
+  return 1
+}
+
+config_key_backup() {
+  _repo_id=$1
+  _repo=$2
+  _key=$3
+  _backup="$config_backup_dir/$_repo_id/$_key"
+  [ -f "$_backup.present" ] && return 0
+  /bin/mkdir -p "$(dirname -- "$_backup")"
+  if git -C "$_repo" config --local --get-all "$_key" >"$_backup.values" 2>/dev/null; then
+    printf '1\n' >"$_backup.present"
+  else
+    : >"$_backup.values"
+    printf '0\n' >"$_backup.present"
+  fi
+}
+
+ensure_repo_config() {
+  _repo_id=$1
+  _repo=$2
+  _key=$3
+  _value=$4
+  config_key_backup "$_repo_id" "$_repo" "$_key"
+  _current=$(git -C "$_repo" config --local --get "$_key" 2>/dev/null) || _current=''
+  [ "$_current" = "$_value" ] || git -C "$_repo" config --local --replace-all "$_key" "$_value"
+}
+
+restore_repo_config() {
+  _repo_id=$1
+  _repo=$2
+  _key=$3
+  _backup="$config_backup_dir/$_repo_id/$_key"
+  [ -f "$_backup.present" ] || return 0
+  [ -d "$_repo/.git" ] || [ -f "$_repo/.git" ] || return 0
+  git -C "$_repo" config --local --unset-all "$_key" >/dev/null 2>&1 || true
+  if [ "$(cat "$_backup.present")" = 1 ]; then
+    while IFS= read -r _value || [ -n "$_value" ]; do
+      git -C "$_repo" config --local --add "$_key" "$_value"
+    done <"$_backup.values"
+  fi
+}
+
+configure_repo() {
+  _repo_id=$1
+  _repo=$2
+  [ -d "$_repo/.git" ] || [ -f "$_repo/.git" ] || return 0
+  ensure_repo_config "$_repo_id" "$_repo" splitIndex.sharedIndexExpire 1.day.ago
+  ensure_repo_config "$_repo_id" "$_repo" frontaliere.fetchThrottleSeconds 30
+}
+
+configure_complete_site_unpack_limits() {
+  [ -d "$site_repo/.git" ] || [ -f "$site_repo/.git" ] || return 0
+  if git -C "$site_repo" config --bool --get-regexp '^remote\..*\.promisor$' 2>/dev/null | /usr/bin/awk '$2 == "true" { found = 1 } END { exit !found }'; then
+    return 0
+  fi
+  ensure_repo_config site "$site_repo" fetch.unpackLimit 2000
+  ensure_repo_config site "$site_repo" transfer.unpackLimit 2000
+}
+
+configure_mole_whitelist() {
+  [ -d "$HOME/.config/mole" ] || command -v mo >/dev/null 2>&1 || return 0
+  whitelist="$HOME/.config/mole/whitelist"
+  if [ -d "$HOME/.config/mole" ]; then dir_existed=1; else dir_existed=0; fi
+  /bin/mkdir -p "$HOME/.config/mole"
+  if [ ! -f "$mole_state" ]; then
+    /bin/mkdir -p "$install_dir"
+    printf 'dir_existed=%s\n' "$dir_existed" >"$mole_state"
+    if [ -f "$whitelist" ]; then printf 'file_existed=1\n' >>"$mole_state"; else printf 'file_existed=0\n' >>"$mole_state"; fi
+    for _entry in '~/Library/Logs/frontaliere' '~/.local/state/frontaliere'; do
+      if /usr/bin/grep -Fqx -- "$_entry" "$whitelist" 2>/dev/null; then
+        case "$_entry" in
+          '~/Library/Logs/frontaliere') printf 'present_logs=1\n' >>"$mole_state" ;;
+          *) printf 'present_state=1\n' >>"$mole_state" ;;
+        esac
+      else
+        case "$_entry" in
+          '~/Library/Logs/frontaliere') printf 'present_logs=0\n' >>"$mole_state" ;;
+          *) printf 'present_state=0\n' >>"$mole_state" ;;
+        esac
+      fi
+    done
+  fi
+  append_unique_line "$whitelist" '~/Library/Logs/frontaliere'
+  append_unique_line "$whitelist" '~/.local/state/frontaliere'
+}
+
+restore_mole_whitelist() {
+  [ -f "$mole_state" ] || return 0
+  whitelist="$HOME/.config/mole/whitelist"
+  file_existed=$(sed -n 's/^file_existed=//p' "$mole_state")
+  dir_existed=$(sed -n 's/^dir_existed=//p' "$mole_state")
+  logs_present=$(sed -n 's/^present_logs=//p' "$mole_state")
+  state_present=$(sed -n 's/^present_state=//p' "$mole_state")
+  if [ -f "$whitelist" ]; then
+    temporary_whitelist="$whitelist.$$"
+    /bin/cp -p "$whitelist" "$temporary_whitelist"
+    /usr/bin/awk -v logs_present="${logs_present:-0}" -v state_present="${state_present:-0}" '
+      $0 == "~/Library/Logs/frontaliere" && logs_present == 0 { next }
+      $0 == "~/.local/state/frontaliere" && state_present == 0 { next }
+      { print }
+    ' "$whitelist" >"$temporary_whitelist"
+    /bin/mv -f "$temporary_whitelist" "$whitelist"
+    if [ "$file_existed" = 0 ] && [ ! -s "$whitelist" ]; then /bin/rm -f "$whitelist"; fi
+  fi
+  if [ "${dir_existed:-1}" = 0 ]; then
+    /bin/rmdir "$HOME/.config/mole" 2>/dev/null || true
+    /bin/rmdir "$HOME/.config" 2>/dev/null || true
+  fi
+}
+
+install_git_shim() {
+  [ -f "$shim_source" ] || {
+    printf '%s missing source shim: %s\n' "install-git-maintenance-wrapper:" "$shim_source" >&2
+    exit 78
+  }
+  /bin/mkdir -p "$shim_dir" "$install_dir"
+  if [ -e "$shim" ] && ! managed_shim "$shim" && [ ! -f "$shim_original" ]; then
+    /bin/cp -pP "$shim" "$shim_original"
+    if [ ! -e "$shim_backup" ]; then
+      /bin/cp -pP "$shim" "$shim_backup"
+      : >"$shim_backup_created"
+    fi
+  fi
+  if ! /usr/bin/cmp -s "$shim_source" "$shim"; then
+    temporary_shim="$shim.$$"
+    /bin/cp "$shim_source" "$temporary_shim"
+    /bin/chmod 755 "$temporary_shim"
+    /bin/mv -f "$temporary_shim" "$shim"
+  fi
+}
+
+install_hourly_if_missing() {
+  has_installed_schedule hourly && return 0
+  source_plist="$workspace_root/config/launchd/ch.frontaliere.git-maintenance-hourly.plist"
+  target_plist="$launch_agents/ch.frontaliere.git-maintenance-hourly.plist"
+  [ -f "$source_plist" ] || {
+    printf '%s missing hourly LaunchAgent template: %s\n' "install-git-maintenance-wrapper:" "$source_plist" >&2
+    exit 78
+  }
+  [ -e "$target_plist" ] && return 0
+  /bin/mkdir -p "$launch_agents" "$install_dir"
+  /bin/cp "$source_plist" "$target_plist"
+  append_unique_line "$created_agents" ch.frontaliere.git-maintenance-hourly
+}
+
+backup_global_maintenance_repo() {
+  values_file="$config_backup_dir/global-maintenance-repo.values"
+  present_file="$config_backup_dir/global-maintenance-repo.present"
+  [ -f "$present_file" ] && return 0
+  /bin/mkdir -p "$config_backup_dir"
+  if git config --global --fixed-value --get-all maintenance.repo "$site_repo" >"$values_file" 2>/dev/null; then
+    printf '1\n' >"$present_file"
+  else
+    : >"$values_file"
+    printf '0\n' >"$present_file"
+  fi
+}
+
 case "$action" in
   install)
-    [ -d "$site_repo/.git" ] || {
+    [ -d "$site_repo/.git" ] || [ -f "$site_repo/.git" ] || {
       printf '%s missing site repository: %s\n' "install-git-maintenance-wrapper:" "$site_repo" >&2
       exit 78
     }
     site_repo=$(CDPATH= cd -- "$site_repo" && pwd -P)
+    [ -d "$articles_repo/.git" ] || [ -f "$articles_repo/.git" ] || articles_repo=''
+    if [ -n "$articles_repo" ]; then articles_repo=$(CDPATH= cd -- "$articles_repo" && pwd -P); fi
     [ -f "$script_dir/git-maintenance-wrapper" ] || {
       printf '%s missing source wrapper\n' "install-git-maintenance-wrapper:" >&2
       exit 78
     }
-    /bin/rm -f "$disabled_marker"
-    found=0
-    for schedule in hourly daily weekly sunday; do
-      [ -f "$launch_agents/ch.frontaliere.git-maintenance-$schedule.plist" ] || continue
-      found=1
-    done
-    [ "$found" -eq 1 ] || {
-      printf '%s no custom Git maintenance LaunchAgents found\n' "install-git-maintenance-wrapper:" >&2
+    [ -f "$shim_source" ] || {
+      printf '%s missing source shim\n' "install-git-maintenance-wrapper:" >&2
       exit 78
     }
-    git -C "$site_repo" config --local maintenance.strategy none
+    /bin/rm -f "$disabled_marker"
+    install_hourly_if_missing
+    configure_repo site "$site_repo"
+    configure_repo articles "$articles_repo"
+    configure_complete_site_unpack_limits
+    ensure_repo_config site "$site_repo" maintenance.strategy none
+    backup_global_maintenance_repo
     git config --global --fixed-value --unset-all maintenance.repo "$site_repo" 2>/dev/null || true
+    configure_mole_whitelist
+    install_git_shim
 
     sunday_note=''
     sunday_every_day=0
@@ -128,12 +321,14 @@ case "$action" in
       installed_schedule=$("$plutil_bin" -extract ProgramArguments.1 raw "$plist" 2>/dev/null) || installed_schedule=''
       installed_home=$("$plutil_bin" -extract EnvironmentVariables.HOME raw "$plist" 2>/dev/null) || installed_home=''
       installed_repo=$("$plutil_bin" -extract EnvironmentVariables.FRONTALIERE_SITE_REPO raw "$plist" 2>/dev/null) || installed_repo=''
+      installed_working_directory=$("$plutil_bin" -extract WorkingDirectory raw "$plist" 2>/dev/null) || installed_working_directory=''
       installed_stdout=$("$plutil_bin" -extract StandardOutPath raw "$plist" 2>/dev/null) || installed_stdout=''
       installed_stderr=$("$plutil_bin" -extract StandardErrorPath raw "$plist" 2>/dev/null) || installed_stderr=''
       [ "$installed_wrapper" = "$wrapper" ] \
         && [ "$installed_schedule" = "$job_schedule" ] \
         && [ "$installed_home" = "$HOME" ] \
         && [ "$installed_repo" = "$site_repo" ] \
+        && [ "$installed_working_directory" = "$workspace_root" ] \
         && [ "$installed_stdout" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" ] \
         && [ "$installed_stderr" = "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" ] \
         || already_current=0
@@ -149,6 +344,9 @@ case "$action" in
     fi
 
     /bin/mkdir -p "$install_dir" "$backup_dir" "$launch_agents" "$HOME/Library/Logs/frontaliere"
+    if [ -e "$wrapper" ] && ! /usr/bin/cmp -s "$wrapper" "$script_dir/git-maintenance-wrapper" && [ ! -f "$wrapper_backup" ]; then
+      /bin/cp -p "$wrapper" "$wrapper_backup"
+    fi
     temporary_wrapper="$install_dir/git-maintenance-wrapper.$$"
     /bin/cp "$script_dir/git-maintenance-wrapper" "$temporary_wrapper"
     /bin/chmod 755 "$temporary_wrapper"
@@ -183,6 +381,7 @@ case "$action" in
       "$plutil_bin" -replace ProgramArguments -json "[\"$wrapper\",\"$job_schedule\"]" "$temporary_plist"
       set_plist_string EnvironmentVariables.HOME "$HOME" "$temporary_plist"
       set_plist_string EnvironmentVariables.FRONTALIERE_SITE_REPO "$site_repo" "$temporary_plist"
+      set_plist_string WorkingDirectory "$workspace_root" "$temporary_plist"
       set_plist_string StandardOutPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.out.log" "$temporary_plist"
       set_plist_string StandardErrorPath "$HOME/Library/Logs/frontaliere/git-maintenance-$schedule.launchd.err.log" "$temporary_plist"
       if [ "$schedule" = sunday ] && [ "$sunday_every_day" -eq 1 ] && [ "$job_schedule" = daily ]; then
@@ -198,21 +397,65 @@ case "$action" in
     printf 'Wrapper Git con limiti installato; LaunchAgent custom ricaricati.%s Ripristina con: %s --restore\n' "${sunday_note:-}" "$0"
     ;;
   --restore)
+    if [ -d "$site_repo" ]; then site_repo=$(CDPATH= cd -- "$site_repo" && pwd -P); fi
+    if [ -d "$articles_repo" ]; then articles_repo=$(CDPATH= cd -- "$articles_repo" && pwd -P); fi
+    if [ -f "$created_agents" ]; then
+      while IFS= read -r created_label || [ -n "$created_label" ]; do
+        [ -n "$created_label" ] || continue
+        "$launchctl_bin" bootout "gui/$uid/$created_label" >/dev/null 2>&1 || true
+        /bin/rm -f "$launch_agents/$created_label.plist" "$backup_dir/$created_label.plist"
+      done <"$created_agents"
+    fi
     for schedule in hourly daily weekly sunday; do
       label="ch.frontaliere.git-maintenance-$schedule"
       plist="$launch_agents/$label.plist"
       backup="$backup_dir/$label.plist"
       [ -f "$backup" ] || continue
+      if [ -f "$created_agents" ] && /usr/bin/grep -Fqx -- "$label" "$created_agents"; then continue; fi
       "$launchctl_bin" bootout "gui/$uid/$label" >/dev/null 2>&1 || true
       /bin/cp "$backup" "$plist"
       "$plutil_bin" -lint "$plist" >/dev/null
       "$launchctl_bin" bootstrap "gui/$uid" "$plist"
     done
-    /bin/rm -f "$wrapper"
+
+    restore_repo_config site "$site_repo" maintenance.strategy
+    restore_repo_config site "$site_repo" splitIndex.sharedIndexExpire
+    restore_repo_config site "$site_repo" frontaliere.fetchThrottleSeconds
+    restore_repo_config site "$site_repo" fetch.unpackLimit
+    restore_repo_config site "$site_repo" transfer.unpackLimit
+    restore_repo_config articles "$articles_repo" splitIndex.sharedIndexExpire
+    restore_repo_config articles "$articles_repo" frontaliere.fetchThrottleSeconds
+    values_file="$config_backup_dir/global-maintenance-repo.values"
+    present_file="$config_backup_dir/global-maintenance-repo.present"
+    if [ -f "$present_file" ] && [ "$(cat "$present_file")" = 1 ]; then
+      desired_count=$(/usr/bin/awk 'END { print NR + 0 }' "$values_file")
+      current_count=$(git config --global --fixed-value --get-all maintenance.repo "$site_repo" 2>/dev/null | /usr/bin/awk 'NF { count++ } END { print count + 0 }')
+      while [ "$current_count" -lt "$desired_count" ]; do
+        git config --global --add maintenance.repo "$site_repo"
+        current_count=$((current_count + 1))
+      done
+    fi
+
+    restore_mole_whitelist
+    if managed_shim "$shim"; then
+      if [ -f "$shim_original" ]; then
+        /bin/cp -pP "$shim_original" "$shim"
+      elif [ -f "$shim_backup" ]; then
+        /bin/cp -pP "$shim_backup" "$shim"
+      else
+        /bin/rm -f "$shim"
+      fi
+      /bin/rm -f "$shim_original"
+      [ -f "$shim_backup_created" ] && /bin/rm -f "$shim_backup"
+    fi
+    /bin/rm -f "$shim_backup_created" "$wrapper"
+    if [ -f "$wrapper_backup" ]; then /bin/mv -f "$wrapper_backup" "$wrapper"; fi
+    /bin/rm -rf "$backup_dir" "$config_backup_dir"
+    /bin/rm -f "$created_agents" "$mole_state" "$shim_original" "$wrapper_backup" "$shim_backup_created"
     /bin/mkdir -p "$install_dir"
     : >"$disabled_marker"
     /bin/chmod 600 "$disabled_marker"
-    printf 'LaunchAgent Git originali ripristinati.\n'
+    printf 'Configurazione Git, shim e LaunchAgent ripristinati.\n'
     ;;
   *)
     printf '%s uso: %s [--restore]\n' "install-git-maintenance-wrapper:" "$0" >&2
