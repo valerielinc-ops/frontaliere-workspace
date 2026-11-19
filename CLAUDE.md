@@ -27,6 +27,10 @@ solo la sezione pertinente quando una regola qui sotto non basta.
 | `frontaliere-si-o-no/` | `valerielinc-ops/frontaliere-si-o-no` | Sito, SPA e sorgente del package articoli/engine. |
 | `frontaliere-articles/` | `nanakokyobashi-rgb/frontaliere-articles` | Mirror pubblicatore del corpus e dell'API dati. |
 | `frontaliere-reddit-devvit/` | `nanakokyobashi-rgb/frontaliere-reddit-devvit` | App Devvit indipendente per pubblicare i nuovi articoli su Reddit. |
+| `frontaliere-operator/` | `valerielinc-ops/frontaliere-operator` | Repository operativo privato. |
+
+`frontaliere-operator/` usa linked worktree e documenta nel repository privato
+il proprio percorso di review e squash merge.
 
 Il clone del sito sul laptop principale e' completo, non shallow; sul Mac host
 agenti (MacBook Pro 2017) e' parziale `blob:none`, con prefetch orario spento

@@ -2,12 +2,23 @@
 
 import { fileURLToPath } from 'node:url';
 import {
+  createManifestIndex,
   findWorkspaceRoot,
   formatHuman,
   loadManifest,
   resolvePath,
   WhereToFixError,
 } from './where-to-fix-lib.mjs';
+
+function resolvesToOperator(inputPath, options) {
+  try {
+    return resolvePath(inputPath, options).repo === 'operator';
+  } catch (error) {
+    // The manifest may resolve a path that is ambiguous during this check.
+    if (error instanceof WhereToFixError) return false;
+    throw error;
+  }
+}
 
 const args = process.argv.slice(2);
 const json = args[0] === '--json';
@@ -20,15 +31,16 @@ if (!paths.length) {
 
 try {
   const workspaceRoot = findWorkspaceRoot(fileURLToPath(import.meta.url));
-  const manifest = loadManifest({ workspaceRoot });
-  console.error(`ℹ️ manifest: ${manifest.source}`);
-  for (const warning of manifest.index.warnings || []) {
-    console.error(`⚠️ manifest: ${warning}`);
+  const options = { workspaceRoot, index: createManifestIndex([]) };
+  if (!paths.every((inputPath) => resolvesToOperator(inputPath, options))) {
+    const manifest = loadManifest({ workspaceRoot });
+    options.index = manifest.index;
+    console.error(`ℹ️ manifest: ${manifest.source}`);
+    for (const warning of manifest.index.warnings || []) {
+      console.error(`⚠️ manifest: ${warning}`);
+    }
   }
-  const reports = paths.map((inputPath) => resolvePath(inputPath, {
-    workspaceRoot,
-    index: manifest.index,
-  }));
+  const reports = paths.map((inputPath) => resolvePath(inputPath, options));
 
   if (json) {
     console.log(JSON.stringify(reports, null, 2));

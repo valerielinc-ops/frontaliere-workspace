@@ -32,6 +32,7 @@ function defaultGitTip(repoRoot, ref) {
 export const REPO_NAMES = Object.freeze({
   site: 'frontaliere-si-o-no',
   corpus: 'frontaliere-articles',
+  operator: 'frontaliere-operator',
 });
 
 export const FIX_REPO_BY_MODE = Object.freeze({
@@ -81,7 +82,7 @@ export function findWorkspaceRoot(startPath = MODULE_DIR, fsImpl = fs) {
   let current = isDirectory(resolvedStart, fsImpl) ? resolvedStart : path.dirname(resolvedStart);
 
   while (true) {
-    if (isDirectory(path.join(current, REPO_NAMES.site), fsImpl) || isDirectory(path.join(current, REPO_NAMES.corpus), fsImpl)) {
+    if (Object.values(REPO_NAMES).some((name) => isDirectory(path.join(current, name), fsImpl))) {
       return current;
     }
     const parent = path.dirname(current);
@@ -236,12 +237,14 @@ function repoRoots(workspaceRoot) {
   return {
     site: path.join(workspaceRoot, REPO_NAMES.site),
     corpus: path.join(workspaceRoot, REPO_NAMES.corpus),
+    operator: path.join(workspaceRoot, REPO_NAMES.operator),
   };
 }
 
 function repoForAbsolute(absolutePath, roots) {
   if (isWithin(roots.corpus, absolutePath)) return 'corpus';
   if (isWithin(roots.site, absolutePath)) return 'site';
+  if (isWithin(roots.operator, absolutePath)) return 'operator';
   return null;
 }
 
@@ -251,11 +254,7 @@ function relativePathInRepo(absolutePath, repo, roots) {
 
 function resolveRelativeFromWorkspace(inputPath, { workspaceRoot, roots, index, fsImpl = fs }) {
   const normalized = normalizeRepoPath(inputPath);
-  const explicitRepo = normalized.startsWith(`${REPO_NAMES.site}/`)
-    ? 'site'
-    : normalized.startsWith(`${REPO_NAMES.corpus}/`)
-      ? 'corpus'
-      : null;
+  const explicitRepo = Object.keys(REPO_NAMES).find((repo) => normalized.startsWith(`${REPO_NAMES[repo]}/`));
 
   if (explicitRepo) {
     const relativePath = normalized.slice(REPO_NAMES[explicitRepo].length + 1);
@@ -266,7 +265,7 @@ function resolveRelativeFromWorkspace(inputPath, { workspaceRoot, roots, index, 
     };
   }
 
-  const existingRepos = Object.keys(roots).filter((repo) => fsImpl.existsSync(path.join(roots[repo], normalized)));
+  const existingRepos = ['site', 'corpus'].filter((repo) => fsImpl.existsSync(path.join(roots[repo], normalized)));
   const manifestRepos = Object.keys(index.byRepo).filter((repo) => index.byRepo[repo].has(normalized));
   const candidates = existingRepos.length ? existingRepos : manifestRepos;
 
@@ -320,6 +319,23 @@ export function resolvePath(inputPath, {
 } = {}) {
   const manifestIndex = index || createManifestIndex(entries || []);
   const resolved = resolveInputPath(inputPath, { cwd, workspaceRoot, index: manifestIndex, fsImpl });
+  if (resolved.repo === 'operator') {
+    return {
+      input: inputPath,
+      repo: resolved.repo,
+      repoName: REPO_NAMES.operator,
+      relativePath: resolved.relativePath,
+      mode: null,
+      fixRepo: 'operator',
+      fixRepoName: REPO_NAMES.operator,
+      corresponding: null,
+      correspondingAll: [],
+      reason: 'Path del repository indipendente.',
+      manifestReason: null,
+      warnings: [],
+      repoMatchesFix: true,
+    };
+  }
   const matched = manifestIndex.allByRepo?.[resolved.repo]?.get(resolved.relativePath)
     || [manifestIndex.byRepo[resolved.repo].get(resolved.relativePath)].filter(Boolean);
   const entry = matched[0] || null;
@@ -362,7 +378,7 @@ export function resolvePath(inputPath, {
 
 export function formatHuman(report) {
   const status = report.repoMatchesFix ? '✓' : '⚠️';
-  const mode = report.mode || 'assente (nessuna entry)';
+  const mode = report.repo === 'operator' ? 'non applicabile' : report.mode || 'assente (nessuna entry)';
   const fixRepo = report.fixRepo ? `${report.fixRepo.toUpperCase()} (${report.fixRepoName})` : 'nessun vincolo';
   const correspondingList = report.correspondingAll?.length
     ? report.correspondingAll
