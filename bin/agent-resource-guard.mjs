@@ -829,7 +829,8 @@ function remediation(classification) {
   return 'Attendi la fine del job pesante corrente e riprova; i job leggeri possono continuare.';
 }
 
-// ── Sparse checkout del sito ───────────────────────────────────────────────
+// ── Protezioni Git del resource guard ──────────────────────────────────────
+// Sparse checkout del sito:
 // Il 2026-11-15 il disco si è riempito per quattro worktree del sito da
 // 5,55 GiB creati tra le 00:20 e le 04:27Z. Nascevano sparse
 // (`fast-worktree.sh`), poi una sessione eseguiva `git sparse-checkout
@@ -843,6 +844,279 @@ const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--exec-path', '--config-env', '--attr-source']);
 const CONFIG_OPTIONS_WITH_VALUE = new Set(['-f', '--file', '--blob', '--type', '-t', '--default', '--comment']);
 const WRAPPER_WORDS = new Set(['command', 'exec', 'time', 'nohup', 'nice', 'builtin']);
+
+const OBJECT_READING_GIT_COMMANDS = new Set([
+  'checkout', 'switch', 'reset', 'branch', 'cherry-pick', 'revert', 'merge', 'rebase',
+  'diff', 'log', 'whatchanged', 'show', 'merge-base', 'rev-list', 'rev-parse', 'cat-file',
+  'blame', 'describe', 'name-rev', 'range-diff', 'format-patch', 'merge-tree', 'diff-tree', 'ls-tree',
+]);
+const GIT_COMMANDS_WITH_REVISION_OPTIONS = new Set([
+  '--contains', '--merged', '--no-merged', '--onto', '--exclude', '--not', '--revs-only', '--verify',
+]);
+const FULL_OBJECT_ID = '(?:[0-9a-f]{40}|[0-9a-f]{64})';
+const OBJECT_ID_REVISION = new RegExp(`^(${FULL_OBJECT_ID})(?:(?:\\^\\{[^}]*\\})|\\^\\d*|~\\d*|@\\{[^}]*\\})*$`, 'i');
+const gitVersionCache = new Map();
+let gitExecutableCache;
+
+/** Find Git candidates in PATH and common install roots; version checks choose a usable modern one. */
+function gitExecutables() {
+  const pathValue = String(process.env.PATH ?? '');
+  const home = os.homedir();
+  const cacheKey = `${pathValue}\0${home}`;
+  if (gitExecutableCache?.key === cacheKey) return gitExecutableCache.candidates;
+
+  const candidates = pathValue.split(path.delimiter).map((directory) => path.resolve(directory || '.', 'git'));
+  for (const directory of ['/usr/bin', '/usr/local/bin', '/opt/homebrew/bin', path.join(home, '.local', 'bin')]) {
+    candidates.push(path.join(directory, 'git'));
+  }
+  const localRoot = path.join(home, '.local');
+  try {
+    for (const entry of readdirSync(localRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && /^git-.+/.test(entry.name)) candidates.push(path.join(localRoot, entry.name, 'bin', 'git'));
+    }
+  } catch {
+    // A missing ~/.local is normal; PATH and system install roots still apply.
+  }
+  const unique = [...new Set(candidates)];
+  gitExecutableCache = { key: cacheKey, candidates: unique };
+  return unique;
+}
+
+function gitVersion(executable) {
+  if (gitVersionCache.has(executable)) return gitVersionCache.get(executable);
+  let version;
+  try {
+    const output = execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const match = output.match(/\bgit version (\d+)\.(\d+)(?:\.(\d+))?/i);
+    if (match) version = { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3] ?? 0) };
+  } catch {
+    // Non-Git executables named `git` in PATH are ignored.
+  }
+  gitVersionCache.set(executable, version);
+  return version;
+}
+
+function supportsNoLazyFetch(version) {
+  return Boolean(version && (version.major > 2 || (version.major === 2 && version.minor >= 44)));
+}
+
+/** Return a discovered Git >= 2.44 without assuming a platform-specific install path. */
+export function findModernGitExecutable(candidates = gitExecutables()) {
+  return candidates.find((candidate) => supportsNoLazyFetch(gitVersion(candidate)));
+}
+
+function tokenObjectIds(token) {
+  const value = String(token ?? '');
+  const collect = (revision) => {
+    const match = revision.match(OBJECT_ID_REVISION);
+    return match ? [match[1].toLowerCase()] : [];
+  };
+
+  const colon = value.indexOf(':');
+  if (colon > 0) {
+    const ids = collect(value.slice(0, colon));
+    if (ids.length) return ids;
+  }
+  const direct = collect(value);
+  if (direct.length) return direct;
+
+  // A range can have a full object id on either side and a symbolic ref on the other.
+  const rangeAt = value.indexOf('...') >= 0 ? value.indexOf('...') : value.indexOf('..');
+  if (rangeAt >= 0) {
+    const width = value.startsWith('...', rangeAt) ? 3 : 2;
+    if (value.indexOf('..', rangeAt + width) >= 0) return [];
+    const left = value.slice(0, rangeAt);
+    const right = value.slice(rangeAt + width);
+    if (!left || !right) return [];
+    return [...collect(left), ...collect(right)];
+  }
+
+  return [];
+}
+
+function unwrappedCommandWords(segment) {
+  let words = shellWords(segment);
+  let at = 0;
+  while (at < words.length) {
+    const word = words[at];
+    if (ENV_ASSIGNMENT.test(word) || WRAPPER_WORDS.has(word)) at += 1;
+    else if (word === 'env') {
+      at += 1;
+      while (at < words.length && (words[at].startsWith('-') || ENV_ASSIGNMENT.test(words[at]))) {
+        at += words[at] === '-u' ? 2 : 1;
+      }
+    } else break;
+  }
+  return words.slice(at);
+}
+
+function parseGitInvocation(words, current, workspace) {
+  if (!words.length || path.basename(words[0]) !== 'git') return undefined;
+  let directory = current;
+  let hasNoLazyFetch = false;
+  let index = 1;
+  while (index < words.length && words[index].startsWith('-')) {
+    const option = words[index];
+    const equals = option.startsWith('--') ? option.indexOf('=') : -1;
+    const name = equals > 0 ? option.slice(0, equals) : option;
+    const inlineValue = equals > 0 ? option.slice(equals + 1) : undefined;
+    const takesValue = GIT_OPTIONS_WITH_VALUE.has(name);
+    const value = inlineValue ?? (takesValue ? words[index + 1] : undefined);
+    index += takesValue && inlineValue === undefined ? 2 : 1;
+    if (name === '--no-lazy-fetch') hasNoLazyFetch = true;
+    if (name === '-C' && value !== undefined) {
+      const expanded = expandPathWord(value, workspace);
+      directory = expanded === undefined || directory === undefined && !path.isAbsolute(expanded)
+        ? undefined
+        : path.resolve(directory ?? '/', expanded);
+    }
+  }
+  return {
+    directory,
+    hasNoLazyFetch,
+    subcommand: words[index],
+    args: words.slice(index + 1),
+  };
+}
+
+function gitConfigIsPartial(executable, repository) {
+  if (!executable || !repository) return false;
+  let output = '';
+  try {
+    output = execFileSync(executable, [
+      '-C', repository, 'config', '--get-regexp', '^remote\\..*\\.promisor$|^extensions\\.partialClone$',
+    ], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return false;
+  }
+  return output.split('\n').some((line) => {
+    const match = line.trim().match(/^(\S+)\s+(.+)$/);
+    if (!match) return false;
+    const key = match[1].toLowerCase();
+    const value = match[2].trim().toLowerCase();
+    if (key === 'extensions.partialclone') return Boolean(value);
+    return key.endsWith('.promisor') && ['true', 'yes', 'on', '1'].includes(value);
+  });
+}
+
+function gitObjectExistsWithoutFetch(executable, repository, oid) {
+  try {
+    execFileSync(executable, ['--no-lazy-fetch', '-C', repository, 'cat-file', '-e', oid], {
+      encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isUnboundedPartialCloneHistory(invocation) {
+  const { subcommand, args } = invocation;
+  const options = args.slice(0, args.indexOf('--') < 0 ? args.length : args.indexOf('--'));
+  if (['log', 'whatchanged'].includes(subcommand)) {
+    return options.some((argument) => /^-p(?:.|$)/.test(argument) || argument === '--patch' || argument === '--follow'
+      || /^-[SG](?:.|$)/.test(argument) || ['-S', '-G'].includes(argument));
+  }
+  if (subcommand !== 'blame') return false;
+
+  const bounded = options.some((argument) => argument === '-n' || /^-n\d+$/.test(argument)
+    || argument === '--max-count' || argument.startsWith('--max-count=')
+    || argument === '--since' || argument.startsWith('--since=')
+    || argument === '--after' || argument.startsWith('--after=')
+    || /^[^\s.]+\.{2,3}[^\s.]+$/.test(argument));
+  return !bounded;
+}
+
+function partialCloneOidReason(oid) {
+  return `l'oid completo ${oid} non è nel clone parziale: Git potrebbe scaricare circa 450 MB di pack con tutta la storia. `
+    + `Prima esegui \`git fetch origin refs/pull/<N>/head\` per la head di una PR, oppure \`git fetch origin ${oid}\`; poi riesegui lo stesso comando.`;
+}
+
+/**
+ * Protect partial clones from implicit full-history fetches and historical blob scans.
+ * An unresolved repository or an unavailable Git >= 2.44 remains fail-open.
+ */
+export function partialCloneGitDecision(command, cwd, workspace = findWorkspace(cwd), options = {}) {
+  let current = cwd ? path.resolve(String(cwd)) : undefined;
+  const candidates = options.gitCandidates ?? gitExecutables();
+  let configGit = options.configGit;
+  let configGitChecked = options.configGit !== undefined;
+  let modernGit = options.modernGit;
+  let modernGitChecked = options.modernGit !== undefined;
+  const getConfigGit = () => {
+    if (!configGitChecked) {
+      configGit = candidates.find((candidate) => gitVersion(candidate));
+      configGitChecked = true;
+    }
+    return configGit;
+  };
+  const getModernGit = () => {
+    if (!modernGitChecked) {
+      modernGit = findModernGitExecutable(candidates);
+      modernGitChecked = true;
+    }
+    return modernGit;
+  };
+
+  for (const segment of shellSegments(command)) {
+    const words = unwrappedCommandWords(segment);
+    if (!words.length) continue;
+    if (words[0] === 'cd' || words[0] === 'pushd' || words[0] === 'popd') {
+      const operand = words.slice(1).find((word) => !/^-[LPe@]*$/.test(word) || word === '-');
+      if (words[0] === 'popd' || operand === '-') current = undefined;
+      else if (operand === undefined) current = os.homedir();
+      else {
+        const expanded = expandPathWord(operand, workspace);
+        current = expanded === undefined || current === undefined && !path.isAbsolute(expanded)
+          ? undefined
+          : path.resolve(current ?? '/', expanded);
+      }
+      continue;
+    }
+
+    const invocation = parseGitInvocation(words, current, workspace);
+    if (!invocation || !invocation.directory || invocation.hasNoLazyFetch) continue;
+    if (['fetch', 'push', 'ls-remote', 'clone', 'remote', 'config'].includes(invocation.subcommand)) continue;
+    const readsObjects = OBJECT_READING_GIT_COMMANDS.has(invocation.subcommand)
+      || invocation.subcommand === 'worktree' && invocation.args[0] === 'add';
+    const historyScan = ['log', 'whatchanged', 'blame'].includes(invocation.subcommand);
+    if (!readsObjects && !historyScan) continue;
+    if (!gitConfigIsPartial(getConfigGit(), invocation.directory)) continue;
+
+    if (isUnboundedPartialCloneHistory(invocation)) {
+      const form = invocation.subcommand === 'blame' ? '`git blame` senza limite' : `\`git ${invocation.subcommand} -p/-S/-G/--follow\``;
+      const reason = `${form} nel clone parziale legge blob storici e li lascia nei pack. `
+        + 'Limita il blame con -n/--max-count, -L, --since/--after o un range; per il log evita -p/--patch/-S/-G/--follow.';
+      return { form, reason };
+    }
+
+    if (!readsObjects) continue;
+
+    const args = invocation.subcommand === 'worktree' ? invocation.args.slice(1) : invocation.args;
+    const revisions = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === '--') break;
+      const argument = args[index];
+      if (argument.startsWith('--') && argument.includes('=')) {
+        const option = argument.slice(0, argument.indexOf('='));
+        if (GIT_COMMANDS_WITH_REVISION_OPTIONS.has(option)) revisions.push(...tokenObjectIds(argument.slice(argument.indexOf('=') + 1)));
+      }
+      if (!argument.startsWith('-')) revisions.push(...tokenObjectIds(argument));
+    }
+    if (!revisions.length) continue;
+
+    const modernGit = getModernGit();
+    if (!modernGit) continue;
+
+    for (const oid of new Set(revisions)) {
+      if (!gitObjectExistsWithoutFetch(modernGit, invocation.directory, oid)) {
+        const form = `OID ${oid}`;
+        return { form, reason: partialCloneOidReason(oid) };
+      }
+    }
+  }
+  return undefined;
+}
 
 /** Quoted text is masked by shellExecutableText, so separators are found on it and the raw text is sliced. */
 function shellSegments(command) {
@@ -864,7 +1138,9 @@ function shellSegments(command) {
         continue;
       }
     }
-    if (character === ';' || character === '\n' || character === '|' || character === '&' || character === '(' || character === ')' || character === '{' || character === '}') {
+    const braceGroupStart = character === '{' && (index === 0 || /[\s;|&()]/.test(executable[index - 1])) && /\s/.test(executable[index + 1] ?? '');
+    const braceGroupEnd = character === '}' && /\s/.test(executable[index - 1] ?? '') && (index === executable.length - 1 || /[\s;|&()]/.test(executable[index + 1]));
+    if (character === ';' || character === '\n' || character === '|' || character === '&' || character === '(' || character === ')' || braceGroupStart || braceGroupEnd) {
       flush(index);
       start = index + 1;
     }
@@ -1164,6 +1440,13 @@ export function guardPre(info, workspace = findWorkspace(info.cwd), options = {}
     appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason: sparseOff.reason });
     process.stderr.write(`\n🚫 resource-guard: comando bloccato — ${sparseOff.reason}\n`);
     return { allowed: false, id, classification, runtimeDir, reason: sparseOff.reason };
+  }
+
+  const partialGit = isBypassEnabled() ? undefined : partialCloneGitDecision(info.command, info.cwd, workspace, options);
+  if (partialGit) {
+    appendJson(runtimeDir, { type: 'command_blocked', ...baseRecord, reason: partialGit.reason });
+    process.stderr.write(`\n🚫 resource-guard: comando bloccato — ${partialGit.reason}\n`);
+    return { allowed: false, id, classification, runtimeDir, reason: partialGit.reason };
   }
 
   if (!classification.heavy) {
