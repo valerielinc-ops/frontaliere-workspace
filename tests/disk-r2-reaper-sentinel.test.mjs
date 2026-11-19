@@ -147,6 +147,11 @@ test('reaper prende MCP e app-server orfani vecchi e fsmonitor vecchi o con work
       processRow(403, 1, 30, 'git fsmonitor--daemon run --detach'),
       processRow(404, 1, 25 * 3600, 'git fsmonitor--daemon run --detach'),
       processRow(405, 77, 25 * 3600, 'git fsmonitor--daemon run --detach'),
+      processRow(406, 1, 3 * 3600, 'codex app-server'),
+      // Il daemon Codex avviato da launchd: ppid 1 e settimane di vita, mai un bersaglio.
+      processRow(407, 1, 50 * 86400, '/Users/u/.codex/packages/app-server-daemon/releases/0.170.0-x86_64-apple-darwin/bin/codex app-server daemon pid-update-loop'),
+      processRow(408, 1, 30 * 86400, '/opt/codex/bin/codex app-server --remote-control --listen unix:// --analytics-default-enabled'),
+      processRow(409, 1, 30 * 86400, 'codex app-server daemon pid-update-loop'),
     ];
     const result = await runReaper(reaperOptions(dir, {
       listProcesses: () => rows,
@@ -159,6 +164,7 @@ test('reaper prende MCP e app-server orfani vecchi e fsmonitor vecchi o con work
       [402, 'orphan_mcp_or_app_server'],
       [403, 'fsmonitor_worktree_missing'],
       [404, 'orphan_fsmonitor_age'],
+      [406, 'orphan_mcp_or_app_server'],
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
