@@ -482,8 +482,28 @@ function listWorktreeIndexBlobs(repoInfo, worktrees) {
       if (match[1] === 'S') continue;
       entries.push(match[2]);
     }
+    entries.push(...stagedHeadBlobs(repoInfo, worktree));
   }
   return unique(entries);
+}
+
+// HEAD-side blobs of the changes staged in a worktree. `git status` detects
+// renames between HEAD and the index and reads these blobs, which are not in
+// the index. Measured on 2026-11-19: the site main checkout, stuck in an
+// abandoned rebase with 37,420 staged changes, needed 16,200 of them (0.36 GiB
+// on disk); without them status failed with lazy fetch off and the run rolled
+// back (blob fff81149).
+function stagedHeadBlobs(repoInfo, worktree) {
+  const result = git(worktree.path, ['diff-index', '--cached', '--no-renames', '--raw', '-z', 'HEAD'], {
+    gitBin: repoInfo.gitBin, raw: true, encoding: null, allowFailure: true,
+  });
+  if (!result || result.status !== 0) return []; // unborn HEAD: nothing staged against it
+  const found = [];
+  for (const field of result.stdout.toString('latin1').split('\0')) {
+    const match = /^:\d+ \d+ ([0-9a-f]{40,64}) [0-9a-f]{40,64} [A-Z]/.exec(field);
+    if (match && !/^0+$/.test(match[1])) found.push(match[1]);
+  }
+  return found;
 }
 
 // `diskSize` reads the on-disk (compressed) size: the uncompressed size of the
