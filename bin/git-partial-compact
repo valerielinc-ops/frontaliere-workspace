@@ -576,6 +576,13 @@ function estimatePackBytes(repoInfo, promisorRoots, localRoots, indexOids, remot
 
 function snapshot(repoInfo, options) {
   const { repo, gitBin } = repoInfo;
+  // The packs to replace are fixed BEFORE refs are enumerated: a pack written
+  // after this point (a fetch during the run) is never quarantined, since its
+  // objects may not be reachable from the roots enumerated below. On the agent
+  // host on 2026-11-19 a fetch at 21:51:29 brought origin/main commit 135de89a
+  // into a pack that was listed only after the estimate and then quarantined.
+  const beforePacks = packFiles(repoInfo.packDir);
+  const bytesBefore = packBytes(repoInfo.packDir);
   const refList = refs(repo, gitBin);
   const worktrees = parseWorktrees(repo, gitBin);
   const blockers = safetyBlockers(repoInfo, worktrees);
@@ -595,8 +602,6 @@ function snapshot(repoInfo, options) {
     ...adminWorktreeRoots(repoInfo),
   ]);
   const estimate = estimatePackBytes(repoInfo, roots.roots, localRoots, indexOids, remoteTips);
-  const beforePacks = packFiles(repoInfo.packDir);
-  const bytesBefore = packBytes(repoInfo.packDir);
   const free = freeBytes(repo);
   const statuses = captureStatuses(repoInfo, worktrees);
   const refsLocal = refList.filter((ref) => !ref.name.startsWith(`refs/remotes/${remote}/`)).length;
@@ -936,8 +941,50 @@ function applyCompaction(repoInfo, options, measurement, statePaths) {
     if (local) changed = true;
     const promotedLocal = promotePack(repoInfo, local);
 
+    // Refs and HEADs moved during the run (fetches, checkouts, a ref re-created
+    // on an older commit) may reach objects that live only in the packs about to
+    // be quarantined: one more promisor pack covers everything reachable from
+    // the new tips and not from the roots already packed. The remaining window
+    // is the few seconds until the rename; verify() rolls back on a miss.
+    const knownRoots = new Set(measurement.roots);
+    const currentWorktrees = parseWorktrees(repoInfo.repo, repoInfo.gitBin);
+    const currentTips = unique([
+      ...refs(repoInfo.repo, repoInfo.gitBin).map((ref) => ref.oid),
+      ...currentWorktrees.map((worktree) => worktree.head),
+      ...operationRoots(repoInfo, currentWorktrees),
+      ...adminWorktreeRoots(repoInfo),
+    ]);
+    const newTips = currentTips.filter((oid) => !knownRoots.has(oid));
+    let promotedCatchup = null;
+    let promotedLocalCatchup = null;
+    if (newTips.length) {
+      const catchupInput = `${[...newTips, ...measurement.roots.map((oid) => `^${oid}`)].join('\n')}\n`;
+      const catchup = writePack(repoInfo, scratch, 'pack-catchup', catchupInput, true);
+      if (catchup) {
+        generatedPrefixes.push(path.join(repoInfo.packDir, `pack-${catchup.hash}`));
+        promotedCatchup = promotePack(repoInfo, catchup);
+      }
+      // New tips of local work (a branch re-created on an old commit, a HEAD
+      // moved) also need their blobs, except what the server already has.
+      const currentLocalRoots = new Set([
+        ...localWorkRoots(repoInfo, currentWorktrees, refs(repoInfo.repo, repoInfo.gitBin)),
+        ...operationRoots(repoInfo, currentWorktrees),
+        ...adminWorktreeRoots(repoInfo),
+      ]);
+      const newLocalTips = newTips.filter((oid) => currentLocalRoots.has(oid));
+      if (newLocalTips.length) {
+        const localInput = `${[...newLocalTips, ...measurement.remoteTips.map((oid) => `^${oid}`)].join('\n')}\n`;
+        const localCatchup = writePack(repoInfo, scratch, 'pack-local-catchup', localInput, false);
+        if (localCatchup) {
+          generatedPrefixes.push(path.join(repoInfo.packDir, `pack-${localCatchup.hash}`));
+          promotedLocalCatchup = promotePack(repoInfo, localCatchup);
+        }
+      }
+      measurement.roots = unique([...measurement.roots, ...newTips]);
+    }
+
     quarantine = uniqueQuarantine(repoInfo.packDir);
-    const outputNames = [promotedPromisor, promotedLocal].filter(Boolean);
+    const outputNames = [promotedPromisor, promotedLocal, promotedCatchup, promotedLocalCatchup].filter(Boolean);
     changed = true;
     quarantinePackAndIndexes(repoInfo, initialPackFiles, outputNames, quarantine);
     rewriteIndexes(repoInfo);
