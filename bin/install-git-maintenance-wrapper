@@ -36,6 +36,8 @@ disabled_marker="$install_dir/disabled"
 uid=$(/usr/bin/id -u)
 plutil_bin=${FRONTALIERE_PLUTIL_BIN:-/usr/bin/plutil}
 launchctl_bin=${FRONTALIERE_LAUNCHCTL_BIN:-/bin/launchctl}
+kernel_name=${FRONTALIERE_KERNEL_NAME:-$(/usr/bin/uname -s)}
+kernel_release=${FRONTALIERE_KERNEL_RELEASE:-$(/usr/bin/uname -r)}
 
 set_plist_string() {
   if ! "$plutil_bin" -replace "$1" -string "$2" "$3" 2>/dev/null; then
@@ -221,11 +223,41 @@ restore_mole_whitelist() {
   fi
 }
 
+remove_managed_shim() {
+  managed_shim "$shim" || return 0
+  if [ -f "$shim_original" ]; then
+    /bin/cp -pP "$shim_original" "$shim"
+  elif [ -f "$shim_backup" ]; then
+    /bin/cp -pP "$shim_backup" "$shim"
+  else
+    /bin/rm -f "$shim"
+  fi
+  /bin/rm -f "$shim_original"
+  [ -f "$shim_backup_created" ] && /bin/rm -f "$shim_backup"
+  /bin/rm -f "$shim_backup_created"
+}
+
+# macOS 26 (Darwin 25) leaks ~1 KiB of wired kernel memory for every exec of a
+# `#!` script by a process that already descends from a `#!` script (see
+# "Leak kernel da script annidati" in the reference). `~/.local/bin` is first
+# in PATH there too, so a `#!/bin/sh` git shim would turn every git call made by
+# node hooks and scripts into a leak. There the shim is not installed, and a
+# managed one is removed.
+shim_kernel_leak_host() {
+  [ "$kernel_name" = Darwin ] || return 1
+  [ "${kernel_release%%.*}" = 25 ]
+}
+
 install_git_shim() {
   [ -f "$shim_source" ] || {
     printf '%s missing source shim: %s\n' "install-git-maintenance-wrapper:" "$shim_source" >&2
     exit 78
   }
+  if shim_kernel_leak_host; then
+    remove_managed_shim
+    printf '%s git shim non installato: Darwin %s perde memoria kernel a ogni exec di script #! annidati\n' "install-git-maintenance-wrapper:" "$kernel_release" >&2
+    return 0
+  fi
   /bin/mkdir -p "$shim_dir" "$install_dir"
   if [ -e "$shim" ] && ! managed_shim "$shim" && [ ! -f "$shim_original" ]; then
     /bin/cp -pP "$shim" "$shim_original"
@@ -234,12 +266,26 @@ install_git_shim() {
       : >"$shim_backup_created"
     fi
   fi
-  if ! /usr/bin/cmp -s "$shim_source" "$shim"; then
-    temporary_shim="$shim.$$"
+  # Bake the Git resolved now into the installed copy, so a call does not probe
+  # versions; the shim falls back to discovery if that path disappears.
+  resolved_git=$(FRONTALIERE_GIT_SHIM_PRINT=1 HOME="$HOME" /bin/sh "$shim_source" 2>/dev/null) || resolved_git=''
+  case "$resolved_git" in
+    /*) ;;
+    *) resolved_git='' ;;
+  esac
+  temporary_shim="$shim.$$"
+  if [ -n "$resolved_git" ]; then
+    escaped_git=$(printf '%s\n' "$resolved_git" | /usr/bin/sed 's/[\/&|]/\\&/g')
+    /usr/bin/sed "s|@FRONTALIERE_RESOLVED_GIT@|$escaped_git|" "$shim_source" >"$temporary_shim"
+  else
     /bin/cp "$shim_source" "$temporary_shim"
-    /bin/chmod 755 "$temporary_shim"
-    /bin/mv -f "$temporary_shim" "$shim"
   fi
+  if /usr/bin/cmp -s "$temporary_shim" "$shim"; then
+    /bin/rm -f "$temporary_shim"
+    return 0
+  fi
+  /bin/chmod 755 "$temporary_shim"
+  /bin/mv -f "$temporary_shim" "$shim"
 }
 
 install_hourly_if_missing() {
@@ -437,17 +483,7 @@ case "$action" in
     fi
 
     restore_mole_whitelist
-    if managed_shim "$shim"; then
-      if [ -f "$shim_original" ]; then
-        /bin/cp -pP "$shim_original" "$shim"
-      elif [ -f "$shim_backup" ]; then
-        /bin/cp -pP "$shim_backup" "$shim"
-      else
-        /bin/rm -f "$shim"
-      fi
-      /bin/rm -f "$shim_original"
-      [ -f "$shim_backup_created" ] && /bin/rm -f "$shim_backup"
-    fi
+    remove_managed_shim
     /bin/rm -f "$shim_backup_created" "$wrapper"
     if [ -f "$wrapper_backup" ]; then /bin/mv -f "$wrapper_backup" "$wrapper"; fi
     /bin/rm -rf "$backup_dir" "$config_backup_dir"

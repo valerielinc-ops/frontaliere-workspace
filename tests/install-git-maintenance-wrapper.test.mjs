@@ -291,6 +291,43 @@ test('installer adds one hourly job, preserves a user shim and Mole entries, and
   }
 });
 
+test('installer bakes the resolved Git into the shim and skips the shim on Darwin 25 (nested #! kernel leak)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'git maintenance shim host-'));
+  try {
+    const fixture = installerFixture(root, ['daily', 'sunday']);
+    const { env, home } = fixture;
+    const shimDir = join(home, '.local', 'bin');
+    const shim = join(shimDir, 'git');
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(shim, '#!/bin/sh\necho user-git\n', { mode: 0o755 });
+
+    const installed = runInstaller([], { ...env, FRONTALIERE_KERNEL_NAME: 'Darwin', FRONTALIERE_KERNEL_RELEASE: '22.6.0' });
+    assert.equal(installed.status, 0, installed.stderr);
+    const body = readFileSync(shim, 'utf8');
+    assert.match(body, /FRONTALIERE_GIT_SHIM=1/);
+    assert.doesNotMatch(body, /resolved_git='@FRONTALIERE_RESOLVED_GIT@'/, 'the installed copy carries the resolved Git');
+    const baked = body.match(/^resolved_git='(\/[^']+)'$/m);
+    assert.ok(baked, 'resolved_git is an absolute path');
+    assert.ok(existsSync(baked[1]));
+    const version = spawnSync(shim, ['--version'], { encoding: 'utf8', env: { ...env, FRONTALIERE_FETCH_THROTTLE: '0' } });
+    assert.equal(version.status, 0, version.stderr);
+    assert.match(version.stdout, /^git version /);
+
+    const leakHost = runInstaller([], { ...env, FRONTALIERE_KERNEL_NAME: 'Darwin', FRONTALIERE_KERNEL_RELEASE: '25.2.0' });
+    assert.equal(leakHost.status, 0, leakHost.stderr);
+    assert.match(leakHost.stderr, /git shim non installato: Darwin 25\.2\.0/);
+    assert.equal(readFileSync(shim, 'utf8'), '#!/bin/sh\necho user-git\n', 'the user shim comes back on a leak host');
+    assert.equal(existsSync(join(shimDir, 'git.pre-frontaliere')), false);
+
+    rmSync(shim, { force: true });
+    const fresh = runInstaller([], { ...env, FRONTALIERE_KERNEL_NAME: 'Darwin', FRONTALIERE_KERNEL_RELEASE: '25.4.0' });
+    assert.equal(fresh.status, 0, fresh.stderr);
+    assert.equal(existsSync(shim), false, 'no shim is created on Darwin 25');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // The real wrapper against fake git/df/time/taskpolicy/sysctl: only the MIDX
 // repack invocation and the log matter here.
 const WRAPPER = join(ROOT, 'bin', 'git-maintenance-wrapper');

@@ -40,14 +40,28 @@ is_shim_path() {
   candidate_path=$1
   [ "$candidate_path" = "$home_dir/.local/bin/git" ] && return 0
   [ -e "$home_dir/.local/bin/git" ] && [ "$candidate_path" -ef "$home_dir/.local/bin/git" ] && return 0
-  [ -f "$candidate_path" ] && grep -q 'FRONTALIERE_GIT_SHIM=1' "$candidate_path" 2>/dev/null
+  # Only the header: grepping a whole Git binary on every call is measurable.
+  [ -f "$candidate_path" ] && head -c 2048 "$candidate_path" 2>/dev/null | grep -q 'FRONTALIERE_GIT_SHIM=1'
 }
+
+# The installer replaces the placeholder with the Git it resolved, so a normal
+# call is one exec with no version probing. The discovery below runs only for
+# the uninstalled source, an explicit FRONTALIERE_GIT_BIN, or a baked path that
+# no longer exists (e.g. an old ~/.local/git-* removed after an upgrade).
+git_bin=''
+resolved_git='@FRONTALIERE_RESOLVED_GIT@'
+if [ -z "${FRONTALIERE_GIT_BIN:-}" ] && [ -z "${FRONTALIERE_GIT_SHIM_PRINT:-}" ]; then
+  case "$resolved_git" in
+    /*) [ -x "$resolved_git" ] && git_bin=$resolved_git ;;
+  esac
+fi
 
 get_git_version() {
   version_output=$("$1" --version 2>/dev/null) || return 1
   printf '%s\n' "$version_output" | sed -n 's/^git version \([0-9][0-9.]*\).*$/\1/p' | sed -n '1p'
 }
 
+discover_git() {
 local_git=''
 local_git_version=''
 for candidate in "$home_dir"/.local/git-*/bin/git; do
@@ -108,6 +122,13 @@ elif [ -n "$best_git" ]; then
 else
   printf '%s\n' 'frontaliere git shim: no Git executable found' >&2
   exit 127
+fi
+}
+
+[ -n "$git_bin" ] || discover_git
+if [ -n "${FRONTALIERE_GIT_SHIM_PRINT:-}" ]; then
+  printf '%s\n' "$git_bin"
+  exit 0
 fi
 
 throttle_opt_out=${FRONTALIERE_FETCH_THROTTLE:-1}
