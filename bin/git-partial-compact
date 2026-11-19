@@ -1,0 +1,982 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const MIN_GIT = [2, 44, 0];
+const GIB = 1024 ** 3;
+const PACK_SUFFIXES = ['.pack', '.idx', '.rev', '.promisor', '.bitmap', '.mtimes', '.keep'];
+const WORKTREE_OPERATIONS = [
+  'MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG',
+  'BISECT_START', 'BISECT_EXPECTED_REV', 'rebase-merge', 'rebase-apply', 'sequencer',
+];
+const LOCK_PYTHON = String.raw`
+import fcntl
+import os
+import sys
+
+paths, executable, script, *arguments = sys.argv[1:]
+descriptors = []
+try:
+    for lock_path in paths.split(os.pathsep):
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(75)
+        os.set_inheritable(fd, True)
+        descriptors.append(fd)
+    environment = os.environ.copy()
+    environment['FRONTALIERE_GIT_PARTIAL_COMPACT_LOCKED'] = '1'
+    os.execve(executable, [executable, script, *arguments], environment)
+except OSError as error:
+    print(f'git-partial-compact: lock error: {error}', file=sys.stderr)
+    sys.exit(74)
+`;
+
+function parseArgs(argv) {
+  if (argv[0] === 'install' || argv[0] === 'uninstall') {
+    if (argv.length !== 1) throw new Error(`${argv[0]} non accetta opzioni`);
+    return { command: argv[0] };
+  }
+  const options = { command: 'run', repo: process.cwd(), apply: false, convert: false, ifNeeded: false, keepQuarantine: false, json: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--repo') {
+      if (!argv[index + 1]) throw new Error('--repo richiede un percorso');
+      options.repo = path.resolve(argv[++index]);
+    } else if (value === '--apply') options.apply = true;
+    else if (value === '--convert') options.convert = true;
+    else if (value === '--if-needed') options.ifNeeded = true;
+    else if (value === '--keep-quarantine') options.keepQuarantine = true;
+    else if (value === '--json') options.json = true;
+    else throw new Error(`opzione sconosciuta: ${value}`);
+  }
+  if (options.convert && options.ifNeeded) throw new Error('--convert non si combina con --if-needed');
+  if (options.keepQuarantine && !options.apply) throw new Error('--keep-quarantine richiede --apply');
+  return options;
+}
+
+function parseVersion(text) {
+  const match = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/.exec(text);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3] || 0)];
+}
+
+function compareVersion(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+}
+
+function candidatesForGit() {
+  const explicit = process.env.FRONTALIERE_GIT_BIN;
+  if (explicit) return [explicit];
+  const candidates = [];
+  for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+    if (directory) candidates.push(path.join(directory, 'git'));
+  }
+  const home = process.env.HOME || os.homedir();
+  candidates.push(
+    path.join(home, '.local', 'bin', 'git'),
+    '/opt/homebrew/bin/git', '/usr/local/bin/git', '/usr/bin/git', '/bin/git',
+  );
+  for (const localEntry of safeReadDir(path.join(home, '.local'))) {
+    if (/^git-[^/]+$/.test(localEntry)) candidates.push(path.join(home, '.local', localEntry, 'bin', 'git'));
+  }
+  return [...new Set(candidates)];
+}
+
+function safeReadDir(directory) {
+  try { return fs.readdirSync(directory); } catch { return []; }
+}
+
+function resolveGit() {
+  const found = [];
+  for (const candidate of candidatesForGit()) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      const result = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 5000 });
+      if (result.status !== 0) continue;
+      const version = parseVersion(result.stdout || '');
+      if (version) found.push({ bin: candidate, version, text: (result.stdout || '').trim() });
+    } catch { /* Candidate absent or not executable. */ }
+  }
+  const compatible = found.filter((candidate) => compareVersion(candidate.version, MIN_GIT) >= 0);
+  if (compatible.length === 0) {
+    const detected = found.map((candidate) => candidate.text).join(', ') || 'nessun eseguibile Git trovato';
+    throw new Error(`Git >= 2.44 richiesto per --no-lazy-fetch; trovati: ${detected}`);
+  }
+  compatible.sort((left, right) => compareVersion(right.version, left.version));
+  return compatible[0];
+}
+
+function baseEnvironment(extra = {}) {
+  return {
+    ...process.env,
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_TERMINAL_PROMPT: '0',
+    ...extra,
+  };
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    input: options.input,
+    encoding: options.encoding === undefined ? 'utf8' : options.encoding,
+    env: options.env || baseEnvironment(),
+    maxBuffer: options.maxBuffer || 1024 * 1024 * 1024,
+    timeout: options.timeout,
+  });
+  if (result.error) throw result.error;
+  if (!options.allowFailure && result.status !== 0) {
+    const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString('utf8') : result.stderr || '';
+    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : result.stdout || '';
+    const detail = stderr.trim() || stdout.trim() || `exit ${result.status}`;
+    throw new Error(`${path.basename(command)} ${args.join(' ')}: ${detail}`);
+  }
+  return result;
+}
+
+function gitArgs(repo, args, config = []) {
+  const configArgs = config.flatMap((value) => ['-c', value]);
+  return ['--no-lazy-fetch', ...configArgs, '-C', repo, ...args];
+}
+
+function git(repo, args, options = {}) {
+  const result = run(options.gitBin, gitArgs(repo, args, options.config), {
+    input: options.input,
+    allowFailure: options.allowFailure,
+    maxBuffer: options.maxBuffer,
+    encoding: options.encoding,
+    env: baseEnvironment(options.env),
+  });
+  return options.raw ? result : result.stdout.trimEnd();
+}
+
+function gitOptional(repo, args, options = {}) {
+  const result = git(repo, args, { ...options, allowFailure: true, raw: true });
+  if (result.status !== 0) return null;
+  return result.stdout.trimEnd();
+}
+
+function resolveRepo(repoPath, gitBin) {
+  const repo = fs.realpathSync(repoPath);
+  const root = git(repo, ['rev-parse', '--show-toplevel'], { gitBin });
+  const commonRaw = git(repo, ['rev-parse', '--git-common-dir'], { gitBin });
+  const objectRaw = git(repo, ['rev-parse', '--git-path', 'objects'], { gitBin });
+  const commonDir = path.resolve(repo, commonRaw);
+  const objectDir = path.resolve(repo, objectRaw);
+  return { repo, root: fs.realpathSync(root), commonDir, objectDir, packDir: path.join(objectDir, 'pack'), gitBin };
+}
+
+function config(repo, key, gitBin) {
+  return gitOptional(repo, ['config', '--local', '--get', key], { gitBin });
+}
+
+function configAll(repo, key, gitBin) {
+  const result = git(repo, ['config', '--local', '--null', '--get-all', key], { gitBin, allowFailure: true, raw: true });
+  if (result.status !== 0) return [];
+  return result.stdout.split('\0').filter(Boolean);
+}
+
+function truthyConfig(value) {
+  return /^(true|yes|on|1)$/i.test(value || '');
+}
+
+function getRemotes(repo, gitBin) {
+  return git(repo, ['remote'], { gitBin }).split(/\r?\n/).filter(Boolean);
+}
+
+function chooseRemote(repo, gitBin, partialRemote) {
+  if (partialRemote) return partialRemote;
+  const remotes = getRemotes(repo, gitBin);
+  if (remotes.includes('origin')) return 'origin';
+  const branch = gitOptional(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { gitBin });
+  if (branch) {
+    const upstream = config(repo, `branch.${branch}.remote`, gitBin);
+    if (upstream && upstream !== '.') return upstream;
+  }
+  if (remotes.length === 1) return remotes[0];
+  throw new Error(`non riesco a scegliere il remote da usare per la conversione (${remotes.length} remote configurati)`);
+}
+
+function partialRemote(repo, gitBin) {
+  const extensionRemote = config(repo, 'extensions.partialClone', gitBin);
+  if (extensionRemote) {
+    if (!truthyConfig(config(repo, `remote.${extensionRemote}.promisor`, gitBin))) {
+      throw new Error(`extensions.partialClone=${extensionRemote}, ma il remote non è promisor`);
+    }
+    return extensionRemote;
+  }
+  const promisorRemotes = getRemotes(repo, gitBin).filter((remote) => truthyConfig(config(repo, `remote.${remote}.promisor`, gitBin)));
+  return promisorRemotes[0] || null;
+}
+
+function parseWorktrees(repo, gitBin) {
+  const output = git(repo, ['worktree', 'list', '--porcelain', '-z'], { gitBin });
+  const worktrees = [];
+  let current = null;
+  for (const field of output.split('\0')) {
+    if (!field) {
+      if (current) worktrees.push(current);
+      current = null;
+      continue;
+    }
+    if (field.startsWith('worktree ')) {
+      if (current) worktrees.push(current);
+      current = { path: field.slice('worktree '.length) };
+    } else if (current && field.startsWith('HEAD ')) current.head = field.slice('HEAD '.length);
+    else if (current && field.startsWith('branch ')) current.branch = field.slice('branch '.length);
+    else if (current && field === 'detached') current.detached = true;
+    else if (current && field === 'prunable') current.prunable = true;
+  }
+  if (current) worktrees.push(current);
+  if (worktrees.length === 0) throw new Error('Git non ha restituito worktree registrati');
+  return worktrees.map((worktree) => {
+    const fullPath = path.resolve(worktree.path);
+    if (!fs.existsSync(fullPath)) throw new Error(`worktree registrato ma assente: ${fullPath}`);
+    const gitDirRaw = git(fullPath, ['rev-parse', '--git-dir'], { gitBin });
+    return { ...worktree, path: fullPath, head: git(fullPath, ['rev-parse', 'HEAD'], { gitBin }), gitDir: path.resolve(fullPath, gitDirRaw) };
+  });
+}
+
+function refs(repo, gitBin) {
+  const output = git(repo, ['for-each-ref', '--format=%(refname)%00%(objectname)'], { gitBin });
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const separator = line.indexOf('\0');
+    if (separator < 0) throw new Error(`output for-each-ref non valido: ${line}`);
+    return { name: line.slice(0, separator), oid: line.slice(separator + 1) };
+  });
+}
+
+function unique(values) {
+  return [...new Set(values.filter((value) => /^[0-9a-f]{40,64}$/i.test(value)))];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values)];
+}
+
+function enumerateRoots(repo, gitBin, worktrees, refList) {
+  const refTips = refList.map((ref) => ref.oid);
+  const reflogOutput = git(repo, ['reflog', 'show', '--all', '--format=%H'], { gitBin });
+  const reflogTips = reflogOutput.split(/\r?\n/).filter(Boolean);
+  const worktreeReflogs = [];
+  for (const worktree of worktrees) {
+    const output = git(worktree.path, ['reflog', 'show', '--format=%H', 'HEAD'], { gitBin });
+    worktreeReflogs.push(...output.split(/\r?\n/).filter(Boolean));
+  }
+  const roots = unique([...refTips, ...worktrees.map((worktree) => worktree.head), ...reflogTips, ...worktreeReflogs]);
+  if (roots.length === 0) throw new Error('nessun ref, HEAD o reflog da conservare');
+  return { roots, refTips, reflogTips: unique([...reflogTips, ...worktreeReflogs]) };
+}
+
+function safetyBlockers(repoInfo, worktrees) {
+  const busy = [];
+  for (const worktree of worktrees) {
+    for (const marker of WORKTREE_OPERATIONS) {
+      if (fs.existsSync(path.join(worktree.gitDir, marker))) busy.push(`${worktree.path}/${marker}`);
+    }
+    if (fs.existsSync(path.join(worktree.gitDir, 'gc.pid'))) busy.push(`${worktree.path}/gc.pid`);
+  }
+  if (fs.existsSync(path.join(repoInfo.commonDir, 'gc.pid'))) busy.push(`${repoInfo.commonDir}/gc.pid`);
+  if (fs.existsSync(path.join(repoInfo.objectDir, 'gc.pid'))) busy.push(`${repoInfo.objectDir}/gc.pid`);
+  for (const lockPath of [
+    path.join(repoInfo.packDir, 'multi-pack-index.lock'),
+    path.join(repoInfo.objectDir, 'info', 'commit-graph.lock'),
+  ]) if (fs.existsSync(lockPath)) busy.push(lockPath);
+  return busy;
+}
+
+function checkSafety(repoInfo, worktrees) {
+  const busy = safetyBlockers(repoInfo, worktrees);
+  if (busy.length) throw new Error(`operazione Git o gc in corso: ${busy.join(', ')}`);
+}
+
+function captureStatuses(repoInfo, worktrees) {
+  const statuses = new Map();
+  for (const worktree of worktrees) {
+    const result = git(worktree.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      gitBin: repoInfo.gitBin, raw: true, encoding: null,
+    });
+    statuses.set(worktree.path, result.stdout);
+  }
+  return statuses;
+}
+
+function packFiles(packDir) {
+  return safeReadDir(packDir).filter((name) => /^pack-[0-9a-f]{40,64}\.pack$/i.test(name)).sort();
+}
+
+function packBytes(packDir) {
+  return packFiles(packDir).reduce((total, name) => total + fs.statSync(path.join(packDir, name)).size, 0);
+}
+
+function listRefsForRemote(repo, remote, gitBin) {
+  const prefix = `refs/remotes/${remote}/`;
+  const output = git(repo, ['for-each-ref', '--format=%(objectname)', prefix], { gitBin });
+  return unique(output.split(/\r?\n/).filter(Boolean));
+}
+
+function listWorktreeIndexBlobs(repoInfo, worktrees) {
+  const entries = [];
+  for (const worktree of worktrees) {
+    const result = git(worktree.path, ['ls-files', '--stage', '-t', '-z'], { gitBin: repoInfo.gitBin, raw: true, encoding: null });
+    const raw = result.stdout;
+    let start = 0;
+    for (let end = raw.indexOf(0); end >= 0; end = raw.indexOf(0, start)) {
+      const record = raw.subarray(start, end);
+      start = end + 1;
+      if (record.length === 0) continue;
+      const tab = record.indexOf(9);
+      const header = record.subarray(0, tab < 0 ? record.length : tab).toString('ascii');
+      const match = /^([A-Za-z]) \d+ ([0-9a-f]{40,64}) \d+$/.exec(header);
+      if (!match) throw new Error(`voce di indice non riconosciuta in ${worktree.path}`);
+      if (match[1] === 'S') continue;
+      entries.push(match[2]);
+    }
+  }
+  return unique(entries);
+}
+
+function objectRecords(repoInfo, oids) {
+  if (oids.length === 0) return [];
+  const output = git(repoInfo.repo, ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], {
+    gitBin: repoInfo.gitBin,
+    input: `${oids.join('\n')}\n`,
+    maxBuffer: Math.max(1024 * 1024 * 16, oids.length * 100),
+  });
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const parts = line.split(' ');
+    return { oid: parts[0], type: parts[1], size: parts[1] === 'missing' ? 0 : Number(parts[2]) };
+  });
+}
+
+function objectSetForRoots(repoInfo, roots, options = {}) {
+  if (roots.length === 0) return [];
+  const revisions = [...roots, ...(options.excludeTips || []).map((oid) => `^${oid}`)];
+  const args = ['rev-list', '--objects', '--no-object-names', '--stdin', '--missing=allow-any'];
+  if (options.filterBlobs) args.push('--filter=blob:none');
+  const output = git(repoInfo.repo, args, { gitBin: repoInfo.gitBin, input: `${revisions.join('\n')}\n`, maxBuffer: 1024 * 1024 * 1024 });
+  return unique(output.split(/\r?\n/).filter(Boolean));
+}
+
+function readLastState() {
+  const configured = process.env.FRONTALIERE_GIT_PARTIAL_COMPACT_STATE;
+  const home = process.env.HOME || os.homedir();
+  const statePath = configured || path.join(home, '.local', 'state', 'frontaliere', 'git-partial-compact-last');
+  try {
+    const contents = fs.readFileSync(statePath, 'utf8');
+    const values = Object.fromEntries(contents.split(/\r?\n/).filter(Boolean).map((line) => {
+      const split = line.indexOf('=');
+      return split < 0 ? ['', ''] : [line.slice(0, split), line.slice(split + 1)];
+    }));
+    return { path: statePath, byteAfter: values.result === 'success' ? Number(values.byte_after) || 0 : 0 };
+  } catch { return { path: statePath, byteAfter: 0 }; }
+}
+
+function freeBytes(repoPath) {
+  const injected = process.env.FRONTALIERE_GIT_PARTIAL_COMPACT_FREE_BYTES;
+  if (injected && /^\d+$/.test(injected)) return Number(injected);
+  if (typeof fs.statfsSync === 'function') {
+    const stats = fs.statfsSync(repoPath);
+    return Number(stats.bavail) * Number(stats.bsize);
+  }
+  const result = run('/bin/df', ['-Pk', repoPath], { encoding: 'utf8' });
+  const lines = result.stdout.trim().split(/\r?\n/);
+  const columns = lines[lines.length - 1].trim().split(/\s+/);
+  const availableKiB = Number(columns[3]);
+  if (!Number.isFinite(availableKiB)) throw new Error(`non riesco a leggere lo spazio libero da df: ${lines[lines.length - 1]}`);
+  return availableKiB * 1024;
+}
+
+function estimatePackBytes(repoInfo, promisorRoots, indexOids, remoteTips) {
+  const treeAndCommitOids = objectSetForRoots(repoInfo, promisorRoots, { filterBlobs: true });
+  const localObjects = objectSetForRoots(repoInfo, promisorRoots, { excludeTips: remoteTips });
+  const candidates = unique([...localObjects, ...indexOids]);
+  const promisorRecords = objectRecords(repoInfo, treeAndCommitOids);
+  const localRecords = objectRecords(repoInfo, candidates);
+  const missingPromisor = promisorRecords.find((record) => record.type === 'missing');
+  if (missingPromisor) throw new Error(`commit/tree/tag già mancante prima della compattazione: ${missingPromisor.oid}`);
+  const missingLocal = new Set(localRecords.filter((record) => record.type === 'missing').map((record) => record.oid));
+  const localObjectSet = new Set(localObjects.filter((oid) => !missingLocal.has(oid)));
+  const promisorRawBytes = promisorRecords.reduce((total, record) => total + record.size, 0);
+  const blobRecords = localRecords.filter((record) => record.type === 'blob');
+  const localBlobBytes = blobRecords.reduce((total, record) => total + record.size, 0);
+  const localBlobOids = unique(blobRecords.map((record) => record.oid));
+  const estimatedBytes = Math.ceil((promisorRawBytes + localBlobBytes) * 1.04 + (treeAndCommitOids.length + localBlobOids.length) * 128 + 1024 * 1024);
+  return {
+    treeAndCommitObjects: treeAndCommitOids.length,
+    localOnlyObjectsEstimated: localObjectSet.size,
+    localBlobObjects: localBlobOids.length,
+    localOnlyCommits: localRecords.filter((record) => record.type === 'commit' && localObjectSet.has(record.oid)).length,
+    promisorRawBytes,
+    localBlobBytes,
+    estimatedBytes,
+    localBlobOids,
+    localObjectOids: [...localObjectSet],
+  };
+}
+
+function snapshot(repoInfo, options) {
+  const { repo, gitBin } = repoInfo;
+  const refList = refs(repo, gitBin);
+  const worktrees = parseWorktrees(repo, gitBin);
+  const blockers = safetyBlockers(repoInfo, worktrees);
+  if (options.apply && blockers.length) throw new Error(`operazione Git o gc in corso: ${blockers.join(', ')}`);
+  const roots = enumerateRoots(repo, gitBin, worktrees, refList);
+  const remote = options.convert ? chooseRemote(repo, gitBin, null) : partialRemote(repo, gitBin);
+  if (!remote && !options.convert) throw new Error('repository completo: usa --convert --apply per convertirlo in partial clone');
+  if (options.convert && partialRemote(repo, gitBin)) throw new Error('--convert richiede un clone completo, ma il repository è già partial clone');
+  const shallow = git(repo, ['rev-parse', '--is-shallow-repository'], { gitBin }) === 'true';
+  if (shallow) throw new Error('clone shallow non supportato');
+  const remoteTips = listRefsForRemote(repo, remote, gitBin);
+  const indexOids = listWorktreeIndexBlobs(repoInfo, worktrees);
+  const estimate = estimatePackBytes(repoInfo, roots.roots, indexOids, remoteTips);
+  const beforePacks = packFiles(repoInfo.packDir);
+  const bytesBefore = packBytes(repoInfo.packDir);
+  const free = freeBytes(repo);
+  const statuses = captureStatuses(repoInfo, worktrees);
+  const refsLocal = refList.filter((ref) => !ref.name.startsWith(`refs/remotes/${remote}/`)).length;
+  return {
+    repo,
+    remote,
+    roots: roots.roots,
+    refList,
+    refsLocal,
+    safetyBlockers: blockers,
+    worktrees,
+    localCommits: estimate.localOnlyCommits,
+    localObjectOids: estimate.localObjectOids,
+    localBlobOids: estimate.localBlobOids,
+    indexOids,
+    statuses,
+    beforePacks,
+    bytesBefore,
+    freeBytes: free,
+    estimate,
+    remoteTips,
+  };
+}
+
+function maybeNeeded(repoInfo, options, state, measurement) {
+  if (!options.ifNeeded) return { needed: true, thresholdBytes: null, lastSuccessBytes: state.byteAfter };
+  const isPartial = Boolean(partialRemote(repoInfo.repo, repoInfo.gitBin));
+  if (!isPartial) return { needed: false, thresholdBytes: null, lastSuccessBytes: state.byteAfter, reason: 'repository non parziale' };
+  const thresholdBytes = Math.max(10 * GIB, 4 * state.byteAfter);
+  return {
+    needed: measurement.bytesBefore > thresholdBytes,
+    thresholdBytes,
+    lastSuccessBytes: state.byteAfter,
+    reason: measurement.bytesBefore > thresholdBytes ? 'soglia superata' : 'sotto soglia',
+  };
+}
+
+function bytes(value) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let amount = value;
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; }
+  return `${amount.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+}
+
+function report(measurement, decision, options, gitInfo) {
+  const result = {
+    repo: measurement.repo,
+    git: gitInfo.text,
+    remote: measurement.remote,
+    mode: options.convert ? 'convert' : 'compact',
+    apply: options.apply,
+    needed: decision.needed,
+    reason: decision.reason || (options.apply ? 'applicazione richiesta' : 'dry-run'),
+    packBytesBefore: measurement.bytesBefore,
+    packCountBefore: measurement.beforePacks.length,
+    localRefs: measurement.refsLocal,
+    localOnlyCommits: measurement.estimate.localOnlyCommits,
+    localOnlyObjectsEstimated: measurement.estimate.localOnlyObjectsEstimated,
+    localOnlyBlobsEstimated: measurement.estimate.localBlobObjects,
+    estimatedPackBytes: measurement.estimate.estimatedBytes,
+    freeBytes: measurement.freeBytes,
+    thresholdBytes: decision.thresholdBytes,
+    applyAllowed: measurement.safetyBlockers.length === 0,
+    safetyBlockers: measurement.safetyBlockers,
+    packBytesAfter: null,
+    packCountAfter: null,
+    plan: [
+      `scrivere un pack promisor con ${measurement.estimate.treeAndCommitObjects} oggetti commit/tree/tag`,
+      `scrivere un pack normale con ${measurement.estimate.localBlobObjects} blob locali e d'indice`,
+      `quarantena reversibile di ${measurement.beforePacks.length} pack e degli indici MIDX`,
+      'riscrivere MIDX e commit-graph, poi verificare senza lazy fetch',
+    ],
+  };
+  return result;
+}
+
+function renderReport(result, options) {
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Repository: ${result.repo}\nGit: ${result.git}\nRemote promisor: ${result.remote || '(nessuno)'}\n`);
+  if (result.packBytesBefore !== undefined) {
+    process.stdout.write(`Pack: ${result.packCountBefore} (${bytes(result.packBytesBefore)})\n`);
+    if (result.localRefs !== undefined) {
+      process.stdout.write(`Ref locali: ${result.localRefs}; oggetti solo locali stimati: ${result.localOnlyObjectsEstimated}; commit solo locali: ${result.localOnlyCommits}; blob locali stimati: ${result.localOnlyBlobsEstimated}\n`);
+      process.stdout.write(`Spazio stimato richiesto: ${bytes(result.estimatedPackBytes)}; libero: ${bytes(result.freeBytes)}\n`);
+    }
+    if (result.thresholdBytes !== null) process.stdout.write(`Soglia --if-needed: ${bytes(result.thresholdBytes)} (${result.reason})\n`);
+    process.stdout.write('Piano:\n');
+    for (const item of result.plan) process.stdout.write(`  - ${item}\n`);
+    if (!result.applyAllowed) process.stdout.write(`Apply bloccato da operazioni aperte: ${result.safetyBlockers.join(', ')}\n`);
+  }
+  if (result.result === 'success') process.stdout.write(`Compattazione verificata: ${result.packCountAfter} pack (${bytes(result.packBytesAfter)})\n`);
+  else if (result.result === 'skipped') process.stdout.write(`Nessuna compattazione: ${result.reason}\n`);
+  else process.stdout.write(options.apply ? 'Modalità: apply\n' : 'Modalità: dry-run, nessun file del repository modificato\n');
+}
+
+function makeScratch(repoInfo) {
+  return fs.mkdtempSync(path.join(repoInfo.packDir, '.git-partial-compact-'));
+}
+
+function writePack(repoInfo, scratch, name, input, filtered) {
+  if (!input.trim()) return null;
+  const prefix = path.join(scratch, name);
+  const args = ['pack-objects', '--revs', '--missing=allow-any'];
+  if (filtered) args.push('--filter=blob:none');
+  args.push(prefix);
+  const hash = git(repoInfo.repo, args, {
+    gitBin: repoInfo.gitBin,
+    input,
+    maxBuffer: 16 * 1024 * 1024,
+    config: ['pack.threads=1', 'pack.windowMemory=256m'],
+  }).trim();
+  if (!/^[0-9a-f]{40,64}$/i.test(hash)) throw new Error(`pack-objects non ha restituito un hash valido per ${name}`);
+  const stagedPack = `${prefix}-${hash}.pack`;
+  if (!fs.existsSync(stagedPack)) throw new Error(`pack creato ma non trovato: ${stagedPack}`);
+  return { hash, stagedPrefix: `${prefix}-${hash}`, promisor: filtered };
+}
+
+function writeBlobPack(repoInfo, scratch, blobOids) {
+  if (blobOids.length === 0) return null;
+  const prefix = path.join(scratch, 'pack-local-blobs');
+  const result = run(repoInfo.gitBin, gitArgs(repoInfo.repo, ['pack-objects', prefix], ['pack.threads=1', 'pack.windowMemory=256m']), {
+    input: `${blobOids.join('\n')}\n`,
+    env: baseEnvironment(),
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const hash = result.stdout.trim();
+  if (!/^[0-9a-f]{40,64}$/i.test(hash)) throw new Error(`pack-objects non ha restituito un hash valido per i blob locali`);
+  const stagedPack = `${prefix}-${hash}.pack`;
+  if (!fs.existsSync(stagedPack)) throw new Error(`pack blob creato ma non trovato: ${stagedPack}`);
+  return { hash, stagedPrefix: `${prefix}-${hash}`, promisor: false };
+}
+
+function promotePack(repoInfo, pack) {
+  if (!pack) return null;
+  const destinationPrefix = path.join(repoInfo.packDir, `pack-${pack.hash}`);
+  const existingPack = `${destinationPrefix}.pack`;
+  if (!fs.existsSync(existingPack)) {
+    for (const suffix of PACK_SUFFIXES) {
+      const source = `${pack.stagedPrefix}${suffix}`;
+      if (fs.existsSync(source)) fs.renameSync(source, `${destinationPrefix}${suffix}`);
+    }
+  }
+  if (pack.promisor) {
+    const marker = `${destinationPrefix}.promisor`;
+    if (!fs.existsSync(marker)) fs.writeFileSync(marker, '', { mode: 0o600, flag: 'wx' });
+  }
+  return path.basename(existingPack);
+}
+
+function quarantinePackAndIndexes(repoInfo, initialPackFiles, newPackNames, quarantine) {
+  fs.mkdirSync(quarantine, { mode: 0o700 });
+  const excluded = new Set(newPackNames);
+  const moves = [];
+  for (const packName of initialPackFiles) {
+    const prefix = packName.replace(/\.pack$/, '');
+    if (excluded.has(`${prefix}.pack`)) continue;
+    for (const suffix of PACK_SUFFIXES) {
+      const name = `${prefix}${suffix}`;
+      if (fs.existsSync(path.join(repoInfo.packDir, name))) moves.push(name);
+    }
+  }
+  for (const name of safeReadDir(repoInfo.packDir)) {
+    if (name.startsWith('multi-pack-index')) moves.push(name);
+  }
+  for (const name of uniqueStrings(moves)) fs.renameSync(path.join(repoInfo.packDir, name), path.join(quarantine, name));
+  return uniqueStrings(moves);
+}
+
+function rewriteIndexes(repoInfo) {
+  git(repoInfo.repo, ['multi-pack-index', 'write'], { gitBin: repoInfo.gitBin });
+  git(repoInfo.repo, ['commit-graph', 'write', '--reachable'], { gitBin: repoInfo.gitBin });
+}
+
+function objectList(repoInfo, roots, filterBlobs, printMissing = false) {
+  const args = ['rev-list', '--objects', '--no-object-names', '--stdin'];
+  if (filterBlobs) args.push('--filter=blob:none');
+  args.push(printMissing ? '--missing=print' : '--missing=allow-any');
+  return git(repoInfo.repo, args, { gitBin: repoInfo.gitBin, input: `${roots.join('\n')}\n`, maxBuffer: 1024 * 1024 * 1024 })
+    .split(/\r?\n/).filter(Boolean);
+}
+
+function verifyObjectPresence(repoInfo, oids, { missingAllowed = false, label }) {
+  const clean = unique(oids.map((oid) => oid.startsWith('?') ? oid.slice(1) : oid));
+  const records = objectRecords(repoInfo, clean);
+  const missing = records.filter((record) => record.type === 'missing').map((record) => record.oid);
+  if (!missingAllowed && missing.length) throw new Error(`${label}: ${missing.length} oggetti mancanti, primo ${missing[0]}`);
+  return missing;
+}
+
+function verify(repoInfo, state, measurement) {
+  const refRecords = objectRecords(repoInfo, unique(state.refList.map((ref) => ref.oid)));
+  const missingRefs = refRecords.filter((record) => record.type === 'missing');
+  if (missingRefs.length) {
+    const firstOid = missingRefs[0].oid;
+    const firstRef = state.refList.find((ref) => ref.oid === firstOid);
+    throw new Error(`ref non risolvibile dopo compattazione: ${firstRef?.name || firstOid} (${firstOid})`);
+  }
+  const reachable = objectList(repoInfo, state.roots, true, true);
+  const missingReachable = reachable.filter((oid) => oid.startsWith('?'));
+  if (missingReachable.length) throw new Error(`mancano ${missingReachable.length} oggetti commit/tree raggiungibili, primo ${missingReachable[0]}`);
+  verifyObjectPresence(repoInfo, measurement.localObjectOids, {
+    label: 'verifica oggetti dei commit solo locali',
+  });
+  // `git status` must still succeed with lazy fetch off (git() always passes
+  // --no-lazy-fetch and throws on a non-zero exit): a missing object it needs
+  // fails here. Equality with the status captured at the start is NOT required:
+  // a run takes one to two hours on the agent host, where agents keep editing
+  // the 30 worktrees, and status never reads blobs, so a different output is
+  // concurrent work, not corruption. It is only reported.
+  const changedStatuses = [];
+  for (const worktree of state.worktrees) {
+    const result = git(worktree.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      gitBin: repoInfo.gitBin, raw: true, encoding: null,
+    });
+    if (!result.stdout.equals(state.statuses.get(worktree.path))) changedStatuses.push(worktree.path);
+  }
+  if (changedStatuses.length) {
+    process.stderr.write(`git-partial-compact: status cambiato durante la run (lavoro concorrente) in ${changedStatuses.length} worktree: ${changedStatuses.join(', ')}\n`);
+  }
+  verifyObjectPresence(repoInfo, measurement.localBlobOids, { label: 'blob locale o d’indice non risolvibile' });
+}
+
+function uniqueQuarantine(packDir) {
+  const stem = `pack-quarantine-${Date.now()}`;
+  let candidate = path.join(packDir, stem);
+  let suffix = 0;
+  while (fs.existsSync(candidate)) candidate = path.join(packDir, `${stem}-${++suffix}`);
+  return candidate;
+}
+
+function restoreQuarantine(repoInfo, quarantine) {
+  if (!fs.existsSync(quarantine)) return;
+  for (const name of safeReadDir(quarantine)) {
+    const source = path.join(quarantine, name);
+    const destination = path.join(repoInfo.packDir, name);
+    if (fs.existsSync(destination)) fs.rmSync(destination, { force: true });
+    fs.renameSync(source, destination);
+  }
+  fs.rmdirSync(quarantine);
+}
+
+function removeGenerated(repoInfo, generatedPrefixes, initialNames) {
+  for (const prefix of generatedPrefixes) {
+    for (const suffix of PACK_SUFFIXES) {
+      const file = `${prefix}${suffix}`;
+      if (!initialNames.has(path.basename(file)) && fs.existsSync(file)) fs.rmSync(file, { force: true });
+    }
+  }
+}
+
+function rewriteConfig(repoInfo, remote) {
+  const keys = [
+    'core.repositoryformatversion',
+    'extensions.partialClone',
+    `remote.${remote}.promisor`,
+    `remote.${remote}.partialclonefilter`,
+  ];
+  const previous = new Map(keys.map((key) => [key, configAll(repoInfo.repo, key, repoInfo.gitBin)]));
+  try {
+    git(repoInfo.repo, ['config', '--local', 'core.repositoryformatversion', '1'], { gitBin: repoInfo.gitBin });
+    git(repoInfo.repo, ['config', '--local', 'extensions.partialClone', remote], { gitBin: repoInfo.gitBin });
+    git(repoInfo.repo, ['config', '--local', `remote.${remote}.promisor`, 'true'], { gitBin: repoInfo.gitBin });
+    git(repoInfo.repo, ['config', '--local', `remote.${remote}.partialclonefilter`, 'blob:none'], { gitBin: repoInfo.gitBin });
+  } catch (error) {
+    restoreConfig(repoInfo, previous);
+    throw error;
+  }
+  return previous;
+}
+
+function restoreConfig(repoInfo, previous) {
+  if (!previous) return;
+  for (const [key, values] of previous) {
+    git(repoInfo.repo, ['config', '--local', '--unset-all', key], { gitBin: repoInfo.gitBin, allowFailure: true });
+    for (const value of values) git(repoInfo.repo, ['config', '--local', '--add', key, value], { gitBin: repoInfo.gitBin });
+  }
+}
+
+function stateAndLogPaths() {
+  const home = process.env.HOME || os.homedir();
+  return {
+    statePath: process.env.FRONTALIERE_GIT_PARTIAL_COMPACT_STATE || path.join(home, '.local', 'state', 'frontaliere', 'git-partial-compact-last'),
+    logPath: process.env.FRONTALIERE_GIT_PARTIAL_COMPACT_LOG || path.join(home, 'Library', 'Logs', 'frontaliere', 'git-partial-compact.log'),
+  };
+}
+
+function writeStateAndLog(paths, record, logLine) {
+  fs.mkdirSync(path.dirname(paths.statePath), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(paths.logPath), { recursive: true, mode: 0o700 });
+  const stateTemp = `${paths.statePath}.${process.pid}.tmp`;
+  fs.writeFileSync(stateTemp, `${Object.entries(record).map(([key, value]) => `${key}=${value}`).join('\n')}\n`, { mode: 0o600 });
+  fs.renameSync(stateTemp, paths.statePath);
+  fs.appendFileSync(paths.logPath, `${new Date().toISOString()} ${logLine}\n`, { mode: 0o600 });
+}
+
+function applyCompaction(repoInfo, options, measurement, statePaths) {
+  const needed = measurement.estimate.estimatedBytes;
+  const initialNames = new Set(safeReadDir(repoInfo.packDir));
+  const generatedPrefixes = [];
+  let scratch = null;
+  let quarantine = null;
+  let configSnapshot = null;
+  const initialPackFiles = measurement.beforePacks.slice();
+  let changed = false;
+  let quarantineRetained = false;
+  try {
+    checkSafety(repoInfo, measurement.worktrees);
+    const availableBytes = freeBytes(repoInfo.repo);
+    if (availableBytes < needed) throw new Error(`spazio insufficiente: richiesti ${needed} byte (${bytes(needed)}), disponibili ${availableBytes} byte (${bytes(availableBytes)})`);
+    scratch = makeScratch(repoInfo);
+    if (options.convert) configSnapshot = rewriteConfig(repoInfo, measurement.remote);
+    const revisionInput = `${measurement.roots.join('\n')}\n`;
+    const promisor = writePack(repoInfo, scratch, 'pack-promisor', revisionInput, true);
+    if (!promisor) throw new Error('pack promisor vuoto');
+    generatedPrefixes.push(path.join(repoInfo.packDir, `pack-${promisor.hash}`));
+    changed = true;
+    const promotedPromisor = promotePack(repoInfo, promisor);
+    const local = writeBlobPack(repoInfo, scratch, measurement.localBlobOids);
+    if (local) generatedPrefixes.push(path.join(repoInfo.packDir, `pack-${local.hash}`));
+    if (local) changed = true;
+    const promotedLocal = promotePack(repoInfo, local);
+
+    quarantine = uniqueQuarantine(repoInfo.packDir);
+    const outputNames = [promotedPromisor, promotedLocal].filter(Boolean);
+    changed = true;
+    quarantinePackAndIndexes(repoInfo, initialPackFiles, outputNames, quarantine);
+    rewriteIndexes(repoInfo);
+    verify(repoInfo, measurement, measurement);
+    if (!options.keepQuarantine) {
+      try {
+        fs.rmSync(quarantine, { recursive: true, force: true });
+        quarantine = null;
+      } catch (cleanupError) {
+        quarantineRetained = true;
+        process.stderr.write(`git-partial-compact: verifica riuscita; quarantena mantenuta per errore di pulizia: ${cleanupError.message}\n`);
+      }
+    }
+    const bytesAfter = packBytes(repoInfo.packDir);
+    const packsAfter = packFiles(repoInfo.packDir).length;
+    const retainedPath = options.keepQuarantine || quarantineRetained ? quarantine : null;
+    const result = { bytesAfter, packsAfter, quarantine: retainedPath };
+    try { writeStateAndLog(statePaths, {
+      epoch: Math.floor(Date.now() / 1000),
+      byte_before: measurement.bytesBefore,
+      byte_after: bytesAfter,
+      pack_before: measurement.beforePacks.length,
+      pack_after: packsAfter,
+      result: 'success',
+    }, `result=success repo=${repoInfo.repo} byte_before=${measurement.bytesBefore} byte_after=${bytesAfter} pack_before=${measurement.beforePacks.length} pack_after=${packsAfter} quarantine=${retainedPath || 'removed'}`);
+    } catch (stateError) { process.stderr.write(`git-partial-compact: compattazione riuscita; impossibile salvare log/stato: ${stateError.message}\n`); }
+    return result;
+  } catch (error) {
+    let recoveryError = null;
+    try {
+      if (changed) {
+        if (quarantine && fs.existsSync(quarantine)) restoreQuarantine(repoInfo, quarantine);
+        removeGenerated(repoInfo, generatedPrefixes, initialNames);
+        restoreConfig(repoInfo, configSnapshot);
+        rewriteIndexes(repoInfo);
+      } else if (configSnapshot) restoreConfig(repoInfo, configSnapshot);
+    } catch (restoreError) { recoveryError = restoreError; }
+    try {
+      const byteAfterRollback = packBytes(repoInfo.packDir);
+      writeStateAndLog(statePaths, {
+        epoch: Math.floor(Date.now() / 1000),
+        byte_before: measurement.bytesBefore,
+        byte_after: byteAfterRollback,
+        pack_before: measurement.beforePacks.length,
+        pack_after: packFiles(repoInfo.packDir).length,
+        result: 'failure',
+      }, `result=failure repo=${repoInfo.repo} byte_before=${measurement.bytesBefore} byte_after=${byteAfterRollback} pack_before=${measurement.beforePacks.length} pack_after=${packFiles(repoInfo.packDir).length} error=${error.message.replace(/\s+/g, '_')}`);
+    } catch (logError) { recoveryError = recoveryError || logError; }
+    if (recoveryError) throw new Error(`${error.message}; ripristino incompleto: ${recoveryError.message}`);
+    throw error;
+  } finally {
+    if (scratch && fs.existsSync(scratch)) fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+function runLocked(options, argv) {
+  if (!options.apply || process.env.FRONTALIERE_GIT_PARTIAL_COMPACT_LOCKED === '1') return null;
+  const home = process.env.HOME || os.homedir();
+  const explicitLock = process.env.FRONTALIERE_MAINTENANCE_LOCK;
+  const requestedLock = explicitLock || path.join(home, '.local', 'state', 'frontaliere', 'git-maintenance.lock');
+  const wrapperFallback = path.join(home, 'Library', 'Logs', 'frontaliere', 'git-maintenance.lock');
+  const lockPaths = [...new Set([requestedLock, wrapperFallback].map((value) => value.startsWith('~/') ? path.join(home, value.slice(2)) : path.resolve(value)))].sort();
+  const python = process.env.FRONTALIERE_PYTHON_BIN || candidatesForPython().find((candidate) => {
+    try { fs.accessSync(candidate, fs.constants.X_OK); return true; } catch { return false; }
+  });
+  if (!python) throw new Error('python3 richiesto per il lock kernel flock non trovato');
+  const script = fs.realpathSync(process.argv[1]);
+  const result = spawnSync(python, ['-c', LOCK_PYTHON, lockPaths.join(path.delimiter), process.execPath, script, ...argv], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) throw result.error;
+  if (result.status === 75) {
+    process.stderr.write('git-partial-compact: manutenzione Git già in corso (flock occupato)\n');
+    process.exitCode = 75;
+    return { exit: true };
+  }
+  process.exitCode = result.status === null ? 1 : result.status;
+  return { exit: true };
+}
+
+function candidatesForPython() {
+  const candidates = [];
+  for (const directory of (process.env.PATH || '').split(path.delimiter)) if (directory) candidates.push(path.join(directory, 'python3'));
+  candidates.push('/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3');
+  return [...new Set(candidates)];
+}
+
+function xml(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+}
+
+function installLaunchAgent(command) {
+  const script = fs.realpathSync(process.argv[1]);
+  const repositoryRoot = fs.realpathSync(path.resolve(path.dirname(script), '..'));
+  const home = process.env.HOME || os.homedir();
+  const agentsDir = process.env.FRONTALIERE_LAUNCH_AGENTS_DIR || path.join(home, 'Library', 'LaunchAgents');
+  const destination = path.join(agentsDir, 'ch.frontaliere.git-partial-compact.plist');
+  if (command === 'uninstall') {
+    if (fs.existsSync(destination)) {
+      const stat = fs.lstatSync(destination);
+      if (stat.isDirectory()) throw new Error(`il plist installato è una directory: ${destination}`);
+      fs.unlinkSync(destination);
+    }
+    process.stdout.write(`LaunchAgent rimosso: ${destination}\n`);
+    return;
+  }
+  let workspace = process.env.FRONTALIERE_WORKSPACE_ROOT ? path.resolve(process.env.FRONTALIERE_WORKSPACE_ROOT) : repositoryRoot;
+  if (!process.env.FRONTALIERE_WORKSPACE_ROOT) {
+    let candidate = repositoryRoot;
+    while (!fs.existsSync(path.join(candidate, 'frontaliere-si-o-no'))) {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw new Error(`non trovo frontaliere-si-o-no risalendo da ${repositoryRoot}`);
+      candidate = parent;
+    }
+    workspace = fs.realpathSync(candidate);
+  }
+  const templatePath = path.join(repositoryRoot, 'config', 'launchd', 'ch.frontaliere.git-partial-compact.plist');
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const values = {
+    __NODE_PATH__: process.execPath,
+    __SCRIPT_PATH__: path.join(workspace, 'bin', 'git-partial-compact'),
+    __SITE_REPO__: path.join(workspace, 'frontaliere-si-o-no'),
+    __WORKSPACE__: workspace,
+    __HOME__: home,
+    __LOG_DIR__: path.join(home, 'Library', 'Logs', 'frontaliere'),
+  };
+  const contents = Object.entries(values).reduce((text, [token, value]) => text.replaceAll(token, xml(value)), template);
+  fs.mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(home, 'Library', 'Logs', 'frontaliere'), { recursive: true, mode: 0o700 });
+  if (fs.existsSync(destination) && fs.lstatSync(destination).isSymbolicLink()) throw new Error(`il percorso del plist è un link simbolico: ${destination}`);
+  try {
+    if (fs.readFileSync(destination, 'utf8') === contents) {
+      process.stdout.write(`LaunchAgent già aggiornato: ${destination}\n`);
+      return;
+    }
+  } catch { /* Not installed yet. */ }
+  const temporary = `${destination}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, contents, { mode: 0o600 });
+  fs.renameSync(temporary, destination);
+  process.stdout.write(`LaunchAgent installato: ${destination}\n`);
+}
+
+function main() {
+  let options;
+  try { options = parseArgs(process.argv.slice(2)); }
+  catch (error) { process.stderr.write(`git-partial-compact: ${error.message}\n`); process.exitCode = 64; return; }
+  try {
+    if (options.command !== 'run') return installLaunchAgent(options.command);
+    const lockResult = runLocked(options, process.argv.slice(2));
+    if (lockResult?.exit) return;
+    const gitInfo = resolveGit();
+    const repoInfo = resolveRepo(options.repo, gitInfo.bin);
+    const statePaths = stateAndLogPaths();
+    const state = readLastState();
+    if (options.ifNeeded && !options.convert && !partialRemote(repoInfo.repo, gitInfo.bin)) {
+      renderReport({ repo: repoInfo.repo, git: gitInfo.text, result: 'skipped', reason: 'repository non parziale' }, options);
+      return;
+    }
+    if (options.ifNeeded && !options.convert) {
+      const packBytesBefore = packBytes(repoInfo.packDir);
+      const packCountBefore = packFiles(repoInfo.packDir).length;
+      const thresholdBytes = Math.max(10 * GIB, 4 * state.byteAfter);
+      if (packBytesBefore <= thresholdBytes) {
+        renderReport({
+          repo: repoInfo.repo,
+          git: gitInfo.text,
+          remote: partialRemote(repoInfo.repo, gitInfo.bin),
+          mode: 'compact',
+          apply: options.apply,
+          needed: false,
+          result: 'skipped',
+          reason: 'sotto soglia',
+          packBytesBefore,
+          packCountBefore,
+          thresholdBytes,
+        }, options);
+        return;
+      }
+    }
+    const measurement = snapshot(repoInfo, options);
+    const decision = maybeNeeded(repoInfo, options, state, measurement);
+    const result = report(measurement, decision, options, gitInfo);
+    if (options.ifNeeded && !decision.needed) {
+      result.result = 'skipped';
+      renderReport(result, options);
+      return;
+    }
+    if (!options.apply) { renderReport(result, options); return; }
+    try {
+      const compacted = applyCompaction(repoInfo, options, measurement, statePaths);
+      result.result = 'success';
+      result.packBytesAfter = compacted.bytesAfter;
+      result.packCountAfter = compacted.packsAfter;
+      result.quarantine = compacted.quarantine;
+      renderReport(result, options);
+    } catch (error) {
+      result.result = 'failure';
+      result.error = error.message;
+      renderReport(result, options);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    process.stderr.write(`git-partial-compact: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
+main();

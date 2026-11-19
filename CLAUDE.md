@@ -308,6 +308,7 @@ Il runner richiede `python3` su macOS o Linux. Restituisce 75 quando il lease
 è occupato, 2 per sintassi CLI errata e 1 per errori del runner. Dopo l'avvio
 propaga il codice del programma, o 128 più il numero del segnale se termina
 per segnale.
+Per ridurre i pack del clone parziale del sito usa `bin/git-partial-compact`; misure, conversione del clone completo e limiti sono nel reference operativo.
 
 Corpus/API:
 
