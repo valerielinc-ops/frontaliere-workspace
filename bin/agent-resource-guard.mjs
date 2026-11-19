@@ -1297,6 +1297,47 @@ function report(runtimeDir, json = false) {
   }
 }
 
+async function runLlm(args) {
+  const reserve = args[0] === '--reserve';
+  const [separator, ...command] = reserve ? args.slice(1) : args;
+  if (separator !== '--' || !command[0]) {
+    process.stderr.write('uso: agent-resource-guard.mjs --run-llm [--reserve] -- PROGRAM ARG...\n');
+    return 2;
+  }
+
+  try {
+    let runtimeDir;
+    if (process.env.FRONTALIERE_AGENT_RUNTIME_DIR?.trim()) {
+      runtimeDir = runtimeDirectory();
+    } else {
+      const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+        cwd: WORKSPACE_FROM_BIN,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trimEnd();
+      runtimeDir = runtimeDirectory(path.dirname(realpathSync(commonDir)));
+    }
+    const helper = spawn('python3', [
+      path.join(BIN_DIR, 'agent-session-lease.py'), runtimeDir, reserve ? 'reserve' : 'ordinary', ...command,
+    ], { stdio: 'inherit', detached: true });
+    const handlers = new Map(['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => [
+      signal, () => helper.kill(signal),
+    ]));
+    for (const [signal, handler] of handlers) process.on(signal, handler);
+    try {
+      return await new Promise((resolve, reject) => {
+        helper.once('error', reject);
+        helper.once('exit', (code, signal) => resolve(code ?? 128 + os.constants.signals[signal]));
+      });
+    } finally {
+      for (const [signal, handler] of handlers) process.off(signal, handler);
+    }
+  } catch {
+    process.stderr.write('resource-guard: errore di avvio del runner LLM\n');
+    return 1;
+  }
+}
+
 function main(argv = process.argv.slice(2)) {
   const mode = argv[0] ?? '--pre';
   const raw = mode === '--report' ? '' : readStdin();
@@ -1320,7 +1361,7 @@ function main(argv = process.argv.slice(2)) {
       report(runtimeDir, argv.includes('--json'));
       return 0;
     }
-    process.stderr.write(`uso: agent-resource-guard.mjs [--pre|--post|--cleanup|--report [--json]]\n`);
+    process.stderr.write('uso: agent-resource-guard.mjs [--pre|--post|--cleanup|--report [--json]|--run-llm [--reserve] -- PROGRAM ARG...]\n');
     return 0;
   } catch (error) {
     // Fail-open by design: the guard must not become a new source of outages.
@@ -1332,4 +1373,10 @@ function main(argv = process.argv.slice(2)) {
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === THIS_FILE;
-if (isMain) process.exitCode = main();
+if (isMain) {
+  if (process.argv[2] === '--run-llm') {
+    runLlm(process.argv.slice(3)).then((code) => { process.exitCode = code; });
+  } else {
+    process.exitCode = main();
+  }
+}

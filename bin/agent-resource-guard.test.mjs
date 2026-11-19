@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   LEASE_START_GRACE_MS,
   acquireHeavyLease,
@@ -23,6 +25,126 @@ import {
 } from './agent-resource-guard.mjs';
 
 const DEAD_PID = 2 ** 22 + 12345;
+
+const guardScript = fileURLToPath(new URL('./agent-resource-guard.mjs', import.meta.url));
+const waitingSession = `
+  process.on('SIGTERM', () => process.exit(42));
+  process.stdin.resume();
+  process.stdin.on('end', () => process.exit(0));
+  setTimeout(() => process.exit(99), 10_000);
+  console.log('ready ' + process.ppid);
+`;
+
+function llmFixture(t) {
+  assert.ok(['darwin', 'linux'].includes(process.platform), 'I test dei lease LLM richiedono macOS o Linux');
+  const runtime = mkdtempSync(path.join(os.tmpdir(), 'frontaliere-llm-test-'));
+  const sessions = [];
+  t.after(async () => {
+    for (const { child } of sessions) child.stdin.end();
+    await Promise.allSettled(sessions.map(({ done }) => done));
+    rmSync(runtime, { recursive: true, force: true });
+  });
+
+  return (command, { reserve = false, args = [] } = {}) => {
+    const child = spawn(process.execPath, [
+      guardScript, '--run-llm', ...(reserve ? ['--reserve'] : []), '--',
+      process.execPath, '-e', command, '--', ...args,
+    ], {
+      cwd: runtime,
+      env: { ...process.env, FRONTALIERE_AGENT_RUNTIME_DIR: runtime },
+      timeout: 15_000,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdin.on('error', () => {}); // A refused runner can close its pipe first.
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    let markReady;
+    const handshake = new Promise((resolve) => { markReady = resolve; });
+    child.stdout.setEncoding('utf8').on('data', (chunk) => {
+      stdout += chunk;
+      const ready = /^ready (\d+)\n/.exec(stdout);
+      if (ready) markReady({ supervisorPid: Number(ready[1]) });
+    });
+    const done = new Promise((resolve) => {
+      child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
+    });
+    sessions.push({ child, done });
+    return {
+      child,
+      done,
+      async ready() {
+        const result = await Promise.race([handshake, done]);
+        assert.ok(result.supervisorPid > 1, 'il processo finto deve segnalare che è pronto');
+        return result.supervisorPid;
+      },
+    };
+  };
+}
+
+test('il runner ammette due sessioni e riusa lo slot alla fine', async (t) => {
+  const run = llmFixture(t);
+  const first = run(waitingSession);
+  await first.ready();
+  const second = run(waitingSession);
+  await second.ready();
+
+  const probe = 'console.log("launched")';
+  assert.deepEqual(await run(probe).done, {
+    code: 75, signal: null, stdout: '', stderr: 'llm-lease refused category=ordinary slot=none\n',
+  });
+  first.child.stdin.end();
+  assert.equal((await first.done).code, 0);
+  assert.deepEqual(await run(probe).done, {
+    code: 0, signal: null, stdout: 'launched\n', stderr: 'llm-lease acquired category=ordinary slot=1\n',
+  });
+});
+
+test('una riserva esclude la seconda e lascia disponibile lo slot ordinario', async (t) => {
+  const run = llmFixture(t);
+  const first = run(waitingSession, { reserve: true });
+  await first.ready();
+
+  const probe = 'console.log("launched")';
+  assert.deepEqual(await run(probe, { reserve: true }).done, {
+    code: 75, signal: null, stdout: '', stderr: 'llm-lease refused category=reserve slot=none\n',
+  });
+  assert.deepEqual(await run(probe).done, {
+    code: 0, signal: null, stdout: 'launched\n', stderr: 'llm-lease acquired category=ordinary slot=2\n',
+  });
+});
+
+test('il runner passa gli argomenti letterali e propaga il codice di uscita', async (t) => {
+  const run = llmFixture(t);
+  const args = ['due parole', '$(echo expanded); *', '--reserve', '', 'riga\nnuova'];
+  const result = await run('console.log(JSON.stringify(process.argv.slice(1))); process.exitCode = 23', { args }).done;
+  assert.equal(result.code, 23);
+  assert.deepEqual(JSON.parse(result.stdout), args);
+  assert.equal(result.stderr, 'llm-lease acquired category=ordinary slot=1\n');
+});
+
+test('SIGTERM al runner raggiunge il processo finto e ne propaga il codice', async (t) => {
+  const session = llmFixture(t)(waitingSession);
+  await session.ready();
+  assert.equal(session.child.kill('SIGTERM'), true);
+  assert.equal((await session.done).code, 42);
+});
+
+test('il figlio conserva il lock quando il supervisore Python muore', async (t) => {
+  const run = llmFixture(t);
+  // When the outer CLI exits, Node closes the test's stdin pipe. Keep this
+  // fake session alive independently of that pipe until its own deadline.
+  const first = run("setTimeout(() => {}, 4000); console.log('ready ' + process.ppid)");
+  const supervisorPid = await first.ready();
+  const second = run(waitingSession);
+  await second.ready();
+
+  const runnerExit = once(first.child, 'exit');
+  process.kill(supervisorPid, 'SIGKILL');
+  assert.deepEqual(await runnerExit, [137, null]);
+  assert.equal((await run('console.log("launched")').done).code, 75);
+  assert.equal((await first.done).code, 137);
+  assert.equal((await run('console.log("launched")').done).code, 0);
+});
 
 function withRuntime(fn) {
   const runtime = mkdtempSync(path.join(os.tmpdir(), 'frontaliere-guard-test-'));
