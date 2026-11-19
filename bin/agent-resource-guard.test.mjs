@@ -1,20 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   LEASE_START_GRACE_MS,
   acquireHeavyLease,
   classifyCommand,
   cleanupRuntime,
+  findModernGitExecutable,
   guardPost,
   guardPre,
   invocationId,
   leaseStaleReason,
   parsePayload,
   pressureDecision,
+  partialCloneGitDecision,
   queueHead,
   redactCommand,
   runtimeDirectory,
@@ -584,4 +587,198 @@ test('guardPre rifiuta il comando nel sito, lo ammette nel corpus e rispetta il 
   assert.equal(guardPre(info('git sparse-checkout disable', ctx.reddit), ctx.workspace).allowed, true);
   process.env.FRONTALIERE_RESOURCE_GUARD_BYPASS = '1';
   assert.equal(guardPre(info('git sparse-checkout disable', ctx.siteWorktree), ctx.workspace).allowed, true);
+}))));
+
+// ── Clone parziale e oid completo ──────────────────────────────────────────
+// Il clone filtrato resta locale e isolato: l'oid assente esiste solo nel bare
+// usato come origin, quindi la sonda --no-lazy-fetch non deve toccare la rete.
+function withPartialClone(fn) {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'frontaliere-partial-git-')));
+  try {
+    const origin = path.join(root, 'origin.git');
+    const source = path.join(root, 'source');
+    const partial = path.join(root, 'partial clone');
+    const full = path.join(root, 'full clone');
+    mkdirSync(source);
+    execFileSync('git', ['init', '--bare', '--quiet', origin]);
+    git(origin, 'config', 'uploadpack.allowFilter', 'true');
+    execFileSync('git', ['init', '--quiet', '--initial-branch=main', source]);
+    git(source, 'config', 'user.email', 'guard-test@example.invalid');
+    git(source, 'config', 'user.name', 'Guard test');
+    writeFileSync(path.join(source, 'tracked.txt'), 'first commit\n');
+    git(source, 'add', 'tracked.txt');
+    git(source, 'commit', '--quiet', '-m', 'first');
+    git(source, 'push', '--quiet', origin, 'HEAD:refs/heads/main');
+    git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+
+    const originUrl = pathToFileURL(origin).href;
+    execFileSync('git', ['clone', '--quiet', '--filter=blob:none', '--no-checkout', originUrl, partial]);
+    const presentOid = git(source, 'rev-parse', 'HEAD').trim();
+    writeFileSync(path.join(source, 'second.txt'), 'second commit only in origin\n');
+    git(source, 'add', 'second.txt');
+    git(source, 'commit', '--quiet', '-m', 'second');
+    git(source, 'push', '--quiet', origin, 'HEAD:refs/heads/main');
+    const absentOid = git(source, 'rev-parse', 'HEAD').trim();
+    execFileSync('git', ['clone', '--quiet', originUrl, full]);
+
+    assert.equal(git(partial, 'config', '--get', 'remote.origin.promisor').trim(), 'true');
+    return fn({ root, origin, source, partial, full, presentOid, absentOid });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const systemModernGit = findModernGitExecutable();
+const modernGitSkip = systemModernGit ? false : 'richiede Git >= 2.44 per cat-file --no-lazy-fetch';
+
+test('blocca gli oid completi assenti nelle forme di revisione e nei comandi Git che leggono oggetti', { skip: modernGitSkip }, () => withPartialClone((ctx) => {
+  const oid = ctx.absentOid;
+  const revisions = [
+    oid,
+    `${oid}^`,
+    `${oid}~2`,
+    `${oid}^{tree}`,
+    `${oid}@{0}`,
+    `${oid}:tracked.txt`,
+    `${oid}..HEAD`,
+    `HEAD...${oid}`,
+  ];
+  for (const revision of revisions) {
+    const decision = partialCloneGitDecision(`git -C "${ctx.partial}" show ${revision}`, ctx.root);
+    assert.ok(decision, revision);
+    assert.match(decision.reason, /circa 450 MB/);
+    assert.match(decision.reason, /git fetch origin refs\/pull\/<N>\/head/);
+    assert.match(decision.reason, new RegExp(`git fetch origin ${oid}`));
+  }
+  const sha256Oid = 'a'.repeat(64);
+  assert.match(partialCloneGitDecision(`git -C "${ctx.partial}" show ${sha256Oid}`, ctx.root)?.reason ?? '', new RegExp(sha256Oid));
+
+  const objectReaders = [
+    `git checkout ${oid}`,
+    `git switch ${oid}`,
+    `git reset ${oid}`,
+    `git branch candidate ${oid}`,
+    `git cherry-pick ${oid}`,
+    `git revert ${oid}`,
+    `git merge ${oid}`,
+    `git rebase --onto ${oid}`,
+    `git diff ${oid}`,
+    `git log ${oid}`,
+    `git show ${oid}`,
+    `git merge-base ${oid} HEAD`,
+    `git rev-list ${oid}`,
+    `git rev-parse ${oid}`,
+    `git cat-file -e ${oid}`,
+    `git blame ${oid} -- tracked.txt`,
+    `git describe ${oid}`,
+    `git name-rev ${oid}`,
+    `git range-diff ${oid}..HEAD`,
+    `git format-patch ${oid}`,
+    `git merge-tree ${oid} HEAD HEAD`,
+    `git diff-tree ${oid}`,
+    `git ls-tree ${oid}`,
+    `git worktree add ../new-worktree ${oid}`,
+  ];
+  for (const command of objectReaders) {
+    const decision = partialCloneGitDecision(`git -C "${ctx.partial}" ${command.slice(4)}`, ctx.root);
+    assert.ok(decision, command);
+  }
+
+  for (const command of [
+    `git -C "${ctx.partial}" show ${oid}`,
+    `cd "${ctx.partial}" && git show ${oid}`,
+    `env GUARD_TEST=1 git -C "${ctx.partial}" show ${oid}`,
+    `git -c core.quotepath=false -C "${ctx.partial}" show ${oid} && printf ok`,
+    `(git -C "${ctx.partial}" show ${oid})`,
+    `printf start; git -C "${ctx.partial}" show ${oid} | cat`,
+  ]) {
+    assert.ok(partialCloneGitDecision(command, ctx.root), command);
+  }
+
+  const pre = guardPre({
+    payload: {},
+    command: `git -C "${ctx.partial}" show ${oid}`,
+    cwd: ctx.root,
+    sessionId: 'partial-clone-test',
+    toolCallId: 'missing-oid',
+  }, ctx.root);
+  assert.equal(pre.allowed, false);
+  assert.match(pre.reason, /circa 450 MB/);
+}));
+
+test('lascia passare oid presenti e clone completo, prefissi sconosciuti, fetch e sottocomandi esclusi', () => withPartialClone((ctx) => {
+  if (systemModernGit) {
+    assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" show ${ctx.presentOid}`, ctx.root), undefined);
+  }
+  const abbreviated = '1234567890abcdef';
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" log -1 ${abbreviated}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" fetch origin ${ctx.absentOid}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" push origin ${ctx.absentOid}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" ls-remote origin ${ctx.absentOid}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" config remote.origin.promisor ${ctx.absentOid}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git --no-lazy-fetch -C "${ctx.partial}" show ${ctx.absentOid}`, ctx.root), undefined);
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.partial}" show ${ctx.absentOid}`, ctx.root, ctx.root, { modernGit: null }), undefined);
+  const missingFromFullClone = execFileSync('git', ['-C', ctx.full, 'hash-object', '--stdin'], { input: 'computed but never stored\n', encoding: 'utf8' }).trim();
+  assert.equal(partialCloneGitDecision(`git -C "${ctx.full}" show ${missingFromFullClone}`, ctx.root), undefined);
+}));
+
+test('riconosce un clone parziale da extensions.partialClone anche senza remote promisor', () => withPartialClone((ctx) => {
+  git(ctx.partial, 'config', '--unset', 'remote.origin.promisor');
+  git(ctx.partial, 'config', 'extensions.partialClone', 'origin');
+  const decision = partialCloneGitDecision(`git -C "${ctx.partial}" log -p`, ctx.root);
+  assert.ok(decision);
+  assert.match(decision.reason, /blob storici/);
+}));
+
+test('senza Git >= 2.44 non sonda un oid assente', () => withPartialClone((ctx) => {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const legacyGit = path.join(ctx.root, 'git-legacy');
+  const probeMarker = path.join(ctx.root, 'unexpected-probe');
+  writeFileSync(legacyGit, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'git version 2.43.0\\n'; exit 0; fi\nif [ "$1" = "--no-lazy-fetch" ]; then : > '${probeMarker}'; exit 1; fi\nexec '${realGit}' "$@"\n`);
+  chmodSync(legacyGit, 0o755);
+  assert.equal(partialCloneGitDecision(
+    `git -C "${ctx.partial}" show ${ctx.absentOid}`,
+    ctx.root,
+    ctx.root,
+    { gitCandidates: [legacyGit] },
+  ), undefined);
+  assert.equal(existsSync(probeMarker), false, 'il Git vecchio non riceve mai la sonda cat-file');
+}));
+
+test('nei cloni parziali blocca scansioni log con blob storici e blame senza limite', () => withPartialClone((ctx) => {
+  const blocked = [
+    `git -C "${ctx.partial}" log -p`,
+    `git -C "${ctx.partial}" log --patch -- tracked.txt`,
+    `git -C "${ctx.partial}" whatchanged -Sneedle`,
+    `cd "${ctx.partial}" && git log -Gneedle`,
+    `git -C "${ctx.partial}" log --follow -- tracked.txt`,
+    `git -C "${ctx.partial}" blame tracked.txt`,
+  ];
+  for (const command of blocked) {
+    const decision = partialCloneGitDecision(command, ctx.root);
+    assert.ok(decision, command);
+    assert.match(decision.reason, /blob storici/);
+  }
+  for (const command of [
+    `git -C "${ctx.partial}" blame -n 20 tracked.txt`,
+    `git -C "${ctx.partial}" blame --max-count=20 tracked.txt`,
+    `git -C "${ctx.partial}" blame --since=2026-01-01 tracked.txt`,
+    `git -C "${ctx.partial}" blame HEAD~2..HEAD -- tracked.txt`,
+    `git --no-lazy-fetch -C "${ctx.partial}" log -p`,
+    `git -C "${ctx.full}" log -p`,
+  ]) {
+    assert.equal(partialCloneGitDecision(command, ctx.root), undefined, command);
+  }
+}));
+
+test('il bypass del proprietario salta anche il blocco degli oid nei cloni parziali', () => withPartialClone((ctx) => withRuntime((runtime) => withGuardEnv(runtime, () => {
+  const info = {
+    payload: {},
+    command: `git -C "${ctx.partial}" show ${ctx.absentOid}`,
+    cwd: ctx.root,
+    sessionId: 'partial-clone-bypass-test',
+    toolCallId: 'bypass-oid',
+  };
+  process.env.FRONTALIERE_RESOURCE_GUARD_BYPASS = '1';
+  assert.equal(guardPre(info, ctx.root).allowed, true);
 }))));
