@@ -401,6 +401,78 @@ test('un nuovo agente non eredita gli eventi pending di un observer condiviso ab
   }
 });
 
+test('la riconciliazione per run ID verifica il nome del workflow nel catalogo', async (t) => {
+  const repo = 'example/fixture';
+  const workflow = 'Fixture validation';
+  const path = '.github/workflows/fixture.yml';
+  const branch = 'fixture-branch';
+  const sha = 'a'.repeat(40);
+  const runId = 101;
+  const workflowId = 202;
+  const exactPath = `/repos/${repo}/actions/runs/${runId}`;
+  const catalogPath = `/repos/${repo}/actions/workflows?per_page=100`;
+  const cases = [
+    { label: 'ID univoco', matched: true, lookup: true },
+    { label: 'ID stringa e run_id', run: { id: undefined, run_id: runId, workflow_id: String(workflowId) }, matched: true, lookup: true },
+    { label: 'ID diverso', catalogIds: [303], lookup: true },
+    { label: 'nome ambiguo', catalogIds: [workflowId, 303], lookup: true },
+    { label: 'nome già presente', run: { workflow_name: workflow }, matched: true },
+    { label: 'workflow_id assente', run: { workflow_id: undefined } },
+    { label: 'workflow_id non valido', run: { workflow_id: [workflowId] } },
+    { label: 'run ID assente', run: { id: undefined } },
+    { label: 'run ID diverso', run: { id: 102 } },
+  ];
+
+  for (const { label, run, catalogIds = [workflowId], matched, lookup } of cases) {
+    await t.test(label, async () => {
+      const { broker, cleanup } = tempBroker();
+      try {
+        const coordinator = new GitHubCoordinator({
+          identity: 'lifecycle-test',
+          token: 'secret-for-test',
+          realGh: '/bin/echo',
+          socket: '/tmp/frontaliere-event-lifecycle.sock',
+          eventBroker: broker,
+        });
+        const subscription = broker.subscribe({
+          repo, resource: 'workflow_run', runId, workflow, branch, sha, waitFor: ['success'],
+        });
+        const calls = [];
+        coordinator.submit = async (request) => {
+          assert.equal(request.method, 'GET');
+          calls.push(request.path);
+          if (request.path === exactPath) {
+            return {
+              ok: true,
+              body: JSON.stringify({
+                id: runId, workflow_id: workflowId, name: 'Validation for fixture branch',
+                path, status: 'completed', conclusion: 'success', head_branch: branch, head_sha: sha,
+                ...run,
+              }),
+            };
+          }
+          assert.equal(request.path, catalogPath);
+          return {
+            ok: true,
+            body: JSON.stringify({
+              workflows: catalogIds.map((id) => ({ id, name: workflow, path })),
+            }),
+          };
+        };
+
+        const result = await coordinator.reconcileEvents(subscription.id);
+        assert.equal(result.ok, true);
+        assert.deepEqual(result.matchedSubscriptionIds, matched ? [subscription.id] : []);
+        const pending = broker.getSubscriptionRecord(subscription.id).pending;
+        assert.deepEqual(pending.map((event) => event.state), matched ? ['success'] : []);
+        assert.deepEqual(calls, lookup ? [exactPath, catalogPath] : [exactPath]);
+      } finally {
+        cleanup();
+      }
+    });
+  }
+});
+
 test('lo sweep serve prima gli observer con listener e ritarda gli orfani', async () => {
   const { broker, cleanup } = tempBroker();
   const originalFetch = globalThis.fetch;

@@ -2895,6 +2895,16 @@ export class GitHubCoordinator {
       if (data && workflowNameId !== null && !workflowSelectorMatchesRun(data, subscription.workflow)) {
         data = { ...data, workflow_name: subscription.workflow };
       }
+    } else if (subscription.resource === 'workflow_run'
+      && subscription.runId && subscription.workflow && data
+      && String(data.id ?? data.run_id ?? '') === subscription.runId
+      && (typeof data.workflow_id === 'number' || typeof data.workflow_id === 'string')
+      && /^0*[1-9][0-9]*$/.test(String(data.workflow_id))
+      && !workflowSelectorMatchesRun(data, subscription.workflow)) {
+      const workflowId = await this.resolveWorkflowNameId(subscription.repo, subscription.workflow);
+      if (workflowId === String(data.workflow_id)) {
+        data = { ...data, workflow_name: subscription.workflow };
+      }
     }
     if (subscription.resource === 'deployment') data = Array.isArray(data) ? data[0] : null;
     const events = [];
