@@ -138,8 +138,11 @@ fi
 # Mac downloaded 800+ MB of history before sending anything. Those bases are
 # optional, so `--no-thin` drops them; the same push then finished in seconds
 # with lazy fetches disabled, proving nothing else was missing. Only the pack
-# sent changes (no deltas against objects the server already has). The flag
-# goes right after `push`, so an explicit later `--thin` still wins.
+# sent changes: no deltas against objects the server already has, so a push
+# that edits a large tracked file uploads it whole (a 4 MB file with one line
+# appended: 392 B thin, 3 MB without), a bounded cost next to the history
+# download. The flag goes right after `push`, so an explicit later `--thin`
+# still wins. Other invocation forms (--git-dir=, aliases) pass through.
 # FRONTALIERE_PUSH_NO_THIN=0 opts out.
 parse_push() {
   push_target=$PWD
@@ -150,11 +153,23 @@ parse_push() {
     case "$1" in
       -C|-c)
         [ "$#" -ge 2 ] || return 0
-        [ "$1" = -C ] && push_target=$2
+        if [ "$1" = -C ]; then
+          # Successive -C options nest, like Git's own.
+          case "$2" in
+            /*) push_target=$2 ;;
+            *) push_target=$push_target/$2 ;;
+          esac
+        fi
         shift 2
         index=$((index + 1))
         ;;
-      push) push_index=$index; return 0 ;;
+      push)
+        # `git push --help` opens the manual only when --help comes right
+        # after push; leave it alone.
+        case "${2:-}" in --help|-h) return 0 ;; esac
+        push_index=$index
+        return 0
+        ;;
       *) return 0 ;;
     esac
   done

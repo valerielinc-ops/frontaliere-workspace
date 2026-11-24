@@ -912,7 +912,11 @@ parziale (`remote.*.promisor` vero o `extensions.partialclone`) lo shim aggiunge
 prefetchare a `pack-objects` le basi delta lato server mancanti, e il fetch
 promisor con negoziazione `noop` riscaricava centinaia di MB di storia: 825 MB
 per un push di due file sul Mac agenti, il 2026-11-24. Un `--thin` esplicito
-più avanti nella riga vince. `FRONTALIERE_PUSH_NO_THIN=0` disattiva l'aggiunta.
+più avanti nella riga vince. Il prezzo è un pack senza delta verso oggetti
+che il server ha già: un file grande modificato viaggia intero (4 MB con una
+riga in più: 392 B con il thin pack, 3 MB senza), molto meno del download della
+storia. `git push --help` resta com'è, e le forme `--git-dir=` e gli alias
+passano senza modifiche. `FRONTALIERE_PUSH_NO_THIN=0` disattiva l'aggiunta.
 Se esisteva uno
 shim non gestito viene conservato in `~/.local/bin/git.pre-frontaliere`;
 `--restore` ripristina anche quello e rimuove solo le configurazioni e le righe

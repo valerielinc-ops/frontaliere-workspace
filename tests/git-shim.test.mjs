@@ -213,6 +213,8 @@ test('a push from a partial clone gets --no-thin right after push, in every invo
       [['-c', 'pack.window=0', 'push', 'origin', 'refs/tags/snapshot/x'], '-c pack.window=0 push --no-thin origin refs/tags/snapshot/x'],
       // An explicit --thin comes later on the command line, so it still wins.
       [['push', '--thin', 'origin', 'topic'], 'push --no-thin --thin origin topic'],
+      // Nested -C options resolve like Git's: the probe runs in a/b, not ./b.
+      [['-C', data.root, '-C', 'repo', 'push', 'origin', 'topic'], `-C ${data.root} -C repo push --no-thin origin topic`],
     ];
     for (const [args, expected] of cases) {
       const result = runShim(data, args, { FAKE_PROMISOR: 'true' });
@@ -240,8 +242,12 @@ test('a push from a full clone, a false promisor or with the opt-out passes thro
       assert.equal(result.status, 0, `${label}: ${result.stderr}`);
       assert.equal(lastCall(data), 'push origin topic', label);
     }
-    runShim(data, ['status'], { FAKE_PROMISOR: 'true' });
-    assert.equal(lastCall(data), 'status');
+    // `push` must be the subcommand, not a later word; `push --help` keeps
+    // opening the manual.
+    for (const args of [['status'], ['stash', 'push', '-m', 'wip'], ['push', '--help'], ['push', '-h']]) {
+      runShim(data, args, { FAKE_PROMISOR: 'true' });
+      assert.equal(lastCall(data), args.join(' '), args.join(' '));
+    }
   } finally {
     rmSync(data.root, { recursive: true, force: true });
   }
