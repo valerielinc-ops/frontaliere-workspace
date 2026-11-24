@@ -15,6 +15,11 @@ printf '%s\\n' "$*" >>"${callsFile}"
 if [ "$1" = -C ]; then target=$2; shift 2; else target=$PWD; fi
 case "$1" in
   config)
+    if [ "$2" = --get-regexp ]; then
+      [ -n "\${FAKE_PROMISOR:-}" ] || exit 1
+      printf 'remote.origin.promisor %s\\n' "$FAKE_PROMISOR"
+      exit 0
+    fi
     if [ "$2" = --get ] && [ "$3" = frontaliere.fetchThrottleSeconds ]; then
       [ -n "\${FAKE_THROTTLE_SECONDS:-}" ] || exit 1
       printf '%s\\n' "$FAKE_THROTTLE_SECONDS"
@@ -190,6 +195,59 @@ test('selects the newest local Git at or above 2.44 when the explicit candidate 
     assert.equal(existsSync(newCalls), true, 'the highest local Git handled config/rev-parse');
     assert.equal(existsSync(oldCalls), false);
     assert.equal(existsSync(explicitCalls), false);
+  } finally {
+    rmSync(data.root, { recursive: true, force: true });
+  }
+});
+
+function lastCall(data) {
+  return readFileSync(data.calls, 'utf8').split('\n').filter(Boolean).at(-1);
+}
+
+test('a push from a partial clone gets --no-thin right after push, in every invocation form', () => {
+  const data = fixture();
+  try {
+    const cases = [
+      [['push', 'origin', 'topic'], 'push --no-thin origin topic'],
+      [['-C', data.repo, 'push', '-u', 'origin', 'HEAD:topic'], `-C ${data.repo} push --no-thin -u origin HEAD:topic`],
+      [['-c', 'pack.window=0', 'push', 'origin', 'refs/tags/snapshot/x'], '-c pack.window=0 push --no-thin origin refs/tags/snapshot/x'],
+      // An explicit --thin comes later on the command line, so it still wins.
+      [['push', '--thin', 'origin', 'topic'], 'push --no-thin --thin origin topic'],
+      // Nested -C options resolve like Git's: the probe runs in a/b, not ./b.
+      [['-C', data.root, '-C', 'repo', 'push', 'origin', 'topic'], `-C ${data.root} -C repo push --no-thin origin topic`],
+    ];
+    for (const [args, expected] of cases) {
+      const result = runShim(data, args, { FAKE_PROMISOR: 'true' });
+      assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`);
+      assert.equal(lastCall(data), expected);
+    }
+    for (const value of ['yes', '1']) {
+      runShim(data, ['push', 'origin', 'topic'], { FAKE_PROMISOR: value });
+      assert.equal(lastCall(data), 'push --no-thin origin topic', `promisor=${value}`);
+    }
+  } finally {
+    rmSync(data.root, { recursive: true, force: true });
+  }
+});
+
+test('a push from a full clone, a false promisor or with the opt-out passes through unchanged', () => {
+  const data = fixture();
+  try {
+    for (const [extra, label] of [
+      [{}, 'no promisor remote'],
+      [{ FAKE_PROMISOR: 'false' }, 'promisor=false'],
+      [{ FAKE_PROMISOR: 'true', FRONTALIERE_PUSH_NO_THIN: '0' }, 'opt-out'],
+    ]) {
+      const result = runShim(data, ['push', 'origin', 'topic'], extra);
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+      assert.equal(lastCall(data), 'push origin topic', label);
+    }
+    // `push` must be the subcommand, not a later word; `push --help` keeps
+    // opening the manual.
+    for (const args of [['status'], ['stash', 'push', '-m', 'wip'], ['push', '--help'], ['push', '-h']]) {
+      runShim(data, args, { FAKE_PROMISOR: 'true' });
+      assert.equal(lastCall(data), args.join(' '), args.join(' '));
+    }
   } finally {
     rmSync(data.root, { recursive: true, force: true });
   }

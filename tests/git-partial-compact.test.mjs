@@ -268,7 +268,8 @@ test('install e uninstall del LaunchAgent sono idempotenti e non invocano launch
   assert.match(original, /ch\.frontaliere\.git-partial-compact/);
   assert.match(original, /--apply/);
   assert.match(original, /--if-needed/);
-  assert.match(original, /<key>Weekday<\/key><integer>0<\/integer>/);
+  // Daily: no Weekday key, so launchd runs it every day at 05:30.
+  assert.doesNotMatch(original, /<key>Weekday<\/key>/);
   assert.match(original, /<key>Hour<\/key><integer>5<\/integer>/);
   assert.match(original, /<key>Minute<\/key><integer>30<\/integer>/);
   assert.match(original, /<key>LowPriorityIO<\/key>\s*<true\/>/);

@@ -2,7 +2,8 @@
 
 # FRONTALIERE_GIT_SHIM=1
 # Resolve a modern Git without depending on interactive PATH setup. Only exact
-# origin/main fetches are throttled; every other command is an exec passthrough.
+# origin/main fetches are throttled and pushes from a partial clone get
+# --no-thin; every other command is an exec passthrough.
 
 set -u
 
@@ -129,6 +130,70 @@ fi
 if [ -n "${FRONTALIERE_GIT_SHIM_PRINT:-}" ]; then
   printf '%s\n' "$git_bin"
   exit 0
+fi
+
+# Push from a partial clone. `pack-objects --thin` prefetches the remote-side
+# delta bases it lacks, and promisor fetches always run with
+# fetch.negotiationAlgorithm=noop: on 2026-11-24 a two-file push on the agents
+# Mac downloaded 800+ MB of history before sending anything. Those bases are
+# optional, so `--no-thin` drops them; the same push then finished in seconds
+# with lazy fetches disabled, proving nothing else was missing. Only the pack
+# sent changes: no deltas against objects the server already has, so a push
+# that edits a large tracked file uploads it whole (a 4 MB file with one line
+# appended: 392 B thin, 3 MB without), a bounded cost next to the history
+# download. The flag goes right after `push`, so an explicit later `--thin`
+# still wins. Other invocation forms (--git-dir=, aliases) pass through.
+# FRONTALIERE_PUSH_NO_THIN=0 opts out.
+parse_push() {
+  push_target=$PWD
+  push_index=0
+  index=0
+  while [ "$#" -gt 0 ]; do
+    index=$((index + 1))
+    case "$1" in
+      -C|-c)
+        [ "$#" -ge 2 ] || return 0
+        if [ "$1" = -C ]; then
+          # Successive -C options nest, like Git's own.
+          case "$2" in
+            /*) push_target=$2 ;;
+            *) push_target=$push_target/$2 ;;
+          esac
+        fi
+        shift 2
+        index=$((index + 1))
+        ;;
+      push)
+        # `git push --help` opens the manual only when --help comes right
+        # after push; leave it alone.
+        case "${2:-}" in --help|-h) return 0 ;; esac
+        push_index=$index
+        return 0
+        ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+is_partial_clone() {
+  "$git_bin" -C "$1" config --get-regexp '^(remote\..*\.promisor|extensions\.partialclone)$' 2>/dev/null |
+    awk 'tolower($1) == "extensions.partialclone" && $2 != "" { found = 1 }
+         tolower($1) ~ /^remote\..*\.promisor$/ && tolower($2) ~ /^(true|yes|on|1)$/ { found = 1 }
+         END { exit found ? 0 : 1 }'
+}
+
+if [ "${FRONTALIERE_PUSH_NO_THIN:-1}" != 0 ]; then
+  parse_push "$@"
+  if [ "$push_index" -gt 0 ] && is_partial_clone "$push_target"; then
+    position=0
+    for argument do
+      shift
+      position=$((position + 1))
+      set -- "$@" "$argument"
+      [ "$position" -eq "$push_index" ] && set -- "$@" --no-thin
+    done
+    exec "$git_bin" "$@"
+  fi
 fi
 
 throttle_opt_out=${FRONTALIERE_FETCH_THROTTLE:-1}
