@@ -53,7 +53,21 @@ if [ ! -e "$wt/.git" ]; then
   printf '%s\n' '/scripts/' '/package.json' | git -C "$wt" sparse-checkout set --no-cone --stdin || exit 0
 fi
 
-git -C "$wt" checkout -q --detach origin/main || exit 0
+if ! git -C "$wt" checkout -q --detach origin/main 2>/dev/null; then
+  # hooks-main non si modifica a mano. Una modifica locale (un agente che ha
+  # corretto uno script qui invece che in una PR) bloccava il riallineamento per
+  # sempre e gli hook giravano script vecchi: sul Mac principale hooks-main e'
+  # rimasto fermo a #19684 dal 21 al 24/11/2026 per un portal.mjs gia' mergiato
+  # con #19687. Il diff viene salvato nella gitdir comune, poi il checkout e'
+  # forzato.
+  patch="$gitdir/hooks-main-dirty-$(date +%Y%m%dT%H%M%S).patch"
+  if git -C "$wt" diff HEAD >"$patch" 2>/dev/null && [ -s "$patch" ]; then
+    printf 'site-hooks-refresh: hooks-main aveva modifiche locali, salvate in %s\n' "$patch" >&2
+  else
+    rm -f "$patch"
+  fi
+  git -C "$wt" checkout -q -f --detach origin/main || exit 0
+fi
 
 if [ -d "$site/node_modules" ] && [ ! -e "$wt/node_modules" ]; then
   ln -s "$site/node_modules" "$wt/node_modules"
