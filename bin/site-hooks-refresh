@@ -8,10 +8,11 @@
 # continuava a filtrare le review per `claude[bot]` ore dopo il merge della
 # fix (#9272). Una fix mergiata agli hook non arrivava mai alle sessioni.
 #
-# Il worktree e' detached, sparse (solo scripts/ e package.json), condivide
-# node_modules col checkout principale e non si modifica a mano: questo script
-# lo ricrea o lo riallinea con fetch + checkout --detach. Non tocca mai il
-# checkout principale ne' il suo branch.
+# Il worktree e' detached, sparse (scripts/, package.json e .githooks/: vedi
+# sparse_set sotto), condivide node_modules col checkout principale e non si
+# modifica a mano: questo script lo ricrea o lo riallinea con fetch + checkout
+# --detach, e riporta il set sparse a quello di sparse_set, togliendo anche i
+# path aggiunti a mano. Non tocca mai il checkout principale ne' il suo branch.
 #
 # Uso: bin/site-hooks-refresh [--force]   (throttle 15 min senza --force)
 # POSIX sh: gira da /bin/sh negli hook, niente bash-ismi.
