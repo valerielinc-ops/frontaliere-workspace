@@ -28,6 +28,10 @@ function fixture() {
   mkdirSync(join(seed, 'scripts'));
   writeFileSync(join(seed, 'scripts', 'hook.mjs'), 'export const version = 1;\n');
   writeFileSync(join(seed, 'package.json'), '{}\n');
+  mkdirSync(join(seed, '.githooks'));
+  writeFileSync(join(seed, '.githooks', 'pre-push'), '#!/bin/sh\nexit 0\n');
+  mkdirSync(join(seed, 'data'));
+  writeFileSync(join(seed, 'data', 'big.json'), '{}\n');
   git(seed, ['add', '.'], env);
   git(seed, ['commit', '-q', '-m', 'v1'], env);
   git(seed, ['push', '-q', 'origin', 'HEAD:main'], env);
@@ -82,4 +86,22 @@ test('hooks-main pulito: nessun file di patch', (t) => {
   const gitdir = git(site, ['rev-parse', '--path-format=absolute', '--git-common-dir'], fx.env);
   assert.equal(readdirSync(gitdir).some((name) => name.startsWith('hooks-main-dirty-')), false);
   assert.equal(existsSync(join(site, '.claude', 'worktrees', 'hooks-main', 'scripts', 'hook.mjs')), true);
+});
+
+test('hooks-main materializza .githooks/ e riallinea un set sparse precedente', (t) => {
+  const fx = fixture();
+  t.after(() => rmSync(fx.root, { recursive: true, force: true }));
+  const site = join(fx.ws, 'frontaliere-si-o-no');
+  const wt = join(site, '.claude', 'worktrees', 'hooks-main');
+  assert.equal(refresh(fx).status, 0);
+  assert.equal(existsSync(join(wt, '.githooks', 'pre-push')), true, 'hooks-main nuovo contiene .githooks/');
+  assert.equal(existsSync(join(wt, 'data', 'big.json')), false, 'il resto del repo resta fuori');
+
+  // hooks-main nato col set di prima (solo scripts/ e package.json).
+  execFileSync('git', ['-C', wt, 'sparse-checkout', 'set', '--no-cone', '/scripts/', '/package.json'], { env: fx.env, stdio: 'ignore' });
+  assert.equal(existsSync(join(wt, '.githooks', 'pre-push')), false);
+  const result = refresh(fx);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(wt, '.githooks', 'pre-push')), true, 'il set precedente viene riallineato');
+  assert.equal(existsSync(join(wt, 'data', 'big.json')), false);
 });
