@@ -14,8 +14,6 @@
 # Vive in ~/.config/frontaliere/, fuori dal workspace. Questa riga e' una rete.
 *.pem
 *sa-frontaliere-ticino*.json
-.env
-.env.local
 
 # Rumore
 .DS_Store
@@ -45,3 +43,11 @@ privato/
 /.claude/worktrees/
 /.codex/worktrees/
 /.gemini/worktrees/
+
+.projects/cache
+.projects/vault
+.projects/state.test.json
+.projects/state.local.test.json
+.env
+.env.*
+!.env.example
