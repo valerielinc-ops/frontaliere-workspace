@@ -906,7 +906,14 @@ iniziale. Se il ref remoto o il suo reflog e' piu' recente della finestra, il
 fetch termina senza rete; senza quiet stampa la decisione su stderr. Un lock
 `mkdir` nel Git common dir serializza i fetch in corso. Gli altri argomenti,
 inclusi `--depth`, `--unshallow` e `--refetch`, passano al Git reale senza
-throttle. `FRONTALIERE_FETCH_THROTTLE=0` disattiva il throttle. Se esisteva uno
+throttle. `FRONTALIERE_FETCH_THROTTLE=0` disattiva il throttle. In un clone
+parziale (`remote.*.promisor` vero o `extensions.partialclone`) lo shim aggiunge
+`--no-thin` subito dopo `push`, anche dopo `-C`/`-c`. Il thin pack fa
+prefetchare a `pack-objects` le basi delta lato server mancanti, e il fetch
+promisor con negoziazione `noop` riscaricava centinaia di MB di storia: 825 MB
+per un push di due file sul Mac agenti, il 2026-11-24. Un `--thin` esplicito
+più avanti nella riga vince. `FRONTALIERE_PUSH_NO_THIN=0` disattiva l'aggiunta.
+Se esisteva uno
 shim non gestito viene conservato in `~/.local/bin/git.pre-frontaliere`;
 `--restore` ripristina anche quello e rimuove solo le configurazioni e le righe
 che l'installer aveva aggiunto.
@@ -1214,10 +1221,12 @@ bin/git-partial-compact --repo frontaliere-si-o-no --convert --apply
 `--if-needed` fa il lavoro solo in un clone parziale con pack attivi maggiori
 di `max(10 GiB, 4 × byte_after dell'ultima compattazione riuscita)`. Il plist
 `config/launchd/ch.frontaliere.git-partial-compact.plist` esegue
-`--apply --if-needed` la domenica alle 05:30, come processo Background con
-`LowPriorityIO` e `Nice 10`. `bin/git-partial-compact install` e `uninstall`
-scrivono o rimuovono idempotentemente il plist senza invocare `launchctl`; il
-collegamento al ciclo automatico viene gestito dalla PR concatenata.
+`--apply --if-needed` ogni giorno alle 05:30 (dal 2026-11-24; prima la
+domenica), come processo Background con `LowPriorityIO` e `Nice 10`: il
+controllo è giornaliero e la soglia sopra decide se la run compatta davvero.
+`bin/git-partial-compact install` e `uninstall` scrivono o rimuovono
+idempotentemente il plist senza invocare `launchctl`; `bin/workspace-autoupdate`
+lo installa e lo ricarica quando il plist cambia.
 
 Log e ultimo riepilogo sono rispettivamente
 `~/Library/Logs/frontaliere/git-partial-compact.log` e
