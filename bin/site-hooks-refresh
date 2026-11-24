@@ -47,10 +47,18 @@ trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
 
 git -C "$site" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' </dev/null || exit 0
 
+# Set sparse di hooks-main: gli script degli hook e `.githooks/`, perche'
+# prune-merged-worktrees spinge gli snapshot da qui con il pre-push di
+# origin/main (quello del checkout principale e' indietro di settimane sui Mac
+# agenti). Un hooks-main nato col set precedente viene riallineato.
+sparse_set() { printf '%s\n' '/scripts/' '/package.json' '/.githooks/'; }
+
 if [ ! -e "$wt/.git" ]; then
   git -C "$site" worktree prune 2>/dev/null
   git -C "$site" worktree add -q --detach --no-checkout "$wt" origin/main || exit 0
-  printf '%s\n' '/scripts/' '/package.json' | git -C "$wt" sparse-checkout set --no-cone --stdin || exit 0
+  sparse_set | git -C "$wt" sparse-checkout set --no-cone --stdin || exit 0
+elif [ "$(git -C "$wt" sparse-checkout list 2>/dev/null)" != "$(sparse_set)" ]; then
+  sparse_set | git -C "$wt" sparse-checkout set --no-cone --stdin 2>/dev/null || true
 fi
 
 if ! git -C "$wt" checkout -q --detach origin/main 2>/dev/null; then
