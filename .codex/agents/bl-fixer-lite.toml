@@ -1,6 +1,6 @@
 name = "bl-fixer-lite"
 description = "Applica una fix meccanica gia' pianificata, con causa nota e massimo 3 file. Verifica e apre la PR."
-model = "gpt-5.6-terra"
+model = "gpt-6.1-terra"
 model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 developer_instructions = """
