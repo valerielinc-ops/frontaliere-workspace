@@ -3,11 +3,39 @@
 
 import errno
 import fcntl
+import json
 import os
 import signal
+import stat
 import subprocess
 import sys
+import time
+import uuid
 from contextlib import ExitStack
+from datetime import datetime, timezone
+
+
+def append_usage(path, record):
+    line = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(line) > 512:
+        return
+    try:
+        fd = os.open(
+            path, os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+        )
+        try:
+            info = os.fstat(fd)
+            if (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and info.st_mode & 0o077 == 0
+                and info.st_nlink == 1
+            ):
+                os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def acquire(locks, runtime, name):
@@ -33,6 +61,7 @@ def supports_termination_grace():
 
 def run(runtime, category, command, grace_ms=None):
     child = None
+    ready_to_forward = False
     pending_signals = []
     stop_request = {}
     forwarding = True
@@ -55,7 +84,7 @@ def run(runtime, category, command, grace_ms=None):
             kill_group()
 
     def forward(signum, _frame=None):
-        if child is None:
+        if not ready_to_forward:
             pending_signals.append(signum)
             return
         if not forwarding:
@@ -93,7 +122,21 @@ def run(runtime, category, command, grace_ms=None):
             return 75
 
         print(f"llm-lease acquired category={category} slot={slot}", file=sys.stderr)
+        usage_path = os.environ.get("FRONTALIERE_LLM_USAGE_LOG", "")
+        provider = os.path.basename(command[0])
+        usage = None
+        if provider in ("codex", "claude") and os.path.isabs(usage_path):
+            try:
+                usage = {"version": 1, "event": "started", "id": uuid.uuid4().hex, "provider": provider}
+            except OSError:
+                pass
+        if usage is not None:
+            usage["startedAt"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            started_ns = time.monotonic_ns()
         child = subprocess.Popen(command, start_new_session=True, pass_fds=inherited)
+        if usage is not None:
+            append_usage(usage_path, usage)
+        ready_to_forward = True
         for signum in pending_signals:
             forward(signum)
         if grace_ms is not None:
@@ -104,6 +147,9 @@ def run(runtime, category, command, grace_ms=None):
             if stop_request:
                 kill_group()
         status = child.wait()
+        if usage is not None:
+            duration_ms = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
+            append_usage(usage_path, {**usage, "event": "finished", "durationMs": duration_ms})
         return status if status >= 0 else 128 - status
 
 
