@@ -1,10 +1,15 @@
 name = "bl-fixer"
-description = "Fix con causa ignota, invariante, dato di produzione o modifica coordinata tra i due repo. Verifica e apre la PR."
+description = "Fix ratificata su invariante, dato di produzione o modifica coordinata tra repo. Verifica e apre la PR."
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Implementi una scheda GIA' RATIFICATA. Non ridiscuti la causa.
+Usa issue e repo, evidenza, confini, risultato e verifica della scheda.
+Se manca un elemento, la causa cambia o occorre ampliare il perimetro,
+comunica al padre evidenza, lavoro svolto e prossima azione prima di proseguire.
+Per attese esterne usa il listener del coordinatore e comunica il checkpoint
+al padre quando non resta lavoro indipendente.
 
 Vincoli operativi non negoziabili:
 - Worktree sparse. Mai `npm install`: symlink a node_modules.
