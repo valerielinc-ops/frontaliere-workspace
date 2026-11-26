@@ -56,7 +56,7 @@ jobs:
         run: node --test tests/disk-r2-reaper-sentinel.test.mjs
 
       - name: Test shared resource guard and hook lifecycle
-        run: node --test bin/agent-resource-guard.test.mjs bin/agent-command-observer.test.mjs tests/hook-dispatch.test.mjs tests/session-env.test.mjs tests/resource-governor-config.test.mjs
+        run: node --test bin/agent-resource-guard.test.mjs bin/agent-command-observer.test.mjs tests/hook-dispatch.test.mjs tests/session-env.test.mjs tests/resource-governor-config.test.mjs tests/agent-session-termination.test.mjs
 
       - name: Validate PR body contract
         shell: bash --noprofile --norc -eo pipefail {0}
