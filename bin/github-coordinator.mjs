@@ -97,6 +97,7 @@ const HEADROOM_CONCURRENCY_STEPS = [
 export const SECONDARY_LIMIT_WINDOW_MS = 60 * 1_000;
 export const SECONDARY_LIMIT_BUDGETS = Object.freeze({ rest: 720, graphql: 1_600 });
 const MAX_API_ATTEMPTS = 3;
+const MAX_MUTATION_DEADLINE_MS = 120_000;
 const MUTATION_GAP_MS = 1_000;
 const CLI_CACHE_TTL_MS = 15_000;
 // A `gh` child that outlives these deadlines is hung (stdin is closed): it
@@ -1677,6 +1678,13 @@ function isPastRateLimitReset(observed, now = Date.now()) {
   return Number.isFinite(resetSeconds) && resetSeconds * 1_000 < now;
 }
 
+function mutationDeadlineError(expired) {
+  const status = expired ? 408 : 400;
+  const code = expired ? 'coordinator_mutation_deadline_exceeded' : 'coordinator_mutation_deadline_invalid';
+  const message = expired ? 'Coordinator mutation deadline exceeded' : 'Invalid coordinator mutation deadline';
+  return { ok: false, status, headers: {}, body: '', error: { code, message, status } };
+}
+
 export class GitHubCoordinator {
   constructor({ identity, token, realGh, socket, eventBroker = null }) {
     this.identity = normalizeIdentity(identity);
@@ -1810,6 +1818,7 @@ export class GitHubCoordinator {
     if (compact) {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
+        mutationDeadlineSupported: true,
         identity: this.identity,
         socket: this.socket,
         queueLength: this.queue.length,
@@ -1841,6 +1850,7 @@ export class GitHubCoordinator {
     }
     return {
       protocolVersion: COORDINATOR_PROTOCOL_VERSION,
+      mutationDeadlineSupported: true,
       identity: this.identity,
       socket: this.socket,
       queueLength: this.queue.length,
@@ -3253,6 +3263,16 @@ export class GitHubCoordinator {
       : request;
     const meta = classifyJob(queuedRequest);
     const now = Date.now();
+    let mutationDeadlineAtMs;
+    if (Object.hasOwn(request, 'mutationDeadlineAtMs')) {
+      mutationDeadlineAtMs = request.mutationDeadlineAtMs;
+      if (queuedRequest.type !== 'api' || !meta.mutation
+        || !Number.isSafeInteger(mutationDeadlineAtMs) || mutationDeadlineAtMs <= 0
+        || mutationDeadlineAtMs - now > MAX_MUTATION_DEADLINE_MS) {
+        return Promise.resolve(mutationDeadlineError(false));
+      }
+      if (mutationDeadlineAtMs <= now) return Promise.resolve(mutationDeadlineError(true));
+    }
     this.sweepCachesIfDue(now);
     const isRead = !meta.mutation;
     const key = queuedRequest.type === 'api' && isRead ? scopedCacheKeyFor(queuedRequest) : null;
@@ -3274,7 +3294,7 @@ export class GitHubCoordinator {
     if (existing) return existing;
 
     const promise = new Promise((resolvePromise, rejectPromise) => {
-      this.queue.push({
+      const job = {
         request: queuedRequest,
         resolve: resolvePromise,
         reject: rejectPromise,
@@ -3283,7 +3303,18 @@ export class GitHubCoordinator {
         cliKey,
         meta,
         enqueuedAtMs: now,
-      });
+        mutationDeadlineAtMs,
+      };
+      this.queue.push(job);
+      if (mutationDeadlineAtMs !== undefined) {
+        job.deadlineTimer = setTimeout(() => {
+          const index = this.queue.indexOf(job);
+          if (index === -1) return;
+          this.queue.splice(index, 1);
+          job.resolve(mutationDeadlineError(true));
+          this.pump();
+        }, mutationDeadlineAtMs - Date.now());
+      }
       this.metrics.peakQueueLength = Math.max(this.metrics.peakQueueLength, this.queue.length);
       this.pump();
     });
@@ -3503,6 +3534,7 @@ export class GitHubCoordinator {
         this.scheduleNextWake();
         break;
       }
+      if (job.deadlineTimer !== undefined) clearTimeout(job.deadlineTimer);
       this.startJob(job);
     }
   }
@@ -3647,7 +3679,7 @@ export class GitHubCoordinator {
   async run(job) {
     try {
       let response = job.request.type === 'api'
-        ? await this.executeApi(job.request)
+        ? await this.executeApi(job.request, job.mutationDeadlineAtMs)
         : await this.executeCli(job.request, this.jobMeta(job));
       let usedAnonymousFallback = false;
       if (response.rateLimited) {
@@ -3714,7 +3746,10 @@ export class GitHubCoordinator {
     });
   }
 
-  async executeApi(request) {
+  async executeApi(request, mutationDeadlineAtMs) {
+    const hasDeadline = mutationDeadlineAtMs !== undefined;
+    const deadlinePassed = () => hasDeadline && Date.now() >= mutationDeadlineAtMs;
+    if (deadlinePassed()) return mutationDeadlineError(true);
     this.metrics.requests += 1;
     const method = String(request.method || 'GET').toUpperCase();
     const baseBucket = request.bucket || classifyBucket(request.path, method);
@@ -3765,16 +3800,24 @@ export class GitHubCoordinator {
     if (cached?.headers?.['last-modified']) headers['if-modified-since'] = cached.headers['last-modified'];
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1_000, Number(request.timeoutMs || 30_000)));
+    const legacyTimeoutMs = Math.max(1_000, Number(request.timeoutMs || 30_000));
+    const timeoutMs = hasDeadline ? (legacyTimeoutMs || 1) : legacyTimeoutMs;
+    const remainingMs = hasDeadline ? mutationDeadlineAtMs - Date.now() : Infinity;
+    const deadlineLimitsTimeout = remainingMs <= timeoutMs && hasDeadline;
+    const timer = setTimeout(
+      () => controller.abort(),
+      deadlineLimitsTimeout ? remainingMs : timeoutMs,
+    );
     let response;
     let redirected = false;
+    let responseBody;
     const epochAtStart = this.invalidationEpoch;
     this.metrics.networkRequests += 1;
     if (request.anonymous) this.metrics.anonymousRequests += 1;
     this.recordSecondaryUsage(isGraphqlPath(request.path) ? 'graphql' : 'rest', read ? 1 : 5);
     const sourceUrl = apiUrl(request.path);
     try {
-      response = await fetch(sourceUrl, {
+      const fetchOptions = {
         method,
         headers,
         body: request.body === undefined || request.body === null
@@ -3782,10 +3825,14 @@ export class GitHubCoordinator {
           : typeof request.body === 'string' ? request.body : JSON.stringify(request.body),
         redirect: 'manual',
         signal: controller.signal,
-      });
+      };
+      if (deadlinePassed()) return mutationDeadlineError(true);
+      response = await fetch(sourceUrl, fetchOptions);
+      if (deadlinePassed()) return mutationDeadlineError(true);
       const redirectTarget = externalRedirectTarget(response, sourceUrl);
       if (redirectTarget) {
         redirected = true;
+        if (deadlinePassed()) return mutationDeadlineError(true);
         response = await fetch(redirectTarget, {
           method: 'GET',
           headers: {
@@ -3796,8 +3843,20 @@ export class GitHubCoordinator {
           signal: controller.signal,
         });
       }
+      if (hasDeadline) {
+        if (deadlinePassed()) return mutationDeadlineError(true);
+        responseBody = await readResponseBody(response);
+        if (deadlinePassed()) return mutationDeadlineError(true);
+      }
+    } catch (error) {
+      // A fetch that already started may have applied the write remotely.
+      if (deadlinePassed() || (deadlineLimitsTimeout && controller.signal.aborted)) {
+        return mutationDeadlineError(true);
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
+      if (deadlinePassed()) controller.abort();
     }
 
     const responseHeaders = observedHeaders(response.headers);
@@ -3810,7 +3869,7 @@ export class GitHubCoordinator {
       truncated: bodyTruncated,
       bytes: bodyBytes,
       bytesAtLeast: bodyBytesAtLeast,
-    } = await readResponseBody(response);
+    } = responseBody ?? await readResponseBody(response);
     if (response.status === 304 && cached) {
       this.metrics.cacheRevalidations += 1;
       cached.expiresAt = this.invalidatedSince(cached.scope, epochAtStart) ? 0 : Date.now() + ttl;
