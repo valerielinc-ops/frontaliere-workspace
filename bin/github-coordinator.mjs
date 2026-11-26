@@ -1685,6 +1685,10 @@ function mutationDeadlineError(expired) {
   return { ok: false, status, headers: {}, body: '', error: { code, message, status } };
 }
 
+function validMutationDeadline(value, now) {
+  return Number.isSafeInteger(value) && value > 0 && value - now <= MAX_MUTATION_DEADLINE_MS;
+}
+
 export class GitHubCoordinator {
   constructor({ identity, token, realGh, socket, eventBroker = null }) {
     this.identity = normalizeIdentity(identity);
@@ -1819,6 +1823,7 @@ export class GitHubCoordinator {
       return {
         protocolVersion: COORDINATOR_PROTOCOL_VERSION,
         mutationDeadlineSupported: true,
+        boundedMutationWireSupported: true,
         identity: this.identity,
         socket: this.socket,
         queueLength: this.queue.length,
@@ -1851,6 +1856,7 @@ export class GitHubCoordinator {
     return {
       protocolVersion: COORDINATOR_PROTOCOL_VERSION,
       mutationDeadlineSupported: true,
+      boundedMutationWireSupported: true,
       identity: this.identity,
       socket: this.socket,
       queueLength: this.queue.length,
@@ -1911,6 +1917,7 @@ export class GitHubCoordinator {
   ping() {
     return {
       protocolVersion: COORDINATOR_PROTOCOL_VERSION,
+      boundedMutationWireSupported: true,
       identity: this.identity,
       socket: this.socket,
       metrics: { startedAt: this.metrics.startedAt },
@@ -3267,8 +3274,7 @@ export class GitHubCoordinator {
     if (Object.hasOwn(request, 'mutationDeadlineAtMs')) {
       mutationDeadlineAtMs = request.mutationDeadlineAtMs;
       if (queuedRequest.type !== 'api' || !meta.mutation
-        || !Number.isSafeInteger(mutationDeadlineAtMs) || mutationDeadlineAtMs <= 0
-        || mutationDeadlineAtMs - now > MAX_MUTATION_DEADLINE_MS) {
+        || !validMutationDeadline(mutationDeadlineAtMs, now)) {
         return Promise.resolve(mutationDeadlineError(false));
       }
       if (mutationDeadlineAtMs <= now) return Promise.resolve(mutationDeadlineError(true));
@@ -5047,6 +5053,17 @@ function startWithOwnerLock(identity, socket, ownerLock) {
           });
         } else if (request.type === 'events-reconcile') {
           result = eventBrokerReady.then(() => coordinator.reconcileEvents(request.subscriptionId));
+        } else if (request.type === 'bounded-mutation') {
+          const nativeRequest = { ...request, type: 'api' };
+          const method = typeof request.method === 'string' && request.method.toUpperCase();
+          if (!Object.hasOwn(request, 'mutationDeadlineAtMs')
+            || !validMutationDeadline(request.mutationDeadlineAtMs, Date.now())
+            || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+            || apiRequestIsRead(nativeRequest)) {
+            result = mutationDeadlineError(false);
+          } else {
+            result = coordinator.submit(nativeRequest);
+          }
         } else if (request.type === 'api' || request.type === 'exec') {
           result = coordinator.submit(request);
         } else {

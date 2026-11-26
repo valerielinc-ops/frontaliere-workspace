@@ -40,6 +40,7 @@ const CONNECT_TIMEOUT_MS = 3_000;
 const EXEC_TIMEOUT_MS = 15 * 60 * 1_000;
 const NETWORK_REQUEST_TYPES = new Set([
   'api',
+  'bounded-mutation',
   'exec',
   'events-subscribe',
   'events-reconcile',
@@ -370,7 +371,7 @@ function cancellationPath(pathname) {
 }
 
 function requestNeedsCancellationConfirmation(request) {
-  if (request?.type === 'api') {
+  if (request?.type === 'api' || request?.type === 'bounded-mutation') {
     return String(request.method || 'GET').toUpperCase() === 'POST'
       && cancellationPath(String(request.path || '').replace(/^\//, ''));
   }
@@ -464,8 +465,19 @@ function schedulingClientKey() {
 
 export async function sendRequest(request, { identity = normalizeIdentity() } = {}) {
   const normalized = normalizeIdentity(identity);
-  const coordinatorResponse = await ensureCoordinator(normalized);
+  const boundedMutation = request?.type === 'bounded-mutation';
+  const coordinatorResponse = boundedMutation
+    ? await connectOnce({ type: 'ping', compact: true }, { identity: normalized })
+    : await ensureCoordinator(normalized);
   const coordinatorStatus = statusFromResponse(coordinatorResponse);
+  if (boundedMutation && (
+    coordinatorResponse?.ok !== true || coordinatorStatus?.boundedMutationWireSupported !== true
+  )) {
+    const error = new Error('Coordinator does not support the bounded mutation wire protocol');
+    error.code = 'bounded_mutation_wire_unsupported';
+    error.exitCode = 2;
+    throw error;
+  }
   if (requestNeedsCancellationConfirmation(request)) {
     await ensureCancellationConfirmationProtocol(normalized, coordinatorStatus);
   }
@@ -485,7 +497,7 @@ export async function sendRequest(request, { identity = normalizeIdentity() } = 
       identity: normalized,
       ...(ownerDeployDispatchOverride ? { ownerDeployDispatchOverride: true } : {}),
       ...(ownerUpdateBranchOverride ? { ownerUpdateBranchOverride: true } : {}),
-      ...((request?.type === 'exec' || request?.type === 'api') && client ? { client } : {}),
+      ...((boundedMutation || request?.type === 'exec' || request?.type === 'api') && client ? { client } : {}),
     },
     {
       identity: normalized,
