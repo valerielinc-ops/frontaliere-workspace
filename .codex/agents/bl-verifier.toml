@@ -1,6 +1,6 @@
 name = "bl-verifier"
 description = "Post-merge: rimisura la metrica dichiarata nella scheda e comunica se torna, senza riparare o aprire PR."
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """

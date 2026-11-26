@@ -134,10 +134,19 @@ risposta ancora necessaria restano espliciti, senza promettere autonomia totale.
   la scheda. Se il fixer incontra una nuova causa, deve estendere lo scope o
   resta in attesa di un evento, fa checkpoint al padre con evidenza e prossima
   azione. Conserva test, review e percorso di merge.
-- Per inventario e misura ripetibile usa `bl-scout` o `bl-verifier` a
-  reasoning `low`. Usa `low` anche per orchestrare compiti meccanici quando
-  avvii una sessione dedicata. Il planner mantiene `medium` per il piano e il
-  fixer mantiene `high` per il lavoro complesso.
+- Quando la delega è prevista, scegli il ruolo in base al compito. I profili
+  Codex di progetto in `.codex/agents/` fissano modello ed effort al momento
+  della delega, sul Mac locale o sull'host remoto che esegue il thread:
+  - `bl-scout` e `bl-verifier`: GPT-6 Luna low per inventario e rimisura.
+  - `bl-fixer-lite`: GPT-6.1 Terra low per fix meccaniche circoscritte.
+  - `bl-planner`: GPT-6.2 Sol low per diagnosi circoscritta e scheda.
+  - `bl-fixer`: GPT-6.2 Sol medium per implementazione complessa.
+  Usa il ruolo specifico invece di un worker generico per questi compiti.
+  Se la diagnosi rimane inconcludente dopo una verifica concreta, riporta
+  evidenza e dubbio al padre, che decide se serve un profilo superiore.
+  Per il coordinamento puro tieni basso il reasoning. Conserva le review
+  specialistiche richieste. Il criterio è capacità rispetto al costo per
+  task, con verifica locale del consumo per issue risolta.
 - Attendi il risultato del subagente con `wait_agent` e un timeout fino a
   60 secondi quando non c'è altro lavoro indipendente. Dopo un timeout puoi
   attendere di nuovo sullo stesso figlio. Usa `list_agents` per riconciliare

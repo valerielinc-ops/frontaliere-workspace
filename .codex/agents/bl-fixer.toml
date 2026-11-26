@@ -1,7 +1,7 @@
 name = "bl-fixer"
 description = "Fix ratificata su invariante, dato di produzione o modifica coordinata tra repo. Verifica e apre la PR."
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
+model = "gpt-6.2-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Implementi una scheda GIA' RATIFICATA. Non ridiscuti la causa.
