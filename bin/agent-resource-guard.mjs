@@ -1580,11 +1580,20 @@ function report(runtimeDir, json = false) {
   }
 }
 
+const RUN_LLM_USAGE = '--run-llm [--reserve] [--termination-grace-ms MS] -- PROGRAM ARG...';
+
 async function runLlm(args) {
   const reserve = args[0] === '--reserve';
-  const [separator, ...command] = reserve ? args.slice(1) : args;
-  if (separator !== '--' || !command[0]) {
-    process.stderr.write('uso: agent-resource-guard.mjs --run-llm [--reserve] -- PROGRAM ARG...\n');
+  let offset = reserve ? 1 : 0;
+  const grace = [];
+  if (args[offset] === '--termination-grace-ms') {
+    grace.push(args[offset], args[offset + 1]);
+    offset += 2;
+  }
+  const [separator, ...command] = args.slice(offset);
+  const validGrace = !grace.length || (/^[1-9][0-9]{0,4}(?![\s\S])/.test(grace[1]) && Number(grace[1]) <= 30000);
+  if (!validGrace || separator !== '--' || !command[0]) {
+    process.stderr.write(`uso: agent-resource-guard.mjs ${RUN_LLM_USAGE}\n`);
     return 2;
   }
 
@@ -1601,20 +1610,36 @@ async function runLlm(args) {
       runtimeDir = runtimeDirectory(path.dirname(realpathSync(commonDir)));
     }
     const helper = spawn('python3', [
-      path.join(BIN_DIR, 'agent-session-lease.py'), runtimeDir, reserve ? 'reserve' : 'ordinary', ...command,
+      path.join(BIN_DIR, 'agent-session-lease.py'), ...grace, runtimeDir, reserve ? 'reserve' : 'ordinary', ...command,
     ], { stdio: 'inherit', detached: true });
+    let helperRunning = true;
+    let stopRequested = false;
     const handlers = new Map(['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => [
-      signal, () => helper.kill(signal),
+      signal, () => {
+        if (!helperRunning || (grace.length && stopRequested)) return;
+        // The helper owns escalation after the first opt-in stop request.
+        // Further signals can interrupt Python while it is returning the status.
+        stopRequested = helper.kill(signal);
+      },
     ]));
     for (const [signal, handler] of handlers) process.on(signal, handler);
+    let code;
     try {
-      return await new Promise((resolve, reject) => {
+      code = await new Promise((resolve, reject) => {
         helper.once('error', reject);
         helper.once('exit', (code, signal) => resolve(code ?? 128 + os.constants.signals[signal]));
       });
     } finally {
-      for (const [signal, handler] of handlers) process.off(signal, handler);
+      helperRunning = false;
+      // Signal listeners do not keep Node alive. For opt-in runs, absorb late
+      // signals through CLI exit so they cannot override the helper's status.
+      if (!grace.length) {
+        for (const [signal, handler] of handlers) process.off(signal, handler);
+      }
     }
+    // Exit before Node's natural shutdown tears down the signal watchers.
+    if (grace.length) process.exit(code);
+    return code;
   } catch {
     process.stderr.write('resource-guard: errore di avvio del runner LLM\n');
     return 1;
@@ -1644,7 +1669,7 @@ function main(argv = process.argv.slice(2)) {
       report(runtimeDir, argv.includes('--json'));
       return 0;
     }
-    process.stderr.write('uso: agent-resource-guard.mjs [--pre|--post|--cleanup|--report [--json]|--run-llm [--reserve] -- PROGRAM ARG...]\n');
+    process.stderr.write(`uso: agent-resource-guard.mjs [--pre|--post|--cleanup|--report [--json]|${RUN_LLM_USAGE}]\n`);
     return 0;
   } catch (error) {
     // Fail-open by design: the guard must not become a new source of outages.
