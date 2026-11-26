@@ -896,6 +896,153 @@ test('segue i redirect esterni dei log senza inoltrare il token del coordinator'
   }
 });
 
+const artifactEndpoint = 'repos/owner/repo/actions/artifacts/123/zip';
+const artifactArgs = ['api', '--artifact-base64', '-X', 'GET', artifactEndpoint];
+const artifactRequest = { type: 'exec', args: artifactArgs };
+
+function artifactCoordinator() {
+  return new GitHubCoordinator({
+    identity: 'test',
+    token: 'fixture-token',
+    realGh: '/bin/echo',
+    socket: '/tmp/frontaliere-github-coordinator-test.sock',
+  });
+}
+
+test('consegna i byte dell’artefatto come base64 senza esporre URL o credenziali', async (t) => {
+  const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xc0, 0x80]);
+  const coordinator = artifactCoordinator();
+  const target = 'https://blob.example.test/artifact?sig=fixture';
+  const fetch = t.mock.method(globalThis, 'fetch', async (url) => url === target
+    ? new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
+    : new Response(null, { status: 302, headers: { location: target } }));
+  const regular = await coordinator.submit({ type: 'exec', args: ['api', artifactEndpoint] });
+  assert.equal(regular.stdout, bytes.toString('utf8') + '\n');
+  assert.notDeepEqual(Buffer.from(regular.stdout), bytes);
+  const response = await coordinator.submit(artifactRequest);
+  assert.deepEqual(response, {
+    ok: true,
+    exitCode: 0,
+    stdout: JSON.stringify({ encoding: 'base64', size: bytes.length, content: bytes.toString('base64') }) + '\n',
+    stderr: '',
+  });
+  assert.equal(classifyJob(artifactRequest).lane, 'bulk');
+  assert.equal(fetch.mock.calls.length, 4);
+  const [source, redirect] = fetch.mock.calls.slice(2).map((call) => call.arguments);
+  assert.equal(source[0], `https://api.github.com/${artifactEndpoint}`);
+  assert.equal(source[1].headers.authorization, 'Bearer fixture-token');
+  assert.equal(redirect[0], target);
+  assert.equal(redirect[1].method, 'GET');
+  assert.equal(redirect[1].redirect, 'manual');
+  assert.equal(redirect[1].credentials, 'omit');
+  assert.equal(Object.hasOwn(redirect[1].headers, 'authorization'), false);
+  fetch.mock.mockImplementation(async (url) => {
+    if (url === target) throw new Error(`Download failed: ${target}`);
+    return new Response(null, { status: 302, headers: { location: target } });
+  });
+  const failed = await coordinator.submit(artifactRequest);
+  assert.equal(failed.error?.code, 'coordinator_artifact_incomplete');
+  assert.equal(failed.stdout, '');
+  assert.equal(JSON.stringify(failed).includes(target), false);
+});
+
+test('rifiuta redirect artefatto HTTP o con userinfo senza esporre la location', async (t) => {
+  for (const [name, location] of [
+    ['HTTP', 'http://blob.example.test/artifact?sig=fixture-http'],
+    ['username', 'https://fixture-user@blob.example.test/artifact?sig=fixture-userinfo'],
+    ['password', 'https://:fixture-password@blob.example.test/artifact?sig=fixture-password-only'],
+  ]) {
+    await t.test(name, async (t) => {
+      const fetch = t.mock.method(globalThis, 'fetch', async () =>
+        new Response(null, { status: 302, headers: { location } }));
+      const response = await artifactCoordinator().submit(artifactRequest);
+      assert.equal(response.error?.code, 'coordinator_artifact_invalid_response');
+      assert.equal(response.stdout, '');
+      assert.equal(JSON.stringify(response).includes(location), false);
+      assert.equal(fetch.mock.calls.length, 1);
+      assert.equal(fetch.mock.calls[0].arguments[0], `https://api.github.com/${artifactEndpoint}`);
+    });
+  }
+});
+
+test('rifiuta opzioni artefatto incompatibili senza fallback al CLI', async (t) => {
+  const coordinator = artifactCoordinator();
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null));
+  for (const args of [
+    ['api', '--artifact-base64', artifactEndpoint],
+    ['api', '--artifact-base64=yes', '-X', 'GET', artifactEndpoint],
+    ['api', '--artifact-base64', '-X', 'POST', artifactEndpoint],
+    [...artifactArgs.slice(0, -1), artifactEndpoint + '?x=1'],
+    [...artifactArgs.slice(0, -1), artifactEndpoint.replace('/repo/', '/../')],
+    [...artifactArgs.slice(0, -1), 'repos/owner/repo/issues/123'],
+    ...[['--jq', '.'], ['--include'], ['--paginate'], ['--slurp'], ['--input', '-'],
+      ['-f', 'x=y'], ['-H', 'Range: bytes=0-10']].map((flags) => [...artifactArgs, ...flags]),
+  ]) {
+    assert.equal(parseGhApiArguments(args), null);
+    const response = await coordinator.submit({ type: 'exec', args });
+    assert.equal(response.error?.code, 'coordinator_artifact_invalid_arguments');
+    assert.equal(response.stdout, '');
+  }
+  assert.equal(fetch.mock.calls.length, 0);
+  assert.equal(coordinator.metrics.cliCommands, 0);
+});
+
+test('limita l’artefatto prima della serializzazione e rifiuta risposte incomplete', async (t) => {
+  const coordinator = artifactCoordinator();
+  const limit = 256 * 1024;
+  let cancelled = false;
+  const responses = [
+    new Response(Buffer.alloc(limit)),
+    new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.alloc(limit));
+        controller.enqueue(Buffer.of(1));
+      },
+      cancel() { cancelled = true; },
+    })),
+    new Response('short', { headers: { 'content-length': String(limit + 1) } }),
+    new Response('short', { headers: { 'content-length': '6' } }),
+    new Response('partial', { status: 206 }),
+    new Response(null, { status: 302, headers: { location: 'https://github.com/owner/repo' } }),
+  ];
+  const fetch = t.mock.method(globalThis, 'fetch', async () => responses.shift());
+  const exact = JSON.parse((await coordinator.submit(artifactRequest)).stdout);
+  assert.equal(exact.size, limit);
+  assert.deepEqual(Buffer.from(exact.content, 'base64'), Buffer.alloc(limit));
+  for (const code of ['too_large', 'too_large', 'incomplete', 'invalid_response', 'invalid_response']) {
+    const response = await coordinator.submit(artifactRequest);
+    assert.equal(response.error?.code, `coordinator_artifact_${code}`);
+    assert.equal(response.stdout, '');
+  }
+  assert.equal(cancelled, true);
+  assert.equal(fetch.mock.calls.length, 6);
+  assert.equal(fetch.mock.calls[2].arguments[1].signal.aborted, true);
+});
+
+test('il timeout interrompe anche la lettura del body dell’artefatto', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal;
+  const { promise: reading, resolve: startedReading } = Promise.withResolvers();
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    signal = options.signal;
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.of(0x50, 0x4b));
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+      pull() { startedReading(); },
+    }));
+  });
+  const pending = artifactCoordinator().submit(artifactRequest);
+  await reading;
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(30_000);
+  const response = await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(response.error?.code, 'coordinator_artifact_timeout');
+  assert.equal(response.stdout, '');
+});
+
 test('non segue i redirect che restano su github.com o api.github.com', async () => {
   let calls = 0;
   const originalFetch = globalThis.fetch;

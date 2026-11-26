@@ -131,6 +131,11 @@ const configuredMaxBodyBytes = Number(process.env.FRONTALIERE_GH_MAX_BODY_BYTES 
 const MAX_BODY_BYTES = Number.isFinite(configuredMaxBodyBytes) && configuredMaxBodyBytes >= 1024
   ? Math.floor(configuredMaxBodyBytes)
   : 8 * 1024 * 1024;
+const ARTIFACT_BASE64_OPTION = '--artifact-base64';
+// Only validated CLI arguments can set this marker across the JSON socket.
+const ARTIFACT_BASE64 = Symbol('artifactBase64');
+const MAX_ARTIFACT_BYTES = 256 * 1024;
+const ARTIFACT_ZIP_PATH = /^\/repos\/[A-Za-z0-9-]+\/(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/actions\/artifacts\/[0-9]+\/zip$/;
 // The persistent services have exactly these two identities.  Other names are
 // used by isolated coordinator unit fixtures and do not represent a production
 // receiver/token route; they remain deliberately unbound here.
@@ -913,10 +918,18 @@ function declaredBodyBytes(response) {
  * esce da JSON.parse come errore di sintassi e non come errore di trasporto.
  * `bytes` e' la dimensione reale quando GitHub manda `content-length`.
  */
-async function readResponseBody(response) {
-  const declaredBytes = declaredBodyBytes(response);
+async function readResponseBody(response, { artifactBase64 = false } = {}) {
+  const length = artifactBase64 ? response.headers.get('content-length') : null;
+  const declaredBytes = length === null ? declaredBodyBytes(response) : Number(length);
+  if (length !== null && !/^\d+$/.test(length)) {
+    throw new Error('coordinator_artifact_incomplete');
+  }
+  if (artifactBase64 && declaredBytes > MAX_ARTIFACT_BYTES) {
+    throw new Error('coordinator_artifact_too_large');
+  }
   const reader = response?.body?.getReader?.();
   if (!reader) {
+    if (artifactBase64) throw new Error('coordinator_artifact_incomplete');
     const text = String((await response.text()) || '');
     const bytes = Buffer.byteLength(text, 'utf8');
     return bytes <= MAX_BODY_BYTES
@@ -925,6 +938,7 @@ async function readResponseBody(response) {
   }
 
   const chunks = [];
+  const maxBytes = artifactBase64 ? MAX_ARTIFACT_BYTES : MAX_BODY_BYTES;
   let bytes = 0;
   let buffered = 0;
   let truncated = false;
@@ -933,15 +947,19 @@ async function readResponseBody(response) {
     const { done, value } = await reader.read();
     if (done) break;
     if (!value) continue;
+    if (artifactBase64 && bytes + value.byteLength > MAX_ARTIFACT_BYTES) {
+      void reader.cancel().catch(() => {});
+      throw new Error('coordinator_artifact_too_large');
+    }
     const chunk = Buffer.from(value);
     bytes += chunk.length;
-    const remaining = MAX_BODY_BYTES - buffered;
+    const remaining = maxBytes - buffered;
     if (remaining > 0) {
       const keep = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
       chunks.push(keep);
       buffered += keep.length;
     }
-    if (bytes > MAX_BODY_BYTES) {
+    if (bytes > maxBytes) {
       truncated = true;
       // Oltre il cap non teniamo piu' nulla in memoria, ma continuiamo a
       // contare: senza `content-length` (le risposte chunked di GitHub non lo
@@ -955,6 +973,12 @@ async function readResponseBody(response) {
   }
   if (truncated) {
     try { await reader.cancel(); } catch { /* best effort */ }
+  }
+  if (artifactBase64) {
+    if (!bytes || (declaredBytes !== null && declaredBytes !== bytes)) {
+      throw new Error('coordinator_artifact_incomplete');
+    }
+    return { encoding: 'base64', size: bytes, content: Buffer.concat(chunks, bytes).toString('base64') };
   }
   const body = Buffer.concat(chunks).toString('utf8');
   if (!truncated) return { body, truncated: false, bytes };
@@ -1471,12 +1495,29 @@ export function graphqlResponseError(body, status) {
   return parsed.errors.length > 0 ? 'GraphQL errors' : null;
 }
 
+function hasArtifactBase64Option(args) {
+  return Array.isArray(args) && args[0] === 'api'
+    && args.some((arg) => arg === ARTIFACT_BASE64_OPTION || String(arg).startsWith(`${ARTIFACT_BASE64_OPTION}=`));
+}
+
+function artifactCommandError(code, message = code, exitCode = 1) {
+  return { ok: false, exitCode, stdout: '', stderr: `${message}\n`, error: { code, message, exitCode } };
+}
+
 /**
- * Parse the useful, stable subset of `gh api`.  Unknown options fall back to
- * the real CLI so the shim never silently changes an unsupported command.
+ * Parse the useful, stable subset of `gh api`. Unknown options fall back to
+ * the real CLI, except for the coordinator's own artifact option.
  */
 export function parseGhApiArguments(args) {
   if (!Array.isArray(args) || args[0] !== 'api') return null;
+  if (hasArtifactBase64Option(args)) {
+    const [, option, methodOption, method, endpoint] = args;
+    if (args.length !== 5 || option !== ARTIFACT_BASE64_OPTION
+      || methodOption !== '-X' || method !== 'GET' || typeof endpoint !== 'string') return null;
+    const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    if (!ARTIFACT_ZIP_PATH.test(path)) return null;
+    return { path, method, [ARTIFACT_BASE64]: true };
+  }
   let endpoint = null;
   let method = null;
   let jq = null;
@@ -3237,6 +3278,11 @@ export class GitHubCoordinator {
   }
 
   submit(request) {
+    const artifactOption = request?.type === 'exec' && hasArtifactBase64Option(request.args);
+    if (artifactOption && !parseGhApiArguments(request.args)) {
+      return Promise.resolve(artifactCommandError('coordinator_artifact_invalid_arguments',
+        'Uso: api --artifact-base64 -X GET repos/<owner>/<repo>/actions/artifacts/<id>/zip', 2));
+    }
     const dailyBriefWorkflowEnable = dailyBriefWorkflowEnableDetails(request);
     if (dailyBriefWorkflowEnable && request[OWNER_CONFIRMATION] === undefined) {
       return Promise.resolve(this.workflowEnableConfirmationRequired(request, dailyBriefWorkflowEnable));
@@ -3284,6 +3330,7 @@ export class GitHubCoordinator {
     const key = queuedRequest.type === 'api' && isRead ? scopedCacheKeyFor(queuedRequest) : null;
     const isReadCli = queuedRequest.type === 'exec'
       && isRead
+      && !artifactOption
       && !cliCommandWritesLocalOutput((queuedRequest.args || []).map(String));
     const cliKey = isReadCli ? cliCacheKeyFor(queuedRequest) : null;
     const cachedCli = cliKey ? this.cliCache.get(cliKey) : null;
@@ -3753,6 +3800,7 @@ export class GitHubCoordinator {
   }
 
   async executeApi(request, mutationDeadlineAtMs) {
+    const artifactBase64 = request[ARTIFACT_BASE64] === true;
     const hasDeadline = mutationDeadlineAtMs !== undefined;
     const deadlinePassed = () => hasDeadline && Date.now() >= mutationDeadlineAtMs;
     if (deadlinePassed()) return mutationDeadlineError(true);
@@ -3765,7 +3813,7 @@ export class GitHubCoordinator {
     const read = apiRequestIsRead({ ...request, method });
     // A read with ttl 0 is never answered from memory, but it still sends the
     // stored validator: a 304 is current by definition and costs no quota.
-    const cached = read ? this.cache.get(key) : null;
+    const cached = read && !artifactBase64 ? this.cache.get(key) : null;
     if (cached && ttl > 0 && cached.expiresAt > Date.now()) {
       this.metrics.cacheHits += 1;
       this.cacheTouch(key, cached);
@@ -3802,6 +3850,7 @@ export class GitHubCoordinator {
     delete headers.authorization;
     delete headers.Authorization;
     if (!request.anonymous) headers.authorization = `Bearer ${this.token}`;
+    if (artifactBase64) headers['accept-encoding'] = 'identity';
     if (cached?.headers?.etag) headers['if-none-match'] = cached.headers.etag;
     if (cached?.headers?.['last-modified']) headers['if-modified-since'] = cached.headers['last-modified'];
 
@@ -3838,16 +3887,35 @@ export class GitHubCoordinator {
       const redirectTarget = externalRedirectTarget(response, sourceUrl);
       if (redirectTarget) {
         redirected = true;
+        if (artifactBase64) {
+          if (response.body) void response.body.cancel().catch(() => {});
+          const target = new URL(redirectTarget);
+          if (target.protocol !== 'https:' || target.username || target.password) {
+            return artifactCommandError('coordinator_artifact_invalid_response');
+          }
+        }
         if (deadlinePassed()) return mutationDeadlineError(true);
         response = await fetch(redirectTarget, {
           method: 'GET',
           headers: {
             accept: 'application/octet-stream',
             'user-agent': 'frontaliere-github-coordinator',
+            ...(artifactBase64 ? { 'accept-encoding': 'identity' } : {}),
           },
+          ...(artifactBase64 ? { credentials: 'omit' } : {}),
           redirect: 'manual',
           signal: controller.signal,
         });
+      }
+      if (artifactBase64) {
+        this.observeBucket(bucket, observedHeaders(response.headers));
+        const encoding = response.headers.get('content-encoding');
+        if (response.status !== 200 || response.headers.has('content-range')
+          || (encoding && encoding.toLowerCase() !== 'identity')) {
+          return artifactCommandError('coordinator_artifact_invalid_response');
+        }
+        const archive = await readResponseBody(response, { artifactBase64 });
+        return { ok: true, exitCode: 0, stdout: `${JSON.stringify(archive)}\n`, stderr: '' };
       }
       if (hasDeadline) {
         if (deadlinePassed()) return mutationDeadlineError(true);
@@ -3855,6 +3923,13 @@ export class GitHubCoordinator {
         if (deadlinePassed()) return mutationDeadlineError(true);
       }
     } catch (error) {
+      if (artifactBase64) {
+        // Fetch errors can contain the signed redirect URL.
+        const code = controller.signal.aborted ? 'coordinator_artifact_timeout'
+          : error?.message === 'coordinator_artifact_too_large' ? error.message
+            : 'coordinator_artifact_incomplete';
+        return artifactCommandError(code);
+      }
       // A fetch that already started may have applied the write remotely.
       if (deadlinePassed() || (deadlineLimitsTimeout && controller.signal.aborted)) {
         return mutationDeadlineError(true);
@@ -3862,7 +3937,7 @@ export class GitHubCoordinator {
       throw error;
     } finally {
       clearTimeout(timer);
-      if (deadlinePassed()) controller.abort();
+      if (artifactBase64 || deadlinePassed()) controller.abort();
     }
 
     const responseHeaders = observedHeaders(response.headers);
@@ -4063,6 +4138,14 @@ export class GitHubCoordinator {
   }
 
   async executeParsedApi(parsed, { anonymous = false } = {}) {
+    if (parsed[ARTIFACT_BASE64]) {
+      return this.executeApi({
+        method: parsed.method,
+        path: parsed.path,
+        anonymous,
+        [ARTIFACT_BASE64]: true,
+      });
+    }
     const pages = [];
     let path = parsed.path;
     for (let page = 0; page < (parsed.paginate ? MAX_PAGINATED_API_PAGES : 1); page += 1) {
@@ -4469,7 +4552,7 @@ export function classifyJob(request) {
     bucket = classifyCliBucket(args, request?.cwd);
     const invocation = args[0] === 'api' ? cliApiInvocation(args, request?.cwd) : null;
     if (mutation) lane = 'mutation';
-    else if (cliCommandIsBulk(args)) lane = 'bulk';
+    else if (cliCommandIsBulk(args) || invocation?.parsed?.[ARTIFACT_BASE64]) lane = 'bulk';
     else lane = invocation?.parsed ? 'api' : 'cli';
     const explicitRepo = repoScopeFromCliRepo(repoFromCliArguments(args));
     if (explicitRepo) {
